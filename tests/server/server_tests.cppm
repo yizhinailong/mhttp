@@ -22,6 +22,7 @@ import :test.server_multipart;
 import :test.server_proxies;
 import :test.server_streams;
 import :test.server_lazy;
+import :test.server_static;
 
 namespace mhttp::test {
 
@@ -842,6 +843,11 @@ export namespace mhttp::test {
             { "listener incremental streams", server_incremental_streams },
             { "listener committed stream failures", server_failed_streams },
             { "listener stream backpressure", server_stream_backpressure },
+            { "listener static path containment", server_static_paths },
+            { "listener static wire framing", server_static_framing },
+            { "listener static cleanup", server_static_cleanup },
+            { "listener static mutation", server_static_mutation },
+            { "listener static link race", server_static_race },
             { "listener lazy incremental intake", server_lazy_incremental },
             { "listener lazy early rejection", server_lazy_rejection },
             { "listener lazy input failures", server_lazy_failures },
