@@ -153,7 +153,7 @@ auto response_rejected_configuration() -> void {
     Check(response.SetStatus(mhttp::Status::Continue).has_value(), "informational metadata");
     Check(!serialize_server_response(request, response, options), "100 cannot be the sole final buffered response");
     Check(response.SetEmpty(mhttp::Status::Ok).has_value(), "restore final status");
-    for (unsigned scenario{}; scenario < 9; ++scenario) {
+    for (unsigned scenario{}; scenario < 10; ++scenario) {
         options = {};
         switch (scenario) {
         case 0: options.read_timeout = 0ms; break;
@@ -165,6 +165,7 @@ auto response_rejected_configuration() -> void {
         case 6: options.header_fields = 0; break;
         case 7: options.max_response_bytes = 0; break;
         case 8: options.read_timeout = std::chrono::milliseconds::max(); break;
+        case 9: options.max_connections = 0; break;
         }
         auto invalid = serialize_server_response(request, response, options);
         Check(!invalid && invalid.error() == mhttp::Error::InvalidRequest, "invalid options rejected before output allocation");

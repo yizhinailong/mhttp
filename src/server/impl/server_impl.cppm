@@ -319,6 +319,10 @@ namespace mhttp::impl {
                     asio::as_tuple(asio::use_awaitable));
                 if (generation->stopping) { (*connection)->Close(); break; }
                 if (error) { co_return std::unexpected{ Error::Connection }; }
+                if (generation->sessions.size() >= self->m_options.max_connections) {
+                    (*connection)->Close();
+                    continue;
+                }
                 auto session = Session::Create(*connection, self->m_router, self->m_options,
                     self->m_runtime, generation->token);
                 if (!session) { (*connection)->Close(); continue; }

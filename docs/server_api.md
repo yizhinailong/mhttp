@@ -228,7 +228,10 @@ Runtime::Stop 同样会取消监听器和会话，Join 会等待相关操作排�
 Listen(host, port) 组合 Bind、Start 与阻塞等待。Runtime 空闲时，它在当前线程调用 Run，
 服务端排空后停止并 Join 这一次执行代；Runtime 已启动时沿用现有执行线程，返回时不停止 Runtime。
 其他非 I/O 控制线程可调用 Stop 来唤醒 Listen；也可从独立控制 Task 等待 AsyncStop。
-当前尚未提供最大连接数和日志钩子。
+max_connections 默认 1024，必须为正数，统计包括空闲、正在关闭和等待 Offload 排空的已登记会话。
+达到上限后接受到的额外套接字直接关闭，不解析请求、不执行 handler，也不发送 HTTP 响应。
+会话根完成回调从全局 strand 的注册表移除条目后才释放容量；已有 keep-alive 会话继续工作。
+当前尚未提供日志钩子。
 
 对应独立测试为 `tests/server/request_test.cpp`、`response_test.cpp`、
 `request_data_test.cpp`、`handler_test.cpp`、`middleware_test.cpp`、`router_test.cpp`、

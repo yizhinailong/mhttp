@@ -402,6 +402,72 @@ namespace mhttp::test {
         }
     }
 
+    /**
+     * @brief Hold one keep-alive session, reject surplus peers, then observe capacity released after drain.
+     * @param executor Fixture strand independent of the listener and session strands.
+     * @param endpoint Owned dynamic loopback endpoint.
+     */
+    auto server_capacity_scenario(asio::any_io_executor executor, Endpoint endpoint) -> asio::awaitable<void> {
+        auto first = co_await server_peer(executor, endpoint);
+        std::string const persistent = "GET / HTTP/1.1\r\nHost: local\r\n\r\n";
+        co_await asio::async_write(*first, asio::buffer(persistent), asio::use_awaitable);
+        auto reply = co_await receive_one_server(first);
+        std::size_t offset{};
+        CheckEq(parse_session_reply(reply, offset).body, "capacity", "first connection occupies the only slot");
+        for (unsigned index{}; index < 3; ++index) {
+            auto surplus = co_await server_peer(executor, endpoint);
+            Check((co_await receive_server(std::move(surplus))).empty(), "surplus peer closed before request parsing");
+        }
+        co_await asio::async_write(*first, asio::buffer(persistent), asio::use_awaitable);
+        reply = co_await receive_one_server(first);
+        offset = 0;
+        CheckEq(parse_session_reply(reply, offset).body, "capacity", "surplus rejection does not disrupt existing session");
+        first->shutdown(asio::socket_base::shutdown_send);
+        Check((co_await receive_server(std::move(first))).empty(), "idle session drains normally");
+
+        // FIN can reach the peer before the server-strand completion erases the session registry entry.
+        asio::steady_timer retry{ executor };
+        auto const deadline = std::chrono::steady_clock::now() + 1s;
+        bool admitted{};
+        while (!admitted && std::chrono::steady_clock::now() < deadline) {
+            auto peer = co_await server_peer(executor, endpoint);
+            std::string const input = "GET / HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n";
+            auto [error, count] = co_await asio::async_write(*peer, asio::buffer(input), asio::as_tuple(asio::use_awaitable));
+            if (!error && count == input.size()) {
+                auto wire = co_await receive_server(std::move(peer));
+                if (!wire.empty()) {
+                    offset = 0;
+                    CheckEq(parse_session_reply(wire, offset).body, "capacity", "drained slot accepts a new session");
+                    admitted = true;
+                }
+            }
+            if (!admitted) { retry.expires_after(2ms); co_await retry.async_wait(asio::use_awaitable); }
+        }
+        Check(admitted, "capacity becomes available within the bounded drain deadline");
+    }
+
+    /**
+     * @brief Verify the finite session admission bound across a listener restart.
+     */
+    auto server_connection_limit() -> void {
+        Runtime runtime;
+        Check(runtime.Start(4).has_value(), "start capacity runtime");
+        server::HttpServer server{ runtime, { .max_connections = 1 } };
+        std::atomic<int> handlers{};
+        Check(server.Get("/", [&](auto&, auto& response) {
+            ++handlers;
+            Check(response.SetContent("capacity", "text/plain").has_value(), "capacity response");
+        }).has_value(), "register capacity route");
+        TransportRuntime peers;
+        for (unsigned iteration{}; iteration < 2; ++iteration) {
+            Check(server.BindToAnyPort("127.0.0.1").has_value(), "bind limited listener");
+            Check(server.Start().has_value(), "start limited listener");
+            peers.Run(server_capacity_scenario(peers.Executor(), *server.LocalEndpoint()));
+            Check(server.Stop().has_value(), "drain limited listener");
+        }
+        CheckEq(handlers.load(), 6, "only admitted requests execute handlers");
+    }
+
 } // namespace mhttp::test
 
 export namespace mhttp::test {
@@ -420,6 +486,7 @@ export namespace mhttp::test {
             { "listener Offload drain", server_offload_drain },
             { "listener callback isolation", server_callback_isolation },
             { "listener Listen execution", server_listen_execution },
+            { "listener connection limit", server_connection_limit },
         });
     }
 
