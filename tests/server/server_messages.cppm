@@ -155,4 +155,114 @@ namespace mhttp::test {
         Check(server.Stop().has_value(), "drain request body handlers");
     }
 
+    /**
+     * @brief Describe a buffered response after every application mutation and protocol framing decision.
+     */
+    struct ResponseExpectation {
+        std::string_view path; ///< Static origin-form target, alive for the complete test.
+        Status status; ///< Expected final status.
+        std::string_view body; ///< Expected final representation bytes.
+    };
+
+    /**
+     * @brief Verify response mutation results and reject a pipeline successor after application-requested close.
+     * @param executor Independent fixture strand.
+     * @param endpoint Owned loopback listener endpoint.
+     */
+    auto server_response_mutations_scenario(
+        asio::any_io_executor executor,
+        Endpoint endpoint
+    ) -> asio::awaitable<void> {
+        std::vector<ResponseExpectation> const cases{
+            { "/empty/200", Status::Ok, "" },
+            { "/empty/204", Status::NoContent, "" },
+            { "/error", Status::Forbidden, "403 Forbidden\n" },
+            { "/safe", Status::Ok, "safe" },
+            { "/redirect/301", Status::MovedPermanently, "" },
+            { "/redirect/302", Status::Found, "" },
+            { "/redirect/303", Status::SeeOther, "" },
+            { "/redirect/307", Status::TemporaryRedirect, "" },
+        };
+        for (auto const& test : cases) {
+            auto wire = co_await server_exchange(executor, endpoint,
+                std::format("GET {} HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n", test.path));
+            std::size_t offset{};
+            auto reply = parse_session_reply(wire, offset);
+            CheckEq(reply.head.status, test.status, "mutated response final status");
+            CheckEq(reply.body, test.body, "mutated response final body");
+            CheckEq(reply.head.headers.Get("X-Custom"), "kept", "response mutations preserve unrelated application fields");
+            CheckEq(reply.head.headers.Get("Connection"), "close", "explicit closing request disables persistence");
+            Check(!reply.head.headers.Has("Transfer-Encoding"), "buffered response replaces application transfer coding");
+            if (test.status == Status::NoContent) { Check(!reply.head.headers.Has("Content-Length"), "204 has no length field"); }
+            else { CheckEq(reply.head.headers.Get("Content-Length"), std::to_string(test.body.size()), "wire length reflects final representation"); }
+            CheckEq(reply.head.headers.Has("Content-Type"), !test.body.empty(), "empty and redirect responses clear content type");
+            if (test.path.starts_with("/redirect/")) {
+                CheckEq(reply.head.headers.Get("Location"), "/destination?x=one%20two", "valid redirect location survives serialization");
+            } else { Check(!reply.head.headers.Has("Location"), "rejected redirect cannot add Location"); }
+            Check(!wire.contains("Injected"), "rejected CRLF input never reaches wire headers or payload");
+            CheckEq(offset, wire.size(), "response mutation produces exactly one complete HTTP response");
+        }
+        auto wire = co_await server_exchange(executor, endpoint,
+            "GET /close HTTP/1.1\r\nHost: local\r\n\r\nGET /tail HTTP/1.1\r\nHost: local\r\n\r\n");
+        std::size_t offset{};
+        auto closing = parse_session_reply(wire, offset);
+        CheckEq(closing.head.headers.Get("Connection"), "close", "handler-requested close overrides persistent request");
+        CheckEq(closing.body, "closed", "closing response is completely written before FIN");
+        CheckEq(offset, wire.size(), "no pipeline response follows application close");
+    }
+
+    /**
+     * @brief Verify empty/error/redirect mutation, header injection rejection, authoritative framing, and close policy.
+     */
+    auto server_response_mutations() -> void {
+        Runtime runtime;
+        Check(runtime.Start(4).has_value(), "start response mutation runtime");
+        std::atomic<unsigned> tail{};
+        server::HttpServer server{ runtime };
+        Check(server.SetPreRoutingHandler([](auto&, auto& response) -> bool {
+            Check(response.Headers().Set("X-Custom", "kept").has_value(), "add custom field before response mutation");
+            return false;
+        }).has_value(), "register custom response field before mutations");
+        Check(server.Get("/empty/:code", [](auto& request, auto& response) {
+            Check(request.Body().empty(), "bodyless request has an empty Body");
+            Check(response.SetContent("discarded", "text/html").has_value(), "prepare discarded representation");
+            Check(response.SetEmpty(static_cast<Status>(*request.template PathParam<unsigned>("code"))).has_value(),
+                "SetEmpty clears body and media type");
+        }).has_value(), "register empty response mutation");
+        Check(server.Get("/error", [](auto&, auto& response) {
+            Check(response.SetError(Status::Forbidden).has_value(), "SetError prepares safe standard representation");
+        }).has_value(), "register error response mutation");
+        Check(server.Get("/redirect/:code", [](auto& request, auto& response) {
+            Check(response.SetContent("discarded", "text/html").has_value(), "prepare discarded redirect representation");
+            Check(response.SetRedirect("/destination?x=one%20two",
+                static_cast<Status>(*request.template PathParam<unsigned>("code"))).has_value(), "set selected redirect status");
+        }).has_value(), "register redirect response mutation");
+        Check(server.Get("/safe", [](auto&, auto& response) {
+            Check(response.SetContent("safe", "text/plain").has_value(), "prepare valid response before rejected mutations");
+            Check(response.Headers().Set("X-Custom", "kept").has_value(), "prepare valid custom field");
+            CheckEq(response.Headers().Set("X-Custom", "bad\r\nInjected: yes").error(), Error::InvalidHeaders,
+                "reject response field value splitting");
+            CheckEq(response.Headers().Add("Bad\r\nInjected", "yes").error(), Error::InvalidHeaders,
+                "reject response field name splitting");
+            CheckEq(response.SetRedirect("/bad\r\nInjected: yes").error(), Error::InvalidHeaders,
+                "reject redirect splitting without changing status or representation");
+            CheckEq(response.SetContent("bad", "text/plain\r\nInjected: yes").error(), Error::InvalidHeaders,
+                "reject media type splitting without changing representation");
+            CheckEq(response.Header("X-Custom"), "kept", "rejected field replacement preserves previous value");
+            Check(response.Headers().Set("Content-Length", "9999").has_value(), "prepare stale application length");
+            Check(response.Headers().Set("Transfer-Encoding", "chunked").has_value(), "prepare application framing override");
+        }).has_value(), "register rejected response mutation checks");
+        Check(server.Get("/close", [](auto&, auto& response) {
+            Check(response.Headers().Set("Connection", "close").has_value(), "application requests close");
+            Check(response.SetContent("closed", "text/plain").has_value(), "closing response representation");
+        }).has_value(), "register application close response");
+        Check(server.Get("/tail", [&](auto&, auto&) { ++tail; }).has_value(), "register forbidden pipeline successor sentinel");
+        Check(server.BindToAnyPort("127.0.0.1").has_value(), "bind response mutation listener");
+        Check(server.Start().has_value(), "start response mutation listener");
+        TransportRuntime peers;
+        peers.Run(server_response_mutations_scenario(peers.Executor(), *server.LocalEndpoint()));
+        Check(server.Stop().has_value(), "drain response mutation handlers");
+        CheckEq(tail.load(), 0U, "closing response prevents execution of buffered pipeline successor");
+    }
+
 } // namespace mhttp::test

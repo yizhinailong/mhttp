@@ -832,6 +832,7 @@ export namespace mhttp::test {
             { "listener exception concurrency", server_exception_concurrency },
             { "listener request metadata", server_request_metadata },
             { "listener request bodies", server_request_bodies },
+            { "listener response mutations", server_response_mutations },
             { "listener in-flight stop", server_inflight_stop },
             { "listener Offload drain", server_offload_drain },
             { "listener callback isolation", server_callback_isolation },
