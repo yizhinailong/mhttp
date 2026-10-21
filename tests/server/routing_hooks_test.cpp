@@ -266,6 +266,37 @@ auto routing_hook_ownership() -> void {
 }
 
 /**
+ * @brief Finalize parser errors without invoking interception or route aspects, retaining the write lease.
+ */
+auto routing_protocol_error() -> void {
+    mhttp::Runtime runtime;
+    Check(runtime.Start(2).has_value(), "start protocol error runtime");
+    mhttp::server::Router router;
+    std::vector<std::string> trace;
+    Check(router.Use(TraceAspect{ trace, "global" }).has_value(), "protocol error globals");
+    Check(router.SetPreRoutingHandler([&](auto&, auto&) { trace.push_back("pre"); return true; }).has_value(), "protocol error pre hook");
+    Check(router.SetNotFoundHandler([&](auto&, auto&) { trace.push_back("404"); }).has_value(), "protocol error 404 hook");
+    Check(router.SetErrorHandler([&](auto&, auto& response) {
+        trace.push_back("error");
+        CheckEq(response.Status(), mhttp::Status::RequestHeaderFieldsTooLarge, "error hook sees parser status");
+    }).has_value(), "protocol error transformation");
+    Check(router.SetPostRoutingHandler([&](auto&, auto&) { trace.push_back("post"); }).has_value(), "protocol error post hook");
+    auto request = ServerRequestAccess::Create({});
+    mhttp::server::Response response;
+    Check(response.SetError(mhttp::Status::RequestHeaderFieldsTooLarge).has_value(), "prebuilt parser error");
+    {
+        auto prepared = RouterAccess::PrepareError(router);
+        Check(prepared.handled && prepared.lifetime && !prepared.handler, "protocol error bypasses route selection");
+        auto outcome = mhttp::SyncWait(runtime, RouterAccess::Process(prepared, request, response));
+        Check(outcome.send_response && !outcome.failure, "protocol error response finalized");
+        CheckEq(trace, std::vector<std::string>{ "error", "post" }, "only finalization hooks run for parser errors");
+        auto blocked = router.Get("/late", [](auto&, auto&) {});
+        Check(!blocked && blocked.error() == mhttp::Error::Busy, "parser error write retains configuration guard");
+    }
+    Check(router.Get("/late", [](auto&, auto&) {}).has_value(), "parser error lease releases after write");
+}
+
+/**
  * @brief Run bounded hook scenarios.
  * @param argc Argument count.
  * @param argv Borrowed arguments.
@@ -279,5 +310,6 @@ auto main(int argc, char** argv) -> int {
         { "routing error response framing", routing_error_framing },
         { "routing hook configuration guards", routing_hook_guards },
         { "routing hook lazy ownership", routing_hook_ownership },
+        { "routing protocol error finalization", routing_protocol_error },
     });
 }

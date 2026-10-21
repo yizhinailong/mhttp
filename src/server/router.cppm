@@ -329,6 +329,16 @@ export namespace mhttp::detail {
         ) -> Task<PreparedRoute> { return router.m_impl->Prepare(request, response); }
 
         /**
+         * @brief Retain configuration for an already initialized protocol error, bypassing pre-routing.
+         * @param router Borrowed configuration wrapper only during this call.
+         * @return Owned response-write lease; Process still invokes error and post-routing hooks.
+         * @note The caller initializes a sanitized Request and error Response and must close the connection.
+         */
+        static auto PrepareError(server::Router& router) -> PreparedRoute {
+            return router.m_impl->PrepareError();
+        }
+
+        /**
          * @brief Execute a prepared handler or default 404/405 response without borrowing Router.
          * @param route Owned prepared state, moved into this operation.
          * @param request Borrowed through completion.

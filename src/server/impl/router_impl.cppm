@@ -188,13 +188,15 @@ namespace mhttp::impl {
             server::Request& request,
             server::Response& response
         ) -> Task<detail::PreparedRoute> {
-            auto lease = std::make_shared<Lease>(shared_from_this());
-            {
-                std::lock_guard lock{ m_mutex };
-                ++m_readers;
-                lease->active = true;
-            }
-            return prepare(std::move(lease), request, response);
+            return prepare(acquireLease(), request, response);
+        }
+
+        /**
+         * @brief Retain configuration for a prebuilt protocol error without matching or invoking pre-routing.
+         * @return Prepared state; the caller supplies the error response and enforces connection closure.
+         */
+        auto PrepareError() -> detail::PreparedRoute {
+            return { .lifetime = acquireLease(), .handled = true };
         }
 
         /**
@@ -256,6 +258,20 @@ namespace mhttp::impl {
         }
 
     private:
+        /**
+         * @brief Acquire owned reader state synchronously before publishing a lazy Task or prepared response.
+         * @return Registered reader that releases the configuration guard with its final owner.
+         */
+        auto acquireLease() -> std::shared_ptr<Lease> {
+            auto lease = std::make_shared<Lease>(shared_from_this());
+            {
+                std::lock_guard lock{ m_mutex };
+                ++m_readers;
+                lease->active = true;
+            }
+            return lease;
+        }
+
         /**
          * @brief Preserve cancellation as control flow instead of converting runtime shutdown into HTTP 500.
          * @param failure Optional callback exception.
