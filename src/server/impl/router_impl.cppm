@@ -44,6 +44,7 @@ namespace mhttp::impl {
         std::vector<detail::HttpMiddleware> m_middleware; ///< Global aspects, immutable while readers exist.
         std::shared_ptr<detail::HttpHandler const> m_not_found; ///< Optional 404 handler with its own aspects.
         std::shared_ptr<detail::HttpHandler const> m_error_handler; ///< Optional final error response transformation.
+        std::shared_ptr<detail::HttpExceptionHandler const> m_exception_handler; ///< Optional exception response customization.
         std::shared_ptr<detail::HttpDecision const> m_pre_routing; ///< Optional interception before path selection.
         std::shared_ptr<detail::HttpHandler const> m_post_routing; ///< Optional final response mutation hook.
         std::size_t m_next_id{}; ///< Next opaque binding identifier.
@@ -87,6 +88,15 @@ namespace mhttp::impl {
          */
         auto SetErrorHandler(detail::HttpHandler handler) -> Result<void> {
             return replaceCallback(m_error_handler, std::move(handler));
+        }
+
+        /**
+         * @brief Replace the handler for contained callback exceptions.
+         * @param handler Owned callback receiving the original exception pointer.
+         * @return Success, AlreadyRunning, or Busy.
+         */
+        auto SetExceptionHandler(detail::HttpExceptionHandler handler) -> Result<void> {
+            return replaceCallback(m_exception_handler, std::move(handler));
         }
 
         /**
@@ -188,44 +198,45 @@ namespace mhttp::impl {
         }
 
         /**
-         * @brief Wrap route execution or default 404/405 generation in ordered global aspects.
+         * @brief Contain callback exceptions, finalize the response, and return an explicit connection policy.
          * @param route Owned callback and configuration lease, retained in the coroutine frame.
          * @param request Borrowed until the complete handler/aspect chain finishes.
          * @param response Borrowed for response mutation through the same lifetime.
-         * @note Exceptions propagate to the session boundary. Keep another prepared lease through writes
-         *       when execution completes before the session releases its final route reference.
+         * @return Final connection policy; cancellation still propagates to the session boundary.
+         * @note Keep another prepared lease through writes when execution completes before the session
+         *       releases its final route reference. Allocation failures may still propagate.
          */
         static auto Process(
             detail::PreparedRoute route,
             server::Request& request,
             server::Response& response
-        ) -> Task<void> {
+        ) -> Task<detail::RoutingOutcome> {
             auto& owner = *std::static_pointer_cast<Lease>(route.lifetime)->owner;
-            if (!route.handled) {
-                bool proceed{ true };
-                for (auto const& middleware : owner.m_middleware) {
-                    if (!co_await middleware.before(request, response)) { proceed = false; break; }
-                }
-                if (proceed) {
-                    if (route.handler) { co_await (*route.handler)(request, response); }
-                    else {
-                        static_cast<void>(response.SetError(route.match.status));
-                        if (!route.match.allow.empty()) {
-                            static_cast<void>(response.Headers().Set("Allow", route.match.allow));
-                        }
-                    }
-                    if (response.Status() == Status::NotFound && owner.m_not_found) {
-                        co_await (*owner.m_not_found)(request, response);
-                    }
-                }
-                for (auto const& middleware : owner.m_middleware) {
-                    if (!co_await middleware.after(request, response)) { break; }
-                }
+            detail::RoutingOutcome result{ .failure = route.failure };
+            if (!result.failure && !route.handled) {
+                try { co_await owner.processRoute(route, request, response); }
+                catch (...) { result.failure = std::current_exception(); }
             }
+            if (result.failure) {
+                result.close = true;
+                result.failure = co_await owner.processException(result.failure, request, response, true);
+            }
+            std::exception_ptr error_failure;
             if (static_cast<unsigned>(response.Status()) >= 400 && owner.m_error_handler) {
-                co_await (*owner.m_error_handler)(request, response);
+                try { co_await (*owner.m_error_handler)(request, response); }
+                catch (...) { error_failure = std::current_exception(); }
             }
-            if (owner.m_post_routing) { co_await (*owner.m_post_routing)(request, response); }
+            if (error_failure) {
+                auto const invoke_handler = !result.close;
+                result.close = true;
+                result.failure = co_await owner.processException(error_failure, request, response, invoke_handler);
+            }
+            if (owner.m_post_routing) {
+                try { co_await (*owner.m_post_routing)(request, response); }
+                catch (...) { result.failure = std::current_exception(); result.close = true; result.send_response = false; }
+                rethrowCancellation(result.failure);
+            }
+            co_return result;
         }
 
         /**
@@ -233,17 +244,94 @@ namespace mhttp::impl {
          * @param pending Owned preparation Task that already holds its configuration lease.
          * @param request Borrowed through completion.
          * @param response Borrowed through completion.
+         * @return Finalized response and connection policy.
          */
         static auto Dispatch(
             Task<detail::PreparedRoute> pending,
             server::Request& request,
             server::Response& response
-        ) -> Task<void> {
+        ) -> Task<detail::RoutingOutcome> {
             auto route = co_await std::move(pending);
-            co_await Process(std::move(route), request, response);
+            co_return co_await Process(std::move(route), request, response);
         }
 
     private:
+        /**
+         * @brief Preserve cancellation as control flow instead of converting runtime shutdown into HTTP 500.
+         * @param failure Optional callback exception.
+         * @throws std::system_error If the original failure has Error::Canceled.
+         */
+        static auto rethrowCancellation(std::exception_ptr const& failure) -> void {
+            if (!failure) { return; }
+            try { std::rethrow_exception(failure); }
+            catch (std::system_error const& error) { if (error.code() == Error::Canceled) { throw; } }
+            catch (...) {}
+        }
+
+        /**
+         * @brief Execute the global/route layers without catching or resuming after callback failures.
+         * @param route Prepared route borrowed from the owning Process frame.
+         * @param request Borrowed until all aspects and handlers finish.
+         * @param response Borrowed mutable response.
+         */
+        auto processRoute(
+            detail::PreparedRoute const& route,
+            server::Request& request,
+            server::Response& response
+        ) -> Task<void> {
+            bool proceed{ true };
+            for (auto const& middleware : m_middleware) {
+                if (!co_await middleware.before(request, response)) { proceed = false; break; }
+            }
+            if (proceed) {
+                if (route.handler) { co_await (*route.handler)(request, response); }
+                else {
+                    static_cast<void>(response.SetError(route.match.status));
+                    if (!route.match.allow.empty()) {
+                        static_cast<void>(response.Headers().Set("Allow", route.match.allow));
+                    }
+                }
+                if (response.Status() == Status::NotFound && m_not_found) {
+                    co_await (*m_not_found)(request, response);
+                }
+            }
+            for (auto const& middleware : m_middleware) {
+                if (!co_await middleware.after(request, response)) { break; }
+            }
+        }
+
+        /**
+         * @brief Replace partial output with a safe 500 and contain a failing exception callback without recursion.
+         * @param failure Owned original exception.
+         * @param request Borrowed request.
+         * @param response Borrowed response, reset before customization.
+         * @param invoke_handler Whether this is the first exception boundary for this response.
+         * @return Original failure, or the exception callback's failure if customization failed.
+         * @note The outer Process frame owns this router through the prepared lease.
+         */
+        auto processException(
+            std::exception_ptr failure,
+            server::Request& request,
+            server::Response& response,
+            bool invoke_handler
+        ) -> Task<std::exception_ptr> {
+            rethrowCancellation(failure);
+            response = server::Response{};
+            static_cast<void>(response.SetError(Status::InternalServerError));
+            if (invoke_handler && m_exception_handler) {
+                std::exception_ptr secondary;
+                try { co_await (*m_exception_handler)(request, response, failure); }
+                catch (...) { secondary = std::current_exception(); }
+                if (secondary) {
+                    rethrowCancellation(secondary);
+                    response = server::Response{};
+                    static_cast<void>(response.SetError(Status::InternalServerError));
+                    failure = std::move(secondary);
+                }
+            }
+            co_return failure;
+        }
+
         /**
          * @brief Replace callback ownership while retiring user resources after releasing the mutex.
          * @tparam F Type-erased callback type.
@@ -275,15 +363,22 @@ namespace mhttp::impl {
             server::Response& response
         ) -> Task<detail::PreparedRoute> {
             auto& owner = *lease->owner;
-            detail::ServerRequestAccess::SetPathParams(request, {});
-            if (owner.m_pre_routing && co_await (*owner.m_pre_routing)(request, response)) {
-                co_return detail::PreparedRoute{ .lifetime = std::move(lease), .handled = true };
+            detail::PreparedRoute route{ .lifetime = std::move(lease) };
+            try {
+                detail::ServerRequestAccess::SetPathParams(request, {});
+                if (owner.m_pre_routing && co_await (*owner.m_pre_routing)(request, response)) {
+                    route.handled = true;
+                } else {
+                    route.match = owner.m_tree.Match(request.MethodString(), detail::ServerRequestAccess::EncodedPath(request));
+                    if (route.match.handler) { route.handler = std::as_const(owner.m_handlers).at(*route.match.handler); }
+                    detail::ServerRequestAccess::SetPathParams(request, std::move(route.match.params));
+                }
+            } catch (...) {
+                route.failure = std::current_exception();
+                route.handled = true;
             }
-            auto match = owner.m_tree.Match(request.MethodString(), detail::ServerRequestAccess::EncodedPath(request));
-            std::shared_ptr<detail::HttpHandler const> handler;
-            if (match.handler) { handler = std::as_const(owner.m_handlers).at(*match.handler); }
-            detail::ServerRequestAccess::SetPathParams(request, std::move(match.params));
-            co_return detail::PreparedRoute{ std::move(match), std::move(handler), std::move(lease) };
+            rethrowCancellation(route.failure);
+            co_return route;
         }
     };
 

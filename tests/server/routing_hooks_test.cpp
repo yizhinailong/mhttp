@@ -202,6 +202,7 @@ auto routing_hook_guards() -> void {
     std::vector<std::function<mhttp::Result<void>()>> setters{
         [&] { return router.SetNotFoundHandler([](auto&, auto&) {}); },
         [&] { return router.SetErrorHandler([](auto&, auto&) {}); },
+        [&] { return router.SetExceptionHandler([](auto&, auto&, std::exception_ptr) {}); },
         [&] { return router.SetPreRoutingHandler([](auto&, auto&) { return false; }); },
         [&] { return router.SetPostRoutingHandler([](auto&, auto&) {}); },
     };

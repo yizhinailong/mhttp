@@ -98,7 +98,8 @@ aspect 可提供 Before、After 或两者，返回 bool 或 Task<bool>。
 执行顺序为所有 Before、handler、所有 After，Before 和 After 各自都按注册顺序执行。
 Before 返回 false 时跳过后续 Before 与 handler，保留已写入的响应，然后执行全部已注册 After，
 包括 Before 未被调用的 aspect。After 返回 false 时跳过余下 After。
-异常原样传播并跳过后续阶段，包括等待被取消时抛出的异常；500 响应由后续会话层处理。
+内部适配器将异常原样向外传播并跳过后续 aspect。
+Router 的处理边界生成安全的异常响应并通知会话关闭；等待被取消时抛出的异常继续向上传播。
 
 适配器返回的 Task 在初始挂起前就持有稳定的回调状态，所以可以先销毁适配器再等待 Task。
 丢弃未开始的 Task、正常完成或取消都会释放状态；引用捕获仍要求其对象活到整个 Task 结束。
@@ -127,12 +128,27 @@ Use 遵循与路由注册相同的冻结和配置使用权守卫，传入的一�
 它可以修改状态、头部和 body，修改状态不会递归调用错误处理器。
 `SetPostRoutingHandler` 在错误处理器之后调用一次，可给正常、错误和提前处理的响应统一加头。
 二者支持同步 void 和 Task<void>，序列化在所有响应修改完成后重新计算分帧。
-钩子抛出的异常目前传播到会话边界，不会重复调用 post-routing；异常响应处理将在下一步接入。
+
+`SetExceptionHandler` 接受同步 void 或 Task<void> 回调，参数为 Request&、Response&
+和按值传入的 `std::exception_ptr`。路由、aspect、pre-routing、自定义 404 或错误钩子抛异常时，
+Router 清除未完成的响应，先设置纯文本 500，再调用异常钩子。
+可以用 `std::rethrow_exception` 取得原异常并自定义响应；改成成功状态也仍须关闭连接。
+默认响应不会把异常消息放入头部或 body。
+
+异常钩子每个响应最多调用一次，它自己失败时恢复安全的 500，不会递归调用。
+随后错误钩子与 post-routing 各最多运行一次；错误钩子自己的失败同样被隔离，
+已经调用过的异常/错误钩子不会重入。post-routing 失败则要求关闭连接而不写回部分响应。
+Error::Canceled 保持为取消控制流，不转成 500，也不会继续调用尚未进入的响应钩子。
+响应分帧、关闭连接与实际网络写入由后续会话层执行。
+
+内部准备结果保存配置使用权及准备异常，异常发生时不再读取请求 body；
+处理结果 RoutingOutcome 给出是否可以发送响应、是否强制关闭，以及可供记录的异常。
+会话必须遵守该关闭策略，即使应用填写了 `Connection: keep-alive`。
 
 以上 setter 都替换先前的对应钩子，旧资源在配置锁外释放，遵循相同的冻结/使用权守卫。
 钩子可拥有只可移动的对象；异步调用仍遵循 Request、Response 和引用捕获的借用生命周期约束。
 
 对应独立测试为 `tests/server/request_test.cpp`、`response_test.cpp`、
-`request_data_test.cpp`、`handler_test.cpp`、`middleware_test.cpp`、`router_test.cpp` 和
-`routing_hooks_test.cpp`，覆盖数据所有权、错误拒绝、分帧衔接、
+`request_data_test.cpp`、`handler_test.cpp`、`middleware_test.cpp`、`router_test.cpp`、
+`routing_hooks_test.cpp` 和 `exception_test.cpp`，覆盖数据所有权、错误拒绝、分帧衔接、
 类型化参数、并发上下文、调用顺序、短路、异常、注册替换、配置冻结、惰性所有权与取消清理。

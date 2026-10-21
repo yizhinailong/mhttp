@@ -318,10 +318,8 @@ auto router_failure_cleanup() -> void {
     Check(runtime.Start(2).has_value(), "start failure routing runtime");
     mhttp::server::Router router;
     Check(router.Get("/throw", [](auto&, auto&) { throw 42; }).has_value(), "throwing route");
-    bool caught{};
-    try { static_cast<void>(dispatch(runtime, router, "GET", "/throw")); }
-    catch (int value) { caught = value == 42; }
-    Check(caught, "arbitrary callback exceptions reach the session boundary");
+    auto failed = dispatch(runtime, router, "GET", "/throw");
+    CheckEq(failed.Status(), mhttp::Status::InternalServerError, "arbitrary callback exceptions become 500");
     Check(router.Get("/after", [](auto&, auto&) {}).has_value(), "exception releases reader");
     std::latch entered{ 1 };
     Check(router.Get("/cancel", [&entered](auto&, auto&) -> mhttp::Task<void> {

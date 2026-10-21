@@ -65,7 +65,7 @@ export namespace mhttp::server {
          * @return Success, AlreadyRunning while frozen, or Busy while requests are prepared.
          * @note Before false skips later Before and route execution, then runs every global After.
          *       Both phases run in registration order. After false skips the remaining global After.
-         *       Exceptions skip every later phase and propagate to the session boundary.
+         *       Exceptions skip later aspects and enter the router's exception response boundary.
          */
         template <typename... Aspects>
             requires (sizeof...(Aspects) > 0) && (detail::HttpAspect<std::decay_t<Aspects>> && ...)
@@ -107,6 +107,21 @@ export namespace mhttp::server {
         }
 
         /**
+         * @brief Replace exception response customization, called at most once per response before post-routing.
+         * @tparam F Synchronous void or Task<void> callback.
+         * @param handler Owned callback accepting Request&, Response&, and std::exception_ptr by value.
+         * @return Success, AlreadyRunning, or Busy.
+         * @note Partial output is replaced by a plain 500 before invocation. The callback may change
+         *       the response, but the connection must still close. Its own failure restores a safe 500
+         *       without recursion. Cancellation propagates; a post-routing failure closes without writing.
+         */
+        template <typename F>
+            requires detail::HttpExceptionFunction<std::decay_t<F>>
+        [[nodiscard]] auto SetExceptionHandler(F&& handler) -> Result<void> {
+            return m_impl->SetExceptionHandler(detail::make_http_exception_handler(std::forward<F>(handler)));
+        }
+
+        /**
          * @brief Replace interception before route matching and body consumption.
          * @tparam F Callback returning bool or Task<bool>.
          * @param handler Owned callback accepting Request& and Response&.
@@ -126,8 +141,8 @@ export namespace mhttp::server {
          * @tparam F Synchronous void or Task<void> callback.
          * @param handler Owned callback accepting Request& and Response&.
          * @return Success, AlreadyRunning, or Busy.
-         * @note Applies to intercepted, missing, and matched requests. Exceptions propagate without
-         *       invoking post-routing again; serialization recomputes framing after this hook returns.
+         * @note Applies to intercepted, missing, and matched requests. Its failure requires closing
+         *       without writing and never invokes post-routing again. Serialization follows successful completion.
          */
         template <typename F>
             requires detail::HttpHandlerFunction<std::decay_t<F>>
@@ -318,26 +333,26 @@ export namespace mhttp::detail {
          * @param route Owned prepared state, moved into this operation.
          * @param request Borrowed through completion.
          * @param response Borrowed through completion.
-         * @return Lazy execution Task, propagating callback exceptions to the session.
+         * @return Lazy execution Task with finalized response/connection policy; cancellation propagates.
          */
         static auto Process(
             PreparedRoute route,
             server::Request& request,
             server::Response& response
-        ) -> Task<void> { return impl::RouterImpl::Process(std::move(route), request, response); }
+        ) -> Task<RoutingOutcome> { return impl::RouterImpl::Process(std::move(route), request, response); }
 
         /**
          * @brief Prepare and execute in one operation, primarily for in-process tests and adapters.
          * @param router Borrowed only during operation creation.
          * @param request Borrowed through completion.
          * @param response Borrowed through completion.
-         * @return Task already retaining configuration ownership before initial suspension.
+         * @return Task already retaining configuration ownership before initial suspension, with response policy.
          */
         static auto Dispatch(
             server::Router& router,
             server::Request& request,
             server::Response& response
-        ) -> Task<void> {
+        ) -> Task<RoutingOutcome> {
             return impl::RouterImpl::Dispatch(router.m_impl->Prepare(request, response), request, response);
         }
     };

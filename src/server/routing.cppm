@@ -21,6 +21,19 @@ export namespace mhttp::detail {
         std::shared_ptr<HttpHandler const> handler; ///< Stable selected callback, absent for 404/405.
         std::shared_ptr<void> lifetime; ///< Type-erased configuration lease, also owning the router state.
         bool handled{}; ///< Pre-routing produced the response; skip matching, body intake, and route aspects.
+        std::exception_ptr failure; ///< Preparation failure deferred to processing without reading the body.
+    };
+
+    /**
+     * @brief Tell a session whether a finalized response can be sent and whether persistence is allowed.
+     * @note Callback exceptions always require close, even if the exception handler changes status.
+     *       A failed post-routing hook forbids writing a partly finalized response. Cancellation propagates.
+     * @internal
+     */
+    struct RoutingOutcome {
+        bool close{}; ///< Close after the response, irrespective of application Connection headers.
+        bool send_response{ true }; ///< False when post-routing failed; close without attempting a response.
+        std::exception_ptr failure; ///< Last contained callback failure, available for logging.
     };
 
 } // namespace mhttp::detail

@@ -126,7 +126,7 @@ auto middleware_short_circuit() -> void {
 }
 
 /**
- * @brief Propagate exceptions from either layer without executing later callbacks or leaking a reader.
+ * @brief Contain exceptions from either layer without executing later aspects or leaking a reader.
  */
 auto middleware_exceptions() -> void {
     mhttp::Runtime runtime;
@@ -139,10 +139,8 @@ auto middleware_exceptions() -> void {
             trace.push_back("handler");
             if (scenario == 2) { throw std::range_error{ "handler" }; }
         }, TraceAspect{ trace, "r", true, true, scenario == 1, scenario == 3 }).has_value(), "throwing route configuration");
-        bool caught{};
-        try { static_cast<void>(run(runtime, router)); }
-        catch (std::range_error const&) { caught = true; }
-        Check(caught, "aspect/handler exception reaches boundary");
+        auto response = run(runtime, router);
+        CheckEq(response.Status(), mhttp::Status::InternalServerError, "aspect/handler exception becomes 500");
         std::vector<std::string> expected{ "g.before", "r.before", "handler", "r.after", "g.after" };
         expected.resize(scenario + 1);
         CheckEq(trace, expected, "exception skips all later stages including outer After");
