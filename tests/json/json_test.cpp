@@ -133,6 +133,91 @@ auto json_http_round_trips() -> void {
 }
 
 /**
+ * @brief Exercise every JSON shortcut, synchronous ownership, field precedence, and failure without network dispatch.
+ */
+auto json_client_shortcuts() -> void {
+    mhttp::Runtime runtime;
+    Check(runtime.Start(4).has_value(), "start JSON shortcut runtime");
+    mhttp::server::HttpServer server{ runtime };
+    std::atomic<unsigned> calls{};
+    for (auto method : { mhttp::Method::Get, mhttp::Method::Head, mhttp::Method::Post, mhttp::Method::Put,
+                         mhttp::Method::Patch, mhttp::Method::Delete, mhttp::Method::Options }) {
+        Check(server.Route(method, "/shortcut", [&calls](auto& request, auto& response) {
+            ++calls;
+            Check(response.Headers().Set("X-Method", request.MethodString()).has_value(), "echo JSON method");
+            Check(response.Headers().Set("X-Type", request.ContentType()).has_value(), "echo JSON request media type");
+            Check(response.Headers().Set("X-Target", request.Target()).has_value(), "echo JSON request target");
+            Check(response.Headers().Set("X-Body-Bytes", std::to_string(request.Body().size())).has_value(), "echo JSON body size even for HEAD");
+            Check(response.Headers().Set("X-Explicit", request.Header("X-Explicit")).has_value(), "echo explicit JSON fields");
+            Check(response.SetContent(request.Body(), "application/json").has_value(), "echo serialized JSON bytes");
+        }).has_value(), "register JSON shortcut method");
+    }
+    auto port = server.BindToAnyPort("127.0.0.1");
+    Check(port && server.Start() && server.WaitUntilReady(), "start JSON shortcut loopback peer");
+    mhttp::client::ClientOptions options;
+    Check(options.default_headers.Set("Content-Type", "text/plain").has_value(), "JSON media type overrides client defaults");
+    Check(options.default_headers.Set("X-Explicit", "default").has_value(), "set overridden fallback field");
+    mhttp::client::HttpClient client{ runtime, "127.0.0.1", *port, std::move(options) };
+    mhttp::QueryParams query;
+    query.Add("tag", "one two");
+    query.Add("tag", "a/b");
+    mhttp::Headers headers;
+    Check(headers.Set("X-Explicit", "supplied").has_value(), "set explicit JSON field");
+    mhttp::Json value{ { "message", "owned 你好" }, { "array", mhttp::Json::array({ 1, false, nullptr }) } };
+    auto expected = value.dump();
+    auto path = "/shortcut?base=1#local";
+    auto tasks = std::array{
+        client.Get(path, value, query, headers), client.Head(path, value, query, headers),
+        client.Post(path, value, query, headers), client.Put(path, value, query, headers),
+        client.Patch(path, value, query, headers), client.Delete(path, value, query, headers),
+        client.Options(path, value, query, headers),
+    };
+    value.clear();
+    Check(!client.IsOpen() && calls == 0, "serializing JSON shortcuts does not start network I/O");
+    std::optional<mhttp::Endpoint> connection;
+    std::size_t index{};
+    for (auto& task : tasks) {
+        auto result = mhttp::SyncWait(runtime, std::move(task));
+        if (!Check(result.has_value(), "JSON shortcut completes")) { ++index; continue; }
+        constexpr auto METHODS = std::array{ "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS" };
+        CheckEq(result->Header("X-Method"), METHODS[index], "selected JSON overload sends the requested method");
+        CheckEq(result->Body(), index == 1 ? std::string{} : expected, "JSON input is owned before Task suspension; HEAD omits response bytes");
+        CheckEq(result->Header("X-Body-Bytes"), std::to_string(expected.size()), "HEAD and ordinary methods carry the complete JSON request body");
+        CheckEq(result->Header("X-Type"), "application/json"sv, "JSON fallback overrides default media type");
+        CheckEq(result->Header("X-Target"), "/shortcut?base=1&tag=one+two&tag=a%2Fb"sv, "JSON overload retains ordered query encoding and drops fragment");
+        CheckEq(result->Header("X-Explicit"), "supplied"sv, "JSON overload retains explicit header precedence");
+        if (connection) { CheckEq(result->LocalEndpoint(), *connection, "JSON shortcuts reuse the framed connection"); }
+        else { connection = result->LocalEndpoint(); }
+        ++index;
+    }
+    CheckEq(calls.load(), 7U, "all seven JSON methods dispatch exactly once");
+    for (auto type : { "application/merge-patch+json", "" }) {
+        mhttp::Headers explicit_type;
+        Check(explicit_type.Set("Content-Type", type).has_value(), "supply explicit JSON Content-Type override");
+        auto result = mhttp::SyncWait(runtime, client.Patch("/shortcut", mhttp::Json::object(), {}, explicit_type));
+        Check(result && result->Header("X-Type") == type && result->Body() == "{}", "explicit JSON media type wins even when empty");
+    }
+    mhttp::OrderedJson ordered;
+    ordered["z"] = 1;
+    ordered["a"] = 2;
+    auto ordered_task = client.Post("/shortcut", ordered);
+    ordered.clear();
+    auto ordered_result = mhttp::SyncWait(runtime, std::move(ordered_task));
+    Check(ordered_result && ordered_result->Body() == "{\"z\":1,\"a\":2}", "JSON shortcuts support insertion-ordered values with independent lifetime");
+    auto count = calls.load();
+    mhttp::Json invalid = std::string{ "invalid\xff" };
+    auto rejected = mhttp::SyncWait(runtime, client.Post("/shortcut", invalid));
+    Check(!rejected && rejected.error() == mhttp::Error::InvalidRequest && calls == count, "serialization failure returns a recoverable result without dispatch");
+    Check(client.IsOpen(), "failed JSON construction preserves the existing connection");
+    auto scalar = mhttp::SyncWait(runtime, client.Post("/shortcut", mhttp::Json(true)));
+    Check(scalar && scalar->Body() == "true" && scalar->LocalEndpoint() == *connection, "temporary scalar JSON and post-failure connection reuse work");
+    auto raw = mhttp::SyncWait(runtime, client.Post("/shortcut", "raw body", "text/plain"));
+    Check(raw && raw->Body() == "raw body" && raw->Header("X-Type") == "text/plain", "string overload keeps raw body semantics");
+    auto query_only = mhttp::SyncWait(runtime, client.Get("/shortcut", query));
+    Check(query_only && query_only->Body().empty() && query_only->Header("X-Target") == "/shortcut?tag=one+two&tag=a%2Fb", "QueryParams overload remains distinct from JSON");
+}
+
+/**
  * @brief Run optional JSON consumer acceptance independently of the feature-free test suite.
  * @param argc Argument count.
  * @param argv Optional filters.
@@ -143,5 +228,6 @@ auto main(int argc, char* argv[]) -> int {
         { "optional JSON readers", json_readers },
         { "optional JSON writers", json_writers },
         { "optional JSON HTTP round trips", json_http_round_trips },
+        { "optional JSON client shortcuts", json_client_shortcuts },
     });
 }

@@ -2,7 +2,7 @@
 
 默认 `import mhttp;` 不依赖 JSON 实现。启用 `json` feature 后，显式导入 `mhttp.json`，
 可使用 `mhttp::Json` / `OrderedJson`、服务端 Request::Json / Response::SetJson，
-以及客户端 Request::SetJson / Response::Json。
+以及客户端 Request::SetJson / Response::Json 和七种方法的 JSON 请求重载。
 
 消费者通过 mcpp 启用依赖的 feature，例如：
 
@@ -41,6 +41,19 @@ InvalidRequest；重复 Content-Type 返回 InvalidHeaders。原始 NUL 字节�
 SetJson 同步生成完整 JSON 字符串，设置 Content-Type: application/json，保留响应状态码。
 Json 与 OrderedJson 均可写入；后者保留对象成员顺序。非法 UTF-8 等序列化失败返回 InvalidRequest，
 保留原 body、字段和状态。调用完成后不借用 JSON 输入，分配失败等非 JSON 异常继续传播。
+
+HttpClient 的 Get / Head / Post / Put / Patch / Delete / Options 均接受
+`(path, Json 或 OrderedJson, query = {}, headers = {})`。例如：
+
+```cpp
+auto task = client.Post("/users", mhttp::Json{ { "name", "Ada" } });
+auto response = co_await std::move(task);
+```
+
+请求重载在返回 Task 前同步序列化，原 JSON 无需存活到异步操作完成。
+默认使用 application/json；显式 headers 的 Content-Type 优先，包括空字段值。
+JSON 序列化失败产生 InvalidRequest Task，不发起网络 I/O，也不关闭已有连接。
+字符串重载仍传输原始字节；仅精确 Json / OrderedJson 类型启用 JSON 重载，不隐式转换字符串或标量。
 
 `tests/core/json_support_test.cpp` 验证仅导入 mhttp 不会隐式启用 JSON 接口。
 `python tools/check_json.py` 在独立消费者工程中从依赖侧开启 feature，运行有锁文件的测试，

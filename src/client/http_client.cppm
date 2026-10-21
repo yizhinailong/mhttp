@@ -165,6 +165,27 @@ export namespace mhttp::client {
         }
 
         /**
+         * @brief Send GET with optional JSON serialized before the lazy exchange is issued.
+         * @tparam T Exact Json or OrderedJson type supplied by the optional JSON module.
+         * @tparam Adapter Deferred implementation available after importing mhttp.json.
+         * @param path Owned origin-form target, or empty for the constructor URL target.
+         * @param value Borrowed JSON tree; no reference survives this synchronous call.
+         * @param query Owned additional ordered parameters.
+         * @param headers Explicit fields; a supplied Content-Type overrides application/json.
+         * @return Lazy complete-response Task, or InvalidRequest for serialization failure without I/O.
+         */
+        template <typename T, typename Adapter = detail::JsonAdapter<>>
+            requires detail::JsonValue<T, Adapter>
+        [[nodiscard]] auto Get(
+            std::string path,
+            T const& value,
+            QueryParams query = {},
+            Headers headers = {}
+        ) -> Task<Result<Response>> {
+            return sendJsonRequest<T, Adapter>(Method::Get, std::move(path), value, std::move(query), std::move(headers));
+        }
+
+        /**
          * @brief Send HEAD with an owned target, ordered query parameters, and explicit fields.
          * @param path Origin-form target; empty uses the constructor URL target.
          * @param query Additional parameters, copied or moved before initial suspension.
@@ -196,6 +217,27 @@ export namespace mhttp::client {
             Headers headers = {}
         ) -> Task<Result<Response>> {
             return sendRequest(Method::Head, std::move(path), std::move(query), std::move(headers), std::move(body), content_type);
+        }
+
+        /**
+         * @brief Send HEAD with optional JSON serialized before the lazy exchange is issued.
+         * @tparam T Exact Json or OrderedJson type supplied by the optional JSON module.
+         * @tparam Adapter Deferred implementation available after importing mhttp.json.
+         * @param path Owned origin-form target, or empty for the constructor URL target.
+         * @param value Borrowed JSON tree; no reference survives this synchronous call.
+         * @param query Owned additional ordered parameters.
+         * @param headers Explicit fields; a supplied Content-Type overrides application/json.
+         * @return Lazy complete-response Task, or InvalidRequest for serialization failure without I/O.
+         */
+        template <typename T, typename Adapter = detail::JsonAdapter<>>
+            requires detail::JsonValue<T, Adapter>
+        [[nodiscard]] auto Head(
+            std::string path,
+            T const& value,
+            QueryParams query = {},
+            Headers headers = {}
+        ) -> Task<Result<Response>> {
+            return sendJsonRequest<T, Adapter>(Method::Head, std::move(path), value, std::move(query), std::move(headers));
         }
 
         /**
@@ -233,6 +275,27 @@ export namespace mhttp::client {
         }
 
         /**
+         * @brief Send POST with optional JSON serialized before the lazy exchange is issued.
+         * @tparam T Exact Json or OrderedJson type supplied by the optional JSON module.
+         * @tparam Adapter Deferred implementation available after importing mhttp.json.
+         * @param path Owned origin-form target, or empty for the constructor URL target.
+         * @param value Borrowed JSON tree; no reference survives this synchronous call.
+         * @param query Owned additional ordered parameters.
+         * @param headers Explicit fields; a supplied Content-Type overrides application/json.
+         * @return Lazy complete-response Task, or InvalidRequest for serialization failure without I/O.
+         */
+        template <typename T, typename Adapter = detail::JsonAdapter<>>
+            requires detail::JsonValue<T, Adapter>
+        [[nodiscard]] auto Post(
+            std::string path,
+            T const& value,
+            QueryParams query = {},
+            Headers headers = {}
+        ) -> Task<Result<Response>> {
+            return sendJsonRequest<T, Adapter>(Method::Post, std::move(path), value, std::move(query), std::move(headers));
+        }
+
+        /**
          * @brief Send PUT with an owned target, ordered query parameters, and explicit fields.
          * @param path Origin-form target; empty uses the constructor URL target.
          * @param query Additional parameters, copied or moved before initial suspension.
@@ -264,6 +327,27 @@ export namespace mhttp::client {
             Headers headers = {}
         ) -> Task<Result<Response>> {
             return sendRequest(Method::Put, std::move(path), std::move(query), std::move(headers), std::move(body), content_type);
+        }
+
+        /**
+         * @brief Send PUT with optional JSON serialized before the lazy exchange is issued.
+         * @tparam T Exact Json or OrderedJson type supplied by the optional JSON module.
+         * @tparam Adapter Deferred implementation available after importing mhttp.json.
+         * @param path Owned origin-form target, or empty for the constructor URL target.
+         * @param value Borrowed JSON tree; no reference survives this synchronous call.
+         * @param query Owned additional ordered parameters.
+         * @param headers Explicit fields; a supplied Content-Type overrides application/json.
+         * @return Lazy complete-response Task, or InvalidRequest for serialization failure without I/O.
+         */
+        template <typename T, typename Adapter = detail::JsonAdapter<>>
+            requires detail::JsonValue<T, Adapter>
+        [[nodiscard]] auto Put(
+            std::string path,
+            T const& value,
+            QueryParams query = {},
+            Headers headers = {}
+        ) -> Task<Result<Response>> {
+            return sendJsonRequest<T, Adapter>(Method::Put, std::move(path), value, std::move(query), std::move(headers));
         }
 
         /**
@@ -301,6 +385,27 @@ export namespace mhttp::client {
         }
 
         /**
+         * @brief Send PATCH with optional JSON serialized before the lazy exchange is issued.
+         * @tparam T Exact Json or OrderedJson type supplied by the optional JSON module.
+         * @tparam Adapter Deferred implementation available after importing mhttp.json.
+         * @param path Owned origin-form target, or empty for the constructor URL target.
+         * @param value Borrowed JSON tree; no reference survives this synchronous call.
+         * @param query Owned additional ordered parameters.
+         * @param headers Explicit fields; a supplied Content-Type overrides application/json.
+         * @return Lazy complete-response Task, or InvalidRequest for serialization failure without I/O.
+         */
+        template <typename T, typename Adapter = detail::JsonAdapter<>>
+            requires detail::JsonValue<T, Adapter>
+        [[nodiscard]] auto Patch(
+            std::string path,
+            T const& value,
+            QueryParams query = {},
+            Headers headers = {}
+        ) -> Task<Result<Response>> {
+            return sendJsonRequest<T, Adapter>(Method::Patch, std::move(path), value, std::move(query), std::move(headers));
+        }
+
+        /**
          * @brief Send DELETE with an owned target, ordered query parameters, and explicit fields.
          * @param path Origin-form target; empty uses the constructor URL target.
          * @param query Additional parameters, copied or moved before initial suspension.
@@ -332,6 +437,27 @@ export namespace mhttp::client {
             Headers headers = {}
         ) -> Task<Result<Response>> {
             return sendRequest(Method::Delete, std::move(path), std::move(query), std::move(headers), std::move(body), content_type);
+        }
+
+        /**
+         * @brief Send DELETE with optional JSON serialized before the lazy exchange is issued.
+         * @tparam T Exact Json or OrderedJson type supplied by the optional JSON module.
+         * @tparam Adapter Deferred implementation available after importing mhttp.json.
+         * @param path Owned origin-form target, or empty for the constructor URL target.
+         * @param value Borrowed JSON tree; no reference survives this synchronous call.
+         * @param query Owned additional ordered parameters.
+         * @param headers Explicit fields; a supplied Content-Type overrides application/json.
+         * @return Lazy complete-response Task, or InvalidRequest for serialization failure without I/O.
+         */
+        template <typename T, typename Adapter = detail::JsonAdapter<>>
+            requires detail::JsonValue<T, Adapter>
+        [[nodiscard]] auto Delete(
+            std::string path,
+            T const& value,
+            QueryParams query = {},
+            Headers headers = {}
+        ) -> Task<Result<Response>> {
+            return sendJsonRequest<T, Adapter>(Method::Delete, std::move(path), value, std::move(query), std::move(headers));
         }
 
         /**
@@ -370,6 +496,27 @@ export namespace mhttp::client {
 
 
         /**
+         * @brief Send OPTIONS with optional JSON serialized before the lazy exchange is issued.
+         * @tparam T Exact Json or OrderedJson type supplied by the optional JSON module.
+         * @tparam Adapter Deferred implementation available after importing mhttp.json.
+         * @param path Owned origin-form target, or empty for the constructor URL target.
+         * @param value Borrowed JSON tree; no reference survives this synchronous call.
+         * @param query Owned additional ordered parameters.
+         * @param headers Explicit fields; a supplied Content-Type overrides application/json.
+         * @return Lazy complete-response Task, or InvalidRequest for serialization failure without I/O.
+         */
+        template <typename T, typename Adapter = detail::JsonAdapter<>>
+            requires detail::JsonValue<T, Adapter>
+        [[nodiscard]] auto Options(
+            std::string path,
+            T const& value,
+            QueryParams query = {},
+            Headers headers = {}
+        ) -> Task<Result<Response>> {
+            return sendJsonRequest<T, Adapter>(Method::Options, std::move(path), value, std::move(query), std::move(headers));
+        }
+
+        /**
          * @brief Cancel issued requests and request socket closure from any thread without blocking.
          * @note In-flight operations return Canceled. Requests issued after Stop may reconnect.
          */
@@ -382,6 +529,32 @@ export namespace mhttp::client {
          * @return Owned lazy error result.
          */
         static auto failedRequest(Error error) -> Task<Result<Response>> { co_return std::unexpected{ error }; }
+
+        /**
+         * @brief Own serialized JSON synchronously and reuse ordinary shortcut request assembly.
+         * @tparam T Supported exact JSON representation.
+         * @tparam Adapter Selected serialization adapter.
+         * @param method Outgoing method.
+         * @param path Owned target.
+         * @param value Borrowed tree, fully consumed before returning the Task.
+         * @param query Owned query parameters.
+         * @param headers Owned explicit fields overriding the JSON fallback media type.
+         * @return Owned Send Task or serialization error without starting I/O.
+         */
+        template <typename T, typename Adapter>
+            requires detail::JsonValue<T, Adapter>
+        auto sendJsonRequest(
+            Method method,
+            std::string path,
+            T const& value,
+            QueryParams query,
+            Headers headers
+        ) -> Task<Result<Response>> {
+            auto serialized = Adapter::Serialize(value);
+            if (!serialized) { return failedRequest(serialized.error()); }
+            return sendRequest(method, std::move(path), std::move(query), std::move(headers),
+                std::move(*serialized), "application/json");
+        }
 
         /**
          * @brief Assemble one owned convenience request synchronously before issuing its lazy Send.
