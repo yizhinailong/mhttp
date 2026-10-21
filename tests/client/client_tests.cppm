@@ -7,6 +7,7 @@ export module mhttp:test.client;
 import std;
 import asio;
 import :client.http_client;
+import :server.http_server;
 import :test.transport;
 import :test.client_peer;
 
@@ -175,6 +176,47 @@ namespace mhttp::test {
     }
 
     /**
+     * @brief Send actual IPv6 requests with bracketed Host fields, skipping only unavailable address families.
+     */
+    auto client_ipv6_loopback() -> void {
+        TransportRuntime probe_runtime;
+        asio::ip::tcp::acceptor probe{ probe_runtime.Executor() };
+        asio::error_code error;
+        probe.open(asio::ip::tcp::v6(), error);
+        if (!error) { probe.bind({ asio::ip::address_v6::loopback(), 0 }, error); }
+        if (error) {
+            if (error == asio::error::address_family_not_supported || error == asio::error::operation_not_supported
+                || error == std::errc::address_not_available) {
+                std::cout << "[skip] IPv6 loopback is unavailable: " << error.message() << '\n';
+                return;
+            }
+            throw std::system_error{ error };
+        }
+        probe.close();
+        Runtime runtime;
+        Check(runtime.Start(4).has_value(), "start IPv6 client runtime");
+        server::HttpServer server{ runtime };
+        Check(server.Get("/", [](auto& request, auto& response) {
+            CheckEq(request.RemoteEndpoint().address, std::string{ "::1" }, "actual IPv6 peer endpoint");
+            Check(response.Headers().Set("X-Host", request.Header("Host")).has_value(), "echo IPv6 Host authority");
+        }).has_value(), "register IPv6 echo");
+        auto port = server.BindToAnyPort("::1");
+        Check(port && server.Start() && server.WaitUntilReady(), "start IPv6 dynamic-port listener");
+        if (!port) { return; }
+        auto const authority = "[::1]:" + std::to_string(*port);
+        for (auto host : { "::1", "[::1]" }) {
+            client::HttpClient client{ runtime, host, *port };
+            auto result = SyncWait(runtime, client.Get());
+            Check(result && result->Header("X-Host") == authority && result->RemoteEndpoint().address == "::1",
+                "bare and bracketed IPv6 constructors connect and format Host correctly");
+        }
+        client::HttpClient client{ runtime, "http://" + authority + "/#local" };
+        auto result = SyncWait(runtime, client.Get());
+        Check(result && result->Header("X-Host") == authority && result->LocalEndpoint().address == "::1",
+            "IPv6 URL constructor owns bracketed authority and uses IPv6 transport");
+    }
+
+    /**
      * @brief Never transparently replay a non-idempotent request whose head has already completed a prefix write.
      */
     auto client_partial_head_no_retry() -> void {
@@ -224,6 +266,7 @@ export namespace mhttp::test {
             { "client overall chunked deadline", [] { client_overall_deadline("chunked"); } },
             { "client timeout policies", client_timeout_policies },
             { "client connection refused", client_connection_refused },
+            { "client IPv6 loopback", client_ipv6_loopback },
             { "client partial head no retry", client_partial_head_no_retry },
         });
     }

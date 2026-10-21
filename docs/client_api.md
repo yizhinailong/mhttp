@@ -125,5 +125,11 @@ HEAD / 204 / 304 / 404、截断、字段和 body 上限、编码错误、连接�
 它还在 POST 请求头部分写入后主动 reset，并确认没有额外连接或请求重发。
 持续慢速 CL、EOF 和 chunked 响应验证两秒整体截止时间，另覆盖 Step 进度续时、停顿超时、
 Never 延迟响应和整体上传超时。
+同一隔离测试还先探测本机 IPv6 回环能力，再验证裸地址、方括号地址和 URL 构造的真实 IPv6 通信，
+以及带方括号和动态端口的 Host。只有地址族或回环地址不可用时跳过。
+`tests/client/error_test.cpp` 验证保留 `.invalid` 域名返回 ResolveFailed；该用例需要系统 DNS 解析器
+及时返回保留域名的失败结果，不连接任何 HTTP 服务。
+连接超时的 SYN 丢弃场景默认跳过，可设置 MHTTP_TEST_CONNECT_TIMEOUT_URL 指向测试环境管理的
+静默丢弃连接尝试的 HTTP 端点后运行；立即拒绝连接的端点不能用于此用例。
 `tests/client/keep_alive_test.cpp` 验证空闲关闭后的透明重连、200 次同连接复用、服务端每连接请求上限、
 禁用复用、Stop 世代竞争及销毁客户端时的空闲等待排空。
