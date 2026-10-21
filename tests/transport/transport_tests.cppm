@@ -280,7 +280,7 @@ namespace mhttp::test {
         weak = pair->connection;
         asio::cancellation_signal cancel;
         auto waited = std::make_shared<TransportResult<Result<void>>>(executor);
-        asio::co_spawn(executor, pair->connection->WaitForPeerData(), asio::bind_cancellation_slot(cancel.slot(),
+        asio::co_spawn(executor, pair->connection->WaitForPeerData(1s), asio::bind_cancellation_slot(cancel.slot(),
             [waited](std::exception_ptr failure, Result<void> result) {
                 waited->failure = failure;
                 if (!failure) { waited->value.emplace(std::move(result)); }
@@ -408,6 +408,51 @@ namespace mhttp::test {
         co_await timer.async_wait(asio::use_awaitable);
         co_await asio::async_write(pair->peer, asio::buffer("b", 1), asio::use_awaitable);
         co_return Result<void>{};
+    }
+
+    /**
+     * @brief Preserve unread bytes and both socket directions after readiness timeout and retire successful wait timers.
+     * @param executor Fixture strand.
+     * @param weak Observe ownership after all socket and deadline callbacks drain.
+     */
+    auto readiness_deadline_scenario(
+        asio::any_io_executor executor,
+        std::weak_ptr<impl::Connection>& weak
+    ) -> asio::awaitable<void> {
+        auto pair = co_await make_loopback(executor);
+        weak = pair->connection;
+        for (auto timeout : { 0ms, 20ms }) {
+            auto expired = co_await pair->connection->WaitForPeerData(timeout);
+            Check(!expired && expired.error() == Error::ReadTimeout, "readiness timeout leaves the socket reusable");
+            Check((co_await pair->connection->WriteAll("probe", 1s)).has_value(), "write remains valid after readiness expiry");
+            std::array<char, 5> received{};
+            co_await asio::async_read(pair->peer, asio::buffer(received), asio::use_awaitable);
+            CheckEq(std::string_view{ received.data(), received.size() }, "probe", "timeout does not half-close sending");
+        }
+        for (unsigned repeat{}; repeat < 4; ++repeat) {
+            co_await asio::async_write(pair->peer, asio::buffer("a", 1), asio::use_awaitable);
+            Check((co_await pair->connection->WaitForPeerData(25ms)).has_value(), "queued bytes beat a readiness deadline");
+            auto first = co_await pair->connection->ReadSome(1s);
+            Check(first && *first == "a", "readiness never consumes queued bytes");
+            auto sender = spawn_transport(executor, delayed_send(pair, 35ms));
+            Check((co_await pair->connection->WaitForPeerData(1s)).has_value(), "retired wait timer cannot cancel its successor");
+            auto second = co_await pair->connection->ReadSome(1s);
+            Check(second && *second == "b", "post-timeout readiness preserves exact delayed data");
+            Check((co_await sender->Wait()).has_value(), "join delayed readiness sender");
+        }
+        pair->connection->Close();
+    }
+
+    /**
+     * @brief Verify readiness timeout does not retain the connection after runtime drain.
+     */
+    auto connection_readiness_deadlines() -> void {
+        std::weak_ptr<impl::Connection> weak;
+        {
+            TransportRuntime runtime;
+            runtime.Run(readiness_deadline_scenario(runtime.Executor(), weak));
+        }
+        Check(weak.expired(), "every readiness timer and cancellation slot releases its transport owner");
     }
 
     /**
@@ -885,6 +930,7 @@ export namespace mhttp::test {
             { "connection limits", connection_limits },
             { "connection transfers", connection_transfers },
             { "connection idle readiness", connection_idle_readiness },
+            { "connection readiness deadlines", connection_readiness_deadlines },
             { "connection write progress", connection_write_progress },
             { "connection read deadlines", connection_read_deadlines },
             { "connection write deadlines", connection_write_deadlines },

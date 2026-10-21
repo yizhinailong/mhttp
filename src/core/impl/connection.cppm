@@ -167,12 +167,15 @@ namespace mhttp::impl {
 
         /**
          * @brief Observe readable data or peer closure without consuming bytes from an otherwise idle connection.
+         * @param timeout Optional wait deadline; nullopt disables it, nonpositive durations expire immediately.
          * @return Success for readability, Busy for an active receive, or a classified wait failure.
-         * @note This cancellable wait has no deadline. Canceling only the wait preserves the socket;
-         *       Close still aborts it. Join completion before beginning another read or write phase.
+         * @note Wait cancellation and ReadTimeout preserve the socket and every unread byte; Close still aborts it.
+         *       Join completion before beginning another read or write phase.
          */
-        [[nodiscard]] auto WaitForPeerData() -> asio::awaitable<Result<void>> {
-            return asio::co_spawn(m_executor, waitForPeerData(shared_from_this()), asio::use_awaitable);
+        [[nodiscard]] auto WaitForPeerData(
+            std::optional<Duration> timeout = std::nullopt
+        ) -> asio::awaitable<Result<void>> {
+            return asio::co_spawn(m_executor, waitForPeerData(shared_from_this(), timeout), asio::use_awaitable);
         }
 
         /**
@@ -225,18 +228,33 @@ namespace mhttp::impl {
         /**
          * @brief Wait without draining peer bytes, allowing a canceled idle monitor to hand the socket back.
          * @param self Owned connection throughout the wait and cancellation completion.
+         * @param timeout Optional non-consuming wait deadline.
          * @return Readiness or a contextual error; wait cancellation does not close the connection.
          */
-        static auto waitForPeerData(std::shared_ptr<Connection> self) -> asio::awaitable<Result<void>> {
+        static auto waitForPeerData(
+            std::shared_ptr<Connection> self,
+            std::optional<Duration> timeout
+        ) -> asio::awaitable<Result<void>> {
             co_await asio::this_coro::throw_if_cancelled(false);
             if (self->m_closed || self->m_read_eof) { co_return std::unexpected{ Error::ConnectionClosed }; }
             if (self->m_reading) { co_return std::unexpected{ Error::Busy }; }
             auto cancellation = co_await asio::this_coro::cancellation_state;
             if (cancellation.cancelled() != asio::cancellation_type::none) { co_return std::unexpected{ Error::Canceled }; }
-            ActiveOperation active{ self->m_reading, std::make_shared<Deadline>(self->m_executor) };
+            auto deadline = std::make_shared<Deadline>(self->m_executor, false);
+            ActiveOperation active{ self->m_reading, deadline };
+            active.forwarded_cancellation = cancellation.slot();
+            if (active.forwarded_cancellation.is_connected()) {
+                active.forwarded_cancellation.assign([deadline](asio::cancellation_type type) {
+                    deadline->read_cancellation.emit(type);
+                });
+            }
+            self->armDeadline(deadline, timeout);
+            if (deadline->expired) { co_return std::unexpected{ Error::ReadTimeout }; }
             auto const [error] = co_await self->m_socket.async_wait(
-                asio::ip::tcp::socket::wait_read, asio::as_tuple(asio::use_awaitable));
+                asio::ip::tcp::socket::wait_read,
+                asio::bind_cancellation_slot(deadline->read_cancellation.slot(), asio::as_tuple(asio::use_awaitable)));
             if (self->m_closed) { co_return std::unexpected{ Error::Canceled }; }
+            if (deadline->expired) { co_return std::unexpected{ Error::ReadTimeout }; }
             if (auto failure = map_io_error(error, IoOperation::Read)) {
                 if (*failure != Error::Canceled) { self->close(); }
                 co_return std::unexpected{ *failure };
