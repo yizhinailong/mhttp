@@ -59,6 +59,24 @@ export namespace mhttp::server {
         virtual ~Router() = default;
 
         /**
+         * @brief Append global aspects around all routes and default 404/405 responses.
+         * @tparam Aspects One or more objects providing Before and/or After returning bool or Task<bool>.
+         * @param aspects Objects copied or moved into stable storage in registration order.
+         * @return Success, AlreadyRunning while frozen, or Busy while requests are prepared.
+         * @note Before false skips later Before and route execution, then runs every global After.
+         *       Both phases run in registration order. After false skips the remaining global After.
+         *       Exceptions skip every later phase and propagate to the session boundary.
+         */
+        template <typename... Aspects>
+            requires (sizeof...(Aspects) > 0) && (detail::HttpAspect<std::decay_t<Aspects>> && ...)
+        [[nodiscard]] auto Use(Aspects&&... aspects) -> Result<void> {
+            std::vector<detail::HttpMiddleware> incoming;
+            incoming.reserve(sizeof...(Aspects));
+            (incoming.push_back(detail::make_http_middleware(std::forward<Aspects>(aspects))), ...);
+            return m_impl->Use(std::move(incoming));
+        }
+
+        /**
          * @brief Register or replace one method-specific handler with optional ordered aspects.
          * @tparam F Synchronous void or Task<void> callable accepting Request& and Response&.
          * @tparam Aspects Owned Before/After objects returning bool or Task<bool>.

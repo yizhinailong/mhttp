@@ -103,8 +103,14 @@ Before 返回 false 时跳过后续 Before 与 handler，保留已写入的响�
 适配器返回的 Task 在初始挂起前就持有稳定的回调状态，所以可以先销毁适配器再等待 Task。
 丢弃未开始的 Task、正常完成或取消都会释放状态；引用捕获仍要求其对象活到整个 Task 结束。
 不同请求可能同时调用同一回调对象，应用共享状态需要自行同步。
-Router 注册接口已接入路由级 aspect；全局 aspect 和路由钩子待后续组合。
+`Router::Use(aspects...)` 依次追加全局 aspect，对先前和之后注册的路由均生效，
+也包围默认 404/405 响应。顺序是全局 Before、路由 Before、handler、路由 After、全局 After。
+全局 Before false 跳过余下全局 Before 和整个路由层，再执行全部全局 After；
+路由 Before false 仍会执行路由 After 与全局 After。
+路由 After false 仅跳过余下路由 After，之后仍执行全局 After。
+任意阶段抛异常都会跳过所有后续阶段，包括外层 After；路由钩子待后续组合。
+Use 遵循与路由注册相同的冻结和配置使用权守卫，传入的一批 aspect 作为一次配置变更发布。
 
 对应独立测试为 `tests/server/request_test.cpp`、`response_test.cpp`、
-`request_data_test.cpp`、`handler_test.cpp` 和 `router_test.cpp`，覆盖数据所有权、错误拒绝、分帧衔接、
+`request_data_test.cpp`、`handler_test.cpp`、`middleware_test.cpp` 和 `router_test.cpp`，覆盖数据所有权、错误拒绝、分帧衔接、
 类型化参数、并发上下文、调用顺序、短路、异常、注册替换、配置冻结、惰性所有权与取消清理。

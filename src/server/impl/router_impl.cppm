@@ -41,6 +41,7 @@ namespace mhttp::impl {
         std::mutex m_mutex; ///< Protect configuration, freeze state, and reader registration.
         detail::RouteTree m_tree; ///< Immutable while frozen or any configuration reader exists.
         std::unordered_map<std::size_t, std::shared_ptr<detail::HttpHandler const>> m_handlers; ///< Owned bindings.
+        std::vector<detail::HttpMiddleware> m_middleware; ///< Global aspects, immutable while readers exist.
         std::size_t m_next_id{}; ///< Next opaque binding identifier.
         std::size_t m_readers{}; ///< Prepared operations, including Tasks not yet started.
         bool m_frozen{}; ///< Server lifecycle rejects mutation until all sessions drain and thaw succeeds.
@@ -51,6 +52,20 @@ namespace mhttp::impl {
          * @param limits Pattern source and decoded matching subject limits.
          */
         explicit RouterImpl(detail::RouteLimits limits) : m_tree{ limits } {}
+
+        /**
+         * @brief Atomically append global aspects after constructing all user objects outside the mutex.
+         * @param incoming Owned middleware in registration order.
+         * @return Success, AlreadyRunning while frozen, or Busy while readers exist.
+         */
+        auto Use(std::vector<detail::HttpMiddleware> incoming) -> Result<void> {
+            std::lock_guard lock{ m_mutex };
+            if (m_frozen) { return std::unexpected{ Error::AlreadyRunning }; }
+            if (m_readers != 0) { return std::unexpected{ Error::Busy }; }
+            m_middleware.reserve(m_middleware.size() + incoming.size());
+            for (auto& middleware : incoming) { m_middleware.push_back(std::move(middleware)); }
+            return {};
+        }
 
         /**
          * @brief Register or replace a callback without running user destruction code under the mutex.
@@ -130,7 +145,7 @@ namespace mhttp::impl {
         }
 
         /**
-         * @brief Execute a prepared handler or generate the default 404/405 response.
+         * @brief Wrap route execution or default 404/405 generation in ordered global aspects.
          * @param route Owned callback and configuration lease, retained in the coroutine frame.
          * @param request Borrowed until the complete handler/aspect chain finishes.
          * @param response Borrowed for response mutation through the same lifetime.
@@ -142,12 +157,22 @@ namespace mhttp::impl {
             server::Request& request,
             server::Response& response
         ) -> Task<void> {
-            if (route.handler) { co_await (*route.handler)(request, response); }
-            else {
-                static_cast<void>(response.SetError(route.match.status));
-                if (!route.match.allow.empty()) {
-                    static_cast<void>(response.Headers().Set("Allow", route.match.allow));
+            auto& owner = *std::static_pointer_cast<Lease>(route.lifetime)->owner;
+            bool proceed{ true };
+            for (auto const& middleware : owner.m_middleware) {
+                if (!co_await middleware.before(request, response)) { proceed = false; break; }
+            }
+            if (proceed) {
+                if (route.handler) { co_await (*route.handler)(request, response); }
+                else {
+                    static_cast<void>(response.SetError(route.match.status));
+                    if (!route.match.allow.empty()) {
+                        static_cast<void>(response.Headers().Set("Allow", route.match.allow));
+                    }
                 }
+            }
+            for (auto const& middleware : owner.m_middleware) {
+                if (!co_await middleware.after(request, response)) { break; }
             }
         }
 

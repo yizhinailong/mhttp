@@ -6,7 +6,7 @@ export module mhttp:server.routing;
 
 import std;
 export import :server.route_tree;
-export import :server.handler;
+export import :server.middleware;
 
 export namespace mhttp::detail {
 
