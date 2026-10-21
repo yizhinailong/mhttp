@@ -275,6 +275,80 @@ auto large_binary_ownership() -> void {
 }
 
 /**
+ * @brief Exercise both convenience overload groups and preserve explicit field precedence before actual sends.
+ */
+auto convenience_requests() -> void {
+    mhttp::Runtime runtime;
+    Check(runtime.Start(4).has_value(), "start convenience runtime");
+    mhttp::server::HttpServer server{ runtime };
+    std::atomic<unsigned> calls{};
+    for (auto method : { mhttp::Method::Get, mhttp::Method::Head, mhttp::Method::Post, mhttp::Method::Put,
+                         mhttp::Method::Patch, mhttp::Method::Delete, mhttp::Method::Options }) {
+        Check(server.Route(method, "/shortcuts", [&calls](auto& request, auto& response) {
+            ++calls;
+            Check(response.Headers().Set("X-Method", request.MethodString()).has_value(), "return convenience method");
+            Check(response.Headers().Set("X-Target", request.Target()).has_value(), "return convenience target");
+            Check(response.Headers().Set("X-Size", std::to_string(request.Body().size())).has_value(), "return convenience body size");
+            Check(response.Headers().Set("X-Type", request.ContentType()).has_value(), "return convenience media type");
+            Check(response.SetContent(request.Body(), "application/octet-stream").has_value(), "return convenience binary content");
+        }).has_value(), "register convenience method");
+    }
+    auto port = start_loopback(server);
+    mhttp::client::HttpClient client{ runtime, std::format("http://127.0.0.1:{}/shortcuts?tag=from-url", port) };
+    auto from_url = mhttp::SyncWait(runtime, client.Get());
+    Check(from_url && from_url->Header("X-Target") == "/shortcuts?tag=from-url", "empty shortcut path uses constructor URL");
+    mhttp::QueryParams query;
+    query.Add("tag", "one two");
+    mhttp::Headers headers;
+    Check(headers.Set("Content-Type", "application/explicit").has_value(), "explicit convenience media type");
+    std::string binary{ "x\0y"sv };
+    using Operation = std::function<mhttp::Task<mhttp::Result<mhttp::client::Response>>()>;
+    std::vector<std::pair<mhttp::Method, Operation>> operations{
+        { mhttp::Method::Get, [&] { return client.Get("/shortcuts", query, headers); } },
+        { mhttp::Method::Head, [&] { return client.Head("/shortcuts", query, headers); } },
+        { mhttp::Method::Post, [&] { return client.Post("/shortcuts", query, headers); } },
+        { mhttp::Method::Put, [&] { return client.Put("/shortcuts", query, headers); } },
+        { mhttp::Method::Patch, [&] { return client.Patch("/shortcuts", query, headers); } },
+        { mhttp::Method::Delete, [&] { return client.Delete("/shortcuts", query, headers); } },
+        { mhttp::Method::Options, [&] { return client.Options("/shortcuts", query, headers); } },
+        { mhttp::Method::Get, [&] { return client.Get("/shortcuts", binary, "text/plain", query, headers); } },
+        { mhttp::Method::Head, [&] { return client.Head("/shortcuts", binary, "text/plain", query, headers); } },
+        { mhttp::Method::Post, [&] { return client.Post("/shortcuts", binary, "text/plain", query, headers); } },
+        { mhttp::Method::Put, [&] { return client.Put("/shortcuts", binary, "text/plain", query, headers); } },
+        { mhttp::Method::Patch, [&] { return client.Patch("/shortcuts", binary, "text/plain", query, headers); } },
+        { mhttp::Method::Delete, [&] { return client.Delete("/shortcuts", binary, "text/plain", query, headers); } },
+        { mhttp::Method::Options, [&] { return client.Options("/shortcuts", binary, "text/plain", query, headers); } },
+    };
+    std::size_t index{};
+    for (auto& [method, operation] : operations) {
+        auto response = mhttp::SyncWait(runtime, operation());
+        if (Check(response.has_value(), "convenience overload completes over TCP")) {
+            CheckEq(response->Header("X-Method"), mhttp::ToString(method), "shortcut selects its actual HTTP method");
+            CheckEq(response->Header("X-Target"), "/shortcuts?tag=one+two"sv, "shortcut owns and appends ordered parameters");
+            CheckEq(response->Header("X-Type"), "application/explicit"sv, "explicit Content-Type wins over optional fallback");
+            CheckEq(response->Header("X-Size"), index < 7 ? "0"sv : "3"sv, "body overload transfers all binary bytes including for HEAD");
+            CheckEq(response->Body(), index < 7 || method == mhttp::Method::Head ? ""sv : "x\0y"sv, "response follows method body semantics");
+        }
+        ++index;
+    }
+    auto fallback = mhttp::SyncWait(runtime, client.Post("/shortcuts", binary, "text/plain"));
+    Check(fallback && fallback->Header("X-Type") == "text/plain", "fallback media type is used when explicit field is absent");
+    Check(headers.Set("Content-Type", "").has_value(), "explicit empty Content-Type");
+    auto empty = mhttp::SyncWait(runtime, client.Post("/shortcuts", binary, "text/plain", {}, headers));
+    Check(empty && empty->Header("X-Type").empty(), "explicit empty media type is preserved");
+    auto const before = calls.load();
+    auto invalid_type = mhttp::SyncWait(runtime, client.Post("/shortcuts", "body", "text/plain\r\nInjected: yes"));
+    CheckEq(invalid_type.error(), mhttp::Error::InvalidHeaders, "shortcut rejects unsafe fallback media type before I/O");
+    mhttp::client::Request invalid_host{ mhttp::Method::Get, "/shortcuts" };
+    Check(invalid_host.Headers().Add("Host", "one").has_value() && invalid_host.Headers().Add("host", "two").has_value(), "invalid duplicate Host setup");
+    auto rejected = mhttp::SyncWait(runtime, client.Send(std::move(invalid_host)));
+    CheckEq(rejected.error(), mhttp::Error::InvalidHeaders, "Send rejects semantically invalid fields before writing a prefix");
+    CheckEq(calls.load(), before, "preflight rejections dispatch no requests");
+    auto next = mhttp::SyncWait(runtime, client.Get());
+    Check(next && empty && next->LocalEndpoint() == empty->LocalEndpoint(), "preflight failures leave the existing TCP stream unmodified and reusable");
+}
+
+/**
  * @brief Run bounded public-client loopback acceptance cases.
  * @param argc Argument count.
  * @param argv Optional test filters.
@@ -289,5 +363,6 @@ auto main(int argc, char* argv[]) -> int {
         { "client deadlines and runtime restart", deadlines_and_runtime_restart },
         { "client active runtime stop", active_runtime_stop },
         { "client large binary ownership", large_binary_ownership },
+        { "client convenience requests", convenience_requests },
     });
 }

@@ -2,7 +2,7 @@
 
 客户端的请求与响应类型通过 `import mhttp;` 使用，公共接口只包含标准库和 mhttp 类型。
 `client::HttpClient` 提供惰性连接和 `Send(Request) -> Task<Result<Response>>`。
-构造时不进行 DNS 或 socket I/O；连接、发送与读取均异步进行。快捷方法、完整的空闲连接重连和重定向待后续接入。
+构造时不进行 DNS 或 socket I/O；连接、发送与读取均异步进行。完整的空闲连接重连和重定向待后续接入。
 
 ```cpp
 import std;
@@ -44,6 +44,13 @@ KeepAlive 表示完整响应分帧允许连接继续使用；之后对端仍可�
 两种消息均只能移动，借用的视图在相关修改、赋值或销毁时失效。
 Request 交给 Send 后，调用方不能继续使用它的借用数据。Response 可以独立于客户端存活，
 在所有权存活期间允许并发只读访问。移动后的源对象仅可销毁或赋值。
+
+Get / Head / Post / Put / Patch / Delete / Options 均提供两组快捷重载：
+`(path, QueryParams = {}, Headers = {})` 和
+`(path, body, content_type = {}, QueryParams = {}, Headers = {})`。
+省略 path 时使用构造 URL 的路径和查询；所有参数在签发 Task 前即转入拥有数据的 Request。
+content_type 只在显式 Headers 没有 Content-Type 时作为后备值，显式空值也会保留。
+HEAD 可以发送请求 body，但仍不读取响应 body。
 
 `client::ClientOptions` 规定 DNS 与所有端点尝试共用的连接超时、完整响应读取超时、
 完整请求写入超时，以及响应头字节数/字段数、响应 body 和完整发送数据的上限。

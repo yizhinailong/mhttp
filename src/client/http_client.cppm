@@ -101,10 +101,289 @@ export namespace mhttp::client {
         [[nodiscard]] auto Send(Request request) -> Task<Result<Response>> { return m_impl->Send(std::move(request)); }
 
         /**
+         * @brief Send GET with an owned target, ordered query parameters, and explicit fields.
+         * @param path Origin-form target; empty uses the constructor URL target.
+         * @param query Additional parameters, copied or moved before initial suspension.
+         * @param headers Explicit fields overriding configured defaults.
+         * @return Lazy complete-response Task with the same error and ownership contract as Send.
+         */
+        [[nodiscard]] auto Get(
+            std::string path = {},
+            QueryParams query = {},
+            Headers headers = {}
+        ) -> Task<Result<Response>> {
+            return sendRequest(Method::Get, std::move(path), std::move(query), std::move(headers), {}, {});
+        }
+
+        /**
+         * @brief Send GET with an owned binary body and an optional fallback media type.
+         * @param path Origin-form target, or empty for the constructor URL target.
+         * @param body Owned binary representation, including embedded NUL bytes.
+         * @param content_type Optional Content-Type fallback; explicit headers take precedence.
+         * @param query Additional ordered query parameters.
+         * @param headers Explicit outgoing fields, preserving a supplied Content-Type even when empty.
+         * @return Lazy complete-response Task; invalid used media types fail before network I/O.
+         */
+        [[nodiscard]] auto Get(
+            std::string path,
+            std::string body,
+            std::string_view content_type = {},
+            QueryParams query = {},
+            Headers headers = {}
+        ) -> Task<Result<Response>> {
+            return sendRequest(Method::Get, std::move(path), std::move(query), std::move(headers), std::move(body), content_type);
+        }
+
+        /**
+         * @brief Send HEAD with an owned target, ordered query parameters, and explicit fields.
+         * @param path Origin-form target; empty uses the constructor URL target.
+         * @param query Additional parameters, copied or moved before initial suspension.
+         * @param headers Explicit fields overriding configured defaults.
+         * @return Lazy complete-response Task with the same error and ownership contract as Send.
+         */
+        [[nodiscard]] auto Head(
+            std::string path = {},
+            QueryParams query = {},
+            Headers headers = {}
+        ) -> Task<Result<Response>> {
+            return sendRequest(Method::Head, std::move(path), std::move(query), std::move(headers), {}, {});
+        }
+
+        /**
+         * @brief Send HEAD with an owned binary body and an optional fallback media type.
+         * @param path Origin-form target, or empty for the constructor URL target.
+         * @param body Owned binary representation, including embedded NUL bytes.
+         * @param content_type Optional Content-Type fallback; explicit headers take precedence.
+         * @param query Additional ordered query parameters.
+         * @param headers Explicit outgoing fields, preserving a supplied Content-Type even when empty.
+         * @return Lazy complete-response Task; invalid used media types fail before network I/O.
+         */
+        [[nodiscard]] auto Head(
+            std::string path,
+            std::string body,
+            std::string_view content_type = {},
+            QueryParams query = {},
+            Headers headers = {}
+        ) -> Task<Result<Response>> {
+            return sendRequest(Method::Head, std::move(path), std::move(query), std::move(headers), std::move(body), content_type);
+        }
+
+        /**
+         * @brief Send POST with an owned target, ordered query parameters, and explicit fields.
+         * @param path Origin-form target; empty uses the constructor URL target.
+         * @param query Additional parameters, copied or moved before initial suspension.
+         * @param headers Explicit fields overriding configured defaults.
+         * @return Lazy complete-response Task with the same error and ownership contract as Send.
+         */
+        [[nodiscard]] auto Post(
+            std::string path = {},
+            QueryParams query = {},
+            Headers headers = {}
+        ) -> Task<Result<Response>> {
+            return sendRequest(Method::Post, std::move(path), std::move(query), std::move(headers), {}, {});
+        }
+
+        /**
+         * @brief Send POST with an owned binary body and an optional fallback media type.
+         * @param path Origin-form target, or empty for the constructor URL target.
+         * @param body Owned binary representation, including embedded NUL bytes.
+         * @param content_type Optional Content-Type fallback; explicit headers take precedence.
+         * @param query Additional ordered query parameters.
+         * @param headers Explicit outgoing fields, preserving a supplied Content-Type even when empty.
+         * @return Lazy complete-response Task; invalid used media types fail before network I/O.
+         */
+        [[nodiscard]] auto Post(
+            std::string path,
+            std::string body,
+            std::string_view content_type = {},
+            QueryParams query = {},
+            Headers headers = {}
+        ) -> Task<Result<Response>> {
+            return sendRequest(Method::Post, std::move(path), std::move(query), std::move(headers), std::move(body), content_type);
+        }
+
+        /**
+         * @brief Send PUT with an owned target, ordered query parameters, and explicit fields.
+         * @param path Origin-form target; empty uses the constructor URL target.
+         * @param query Additional parameters, copied or moved before initial suspension.
+         * @param headers Explicit fields overriding configured defaults.
+         * @return Lazy complete-response Task with the same error and ownership contract as Send.
+         */
+        [[nodiscard]] auto Put(
+            std::string path = {},
+            QueryParams query = {},
+            Headers headers = {}
+        ) -> Task<Result<Response>> {
+            return sendRequest(Method::Put, std::move(path), std::move(query), std::move(headers), {}, {});
+        }
+
+        /**
+         * @brief Send PUT with an owned binary body and an optional fallback media type.
+         * @param path Origin-form target, or empty for the constructor URL target.
+         * @param body Owned binary representation, including embedded NUL bytes.
+         * @param content_type Optional Content-Type fallback; explicit headers take precedence.
+         * @param query Additional ordered query parameters.
+         * @param headers Explicit outgoing fields, preserving a supplied Content-Type even when empty.
+         * @return Lazy complete-response Task; invalid used media types fail before network I/O.
+         */
+        [[nodiscard]] auto Put(
+            std::string path,
+            std::string body,
+            std::string_view content_type = {},
+            QueryParams query = {},
+            Headers headers = {}
+        ) -> Task<Result<Response>> {
+            return sendRequest(Method::Put, std::move(path), std::move(query), std::move(headers), std::move(body), content_type);
+        }
+
+        /**
+         * @brief Send PATCH with an owned target, ordered query parameters, and explicit fields.
+         * @param path Origin-form target; empty uses the constructor URL target.
+         * @param query Additional parameters, copied or moved before initial suspension.
+         * @param headers Explicit fields overriding configured defaults.
+         * @return Lazy complete-response Task with the same error and ownership contract as Send.
+         */
+        [[nodiscard]] auto Patch(
+            std::string path = {},
+            QueryParams query = {},
+            Headers headers = {}
+        ) -> Task<Result<Response>> {
+            return sendRequest(Method::Patch, std::move(path), std::move(query), std::move(headers), {}, {});
+        }
+
+        /**
+         * @brief Send PATCH with an owned binary body and an optional fallback media type.
+         * @param path Origin-form target, or empty for the constructor URL target.
+         * @param body Owned binary representation, including embedded NUL bytes.
+         * @param content_type Optional Content-Type fallback; explicit headers take precedence.
+         * @param query Additional ordered query parameters.
+         * @param headers Explicit outgoing fields, preserving a supplied Content-Type even when empty.
+         * @return Lazy complete-response Task; invalid used media types fail before network I/O.
+         */
+        [[nodiscard]] auto Patch(
+            std::string path,
+            std::string body,
+            std::string_view content_type = {},
+            QueryParams query = {},
+            Headers headers = {}
+        ) -> Task<Result<Response>> {
+            return sendRequest(Method::Patch, std::move(path), std::move(query), std::move(headers), std::move(body), content_type);
+        }
+
+        /**
+         * @brief Send DELETE with an owned target, ordered query parameters, and explicit fields.
+         * @param path Origin-form target; empty uses the constructor URL target.
+         * @param query Additional parameters, copied or moved before initial suspension.
+         * @param headers Explicit fields overriding configured defaults.
+         * @return Lazy complete-response Task with the same error and ownership contract as Send.
+         */
+        [[nodiscard]] auto Delete(
+            std::string path = {},
+            QueryParams query = {},
+            Headers headers = {}
+        ) -> Task<Result<Response>> {
+            return sendRequest(Method::Delete, std::move(path), std::move(query), std::move(headers), {}, {});
+        }
+
+        /**
+         * @brief Send DELETE with an owned binary body and an optional fallback media type.
+         * @param path Origin-form target, or empty for the constructor URL target.
+         * @param body Owned binary representation, including embedded NUL bytes.
+         * @param content_type Optional Content-Type fallback; explicit headers take precedence.
+         * @param query Additional ordered query parameters.
+         * @param headers Explicit outgoing fields, preserving a supplied Content-Type even when empty.
+         * @return Lazy complete-response Task; invalid used media types fail before network I/O.
+         */
+        [[nodiscard]] auto Delete(
+            std::string path,
+            std::string body,
+            std::string_view content_type = {},
+            QueryParams query = {},
+            Headers headers = {}
+        ) -> Task<Result<Response>> {
+            return sendRequest(Method::Delete, std::move(path), std::move(query), std::move(headers), std::move(body), content_type);
+        }
+
+        /**
+         * @brief Send OPTIONS with an owned target, ordered query parameters, and explicit fields.
+         * @param path Origin-form target; empty uses the constructor URL target.
+         * @param query Additional parameters, copied or moved before initial suspension.
+         * @param headers Explicit fields overriding configured defaults.
+         * @return Lazy complete-response Task with the same error and ownership contract as Send.
+         */
+        [[nodiscard]] auto Options(
+            std::string path = {},
+            QueryParams query = {},
+            Headers headers = {}
+        ) -> Task<Result<Response>> {
+            return sendRequest(Method::Options, std::move(path), std::move(query), std::move(headers), {}, {});
+        }
+
+        /**
+         * @brief Send OPTIONS with an owned binary body and an optional fallback media type.
+         * @param path Origin-form target, or empty for the constructor URL target.
+         * @param body Owned binary representation, including embedded NUL bytes.
+         * @param content_type Optional Content-Type fallback; explicit headers take precedence.
+         * @param query Additional ordered query parameters.
+         * @param headers Explicit outgoing fields, preserving a supplied Content-Type even when empty.
+         * @return Lazy complete-response Task; invalid used media types fail before network I/O.
+         */
+        [[nodiscard]] auto Options(
+            std::string path,
+            std::string body,
+            std::string_view content_type = {},
+            QueryParams query = {},
+            Headers headers = {}
+        ) -> Task<Result<Response>> {
+            return sendRequest(Method::Options, std::move(path), std::move(query), std::move(headers), std::move(body), content_type);
+        }
+
+
+        /**
          * @brief Cancel issued requests and request socket closure from any thread without blocking.
          * @note In-flight operations return Canceled. Requests issued after Stop may reconnect.
          */
         auto Stop() -> void { m_impl->Stop(); }
+
+    private:
+        /**
+         * @brief Return a shortcut validation failure without retaining a client or starting I/O.
+         * @param error Recoverable request construction failure.
+         * @return Owned lazy error result.
+         */
+        static auto failedRequest(Error error) -> Task<Result<Response>> { co_return std::unexpected{ error }; }
+
+        /**
+         * @brief Assemble one owned convenience request synchronously before issuing its lazy Send.
+         * @param method Known outgoing method.
+         * @param path Owned raw target.
+         * @param query Owned additional parameters.
+         * @param headers Owned explicit fields.
+         * @param body Optional owned representation.
+         * @param content_type Borrowed fallback field, consumed synchronously before returning.
+         * @return Owned Send or validation-failure Task.
+         */
+        auto sendRequest(
+            Method method,
+            std::string path,
+            QueryParams query,
+            Headers headers,
+            std::optional<std::string> body,
+            std::string_view content_type
+        ) -> Task<Result<Response>> {
+            Request request{ method, std::move(path) };
+            request.Query() = std::move(query);
+            if (body) {
+                auto content = request.SetContent(std::move(*body));
+                if (!content) { return failedRequest(content.error()); }
+                if (!headers.Has("Content-Type") && !content_type.empty()) {
+                    auto assigned = headers.Add("Content-Type", content_type);
+                    if (!assigned) { return failedRequest(assigned.error()); }
+                }
+            }
+            request.Headers() = std::move(headers);
+            return Send(std::move(request));
+        }
     };
 
 } // namespace mhttp::client
