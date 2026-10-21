@@ -57,8 +57,11 @@ Content-Length 和 Transfer-Encoding，生成唯一有效的分帧头。
 空的普通 body 输出 Content-Length: 0，不自动添加 Content-Type。
 
 HTTP/1.1 可以通过 `chunked` 选择分块；此时 body 大小可以在发送时才确定。
-HTTP/1.0 始终根据 `body_bytes` 输出 Content-Length，因此调用方必须提前知道完整大小。
-未知大小的 HTTP/1.0 流式发送留待后续流式接口设计。
+HTTP/1.0 默认根据 `body_bytes` 输出 Content-Length，不使用 chunked。
+未知长度响应可显式选择 `close_delimited`：移除 Content-Length、Transfer-Encoding 和 Trailer，
+按原样发送 body 并关闭连接，不能复用；请求禁止此模式，也不能同时选择 chunked。
+HEAD、204 和 304 仍不发送 body。关闭分帧遵循
+[RFC 9112 §6.3](https://www.rfc-editor.org/rfc/rfc9112.html#section-6.3)，用于 HTTP/1.0 流式兼容。
 
 `ChunkEncoder::Encode` 复制输入并返回一个完整的 chunk；零字节输入返回空字符串。
 只有 `Finish(trailers)` 会输出终止块。成功 Finish 后，继续 Encode 或 Finish 返回

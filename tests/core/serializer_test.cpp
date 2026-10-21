@@ -146,6 +146,47 @@ auto request_validation() -> void {
 }
 
 /**
+ * @brief Frame unknown-length responses by closure without stale lengths, coding, or trailers.
+ */
+auto close_delimited_responses() -> void {
+    for (auto version : { mhttp::Version::Http10, mhttp::Version::Http11 }) {
+        ResponseHead head{ .version = version };
+        Check(head.headers.Add("Content-Length", "999").has_value(), "stale length");
+        Check(head.headers.Add("Transfer-Encoding", "chunked").has_value(), "stale coding");
+        Check(head.headers.Add("Trailer", "X-Sum").has_value(), "stale trailer declaration");
+        Check(head.headers.Add("Connection", "keep-alive").has_value(), "stale persistence");
+        auto wire = serialize_response_head(head, mhttp::Method::Get, { .close_delimited = true });
+        if (!Check(wire.has_value(), "explicit close delimitation serializes")) { continue; }
+        Check(wire->send_body && !wire->keep_alive && wire->body_kind == BodyKind::UntilEof,
+            "unknown-length body prohibits connection reuse");
+        Check(!wire->bytes.contains("Content-Length:") && !wire->bytes.contains("Transfer-Encoding:")
+            && !wire->bytes.contains("Trailer:") && wire->bytes.contains("Connection: close\r\n"),
+            "only transport closure terminates the body");
+        auto const body = "a\0b\r\n0\r\n\r\n"sv;
+        check_all_splits<ResponseParser>(wire->bytes + std::string{ body }, [body](auto const& parsed) {
+            Check(parsed.complete && !parsed.failure && parsed.body == body
+                && parsed.framing.kind == BodyKind::UntilEof && !parsed.framing.keep_alive,
+                "every split and bytewise input waits for EOF, preserving arbitrary raw bytes");
+        });
+        auto suppressed = serialize_response_head(head, mhttp::Method::Head, { .close_delimited = true });
+        Check(suppressed && !suppressed->send_body && suppressed->body_kind == BodyKind::UntilEof,
+            "HEAD emits no unknown-length body bytes");
+        for (auto status : { mhttp::Status::NoContent, mhttp::Status::NotModified }) {
+            head.status = status;
+            auto empty = serialize_response_head(head, mhttp::Method::Get, { .close_delimited = true });
+            Check(empty && !empty->send_body && empty->body_kind == BodyKind::None && empty->keep_alive,
+                "bodyless status does not need an EOF delimiter");
+        }
+        Check(!serialize_response_head(head, mhttp::Method::Get, { .chunked = true, .close_delimited = true }),
+            "contradictory framing modes are rejected");
+    }
+    RequestHead request;
+    Check(request.headers.Add("Host", "local").has_value(), "valid outbound host");
+    auto rejected = serialize_request_head(request, { .close_delimited = true });
+    Check(!rejected && rejected.error() == mhttp::Error::InvalidRequest, "requests cannot be close-delimited");
+}
+
+/**
  * @brief Verify rejected header mutations never place CRLF or NUL on the wire.
  */
 auto splitting_rejection() -> void {
@@ -190,6 +231,7 @@ auto main(int argc, char* argv[]) -> int {
         { "authoritative framing", authoritative_framing },
         { "body suppression", body_suppression },
         { "versions and persistence", versions_and_persistence },
+        { "close-delimited responses", close_delimited_responses },
         { "request validation", request_validation },
         { "splitting rejection", splitting_rejection },
     });

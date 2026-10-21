@@ -12,14 +12,15 @@ export namespace mhttp::detail {
 
     /**
      * @brief Describe the actual body and connection policy before generating a head.
-     * @note HTTP/1.0 always uses body_bytes, even when chunked is requested. The caller must know
-     *       the complete body size before selecting HTTP/1.0; HTTP/1.1 chunked ignores body_bytes.
+     * @note HTTP/1.0 ignores chunked and uses body_bytes unless close_delimited is selected.
+     *       Unknown-length responses may explicitly select close delimitation; requests may not.
      * @internal
      */
     struct SerializeOptions {
         std::uint64_t body_bytes{}; ///< Actual buffered size, including the representation for HEAD.
         bool chunked{}; ///< Prefer chunked HTTP/1.1 framing over a fixed size.
         bool keep_alive{ true }; ///< Permit persistence if version and Connection fields allow it.
+        bool close_delimited{}; ///< Response-only unknown length; omit size/coding and force closure.
     };
 
     /**
@@ -91,8 +92,10 @@ export namespace mhttp::detail {
         bool bodyless
     ) -> void {
         bool const chunked = !bodyless && version == Version::Http11 && options.chunked;
-        result.keep_alive = options.keep_alive && allows_keep_alive(version, headers);
-        result.body_kind = bodyless ? BodyKind::None : chunked ? BodyKind::Chunked : BodyKind::ContentLength;
+        bool const until_eof = !bodyless && options.close_delimited;
+        result.keep_alive = !until_eof && options.keep_alive && allows_keep_alive(version, headers);
+        result.body_kind = bodyless ? BodyKind::None : until_eof ? BodyKind::UntilEof
+            : chunked ? BodyKind::Chunked : BodyKind::ContentLength;
         for (auto const& [name, value] : headers) {
             if (utils::iequals(name, "Content-Length") || utils::iequals(name, "Transfer-Encoding")
                 || (utils::iequals(name, "Trailer") && !chunked)) { continue; }
@@ -101,7 +104,7 @@ export namespace mhttp::detail {
             result.bytes += value;
             result.bytes += "\r\n";
         }
-        if (!bodyless) {
+        if (!bodyless && !until_eof) {
             result.bytes += chunked ? "Transfer-Encoding: chunked\r\n"
                 : std::format("Content-Length: {}\r\n", options.body_bytes);
         }
@@ -127,7 +130,7 @@ export namespace mhttp::detail {
         SerializeOptions const& options = {}
     ) -> Result<SerializedHead> {
         auto const version = ToString(head.version);
-        if (version.empty() || !utils::is_field_name(head.method) || head.target.empty()
+        if (options.close_delimited || version.empty() || !utils::is_field_name(head.method) || head.target.empty()
             || head.target.find('#') != std::string::npos
             || (head.target == "*" ? head.method != "OPTIONS" : !head.target.starts_with('/'))) {
             return std::unexpected{ Error::InvalidRequest };
@@ -156,7 +159,7 @@ export namespace mhttp::detail {
     ) -> Result<SerializedHead> {
         auto const version = ToString(head.version);
         auto const status = static_cast<unsigned>(head.status);
-        if (version.empty() || status < 100 || status > 999) {
+        if (version.empty() || status < 100 || status > 999 || (options.chunked && options.close_delimited)) {
             return std::unexpected{ Error::InvalidRequest };
         }
         if (!std::ranges::all_of(head.reason, [](unsigned char byte) {
