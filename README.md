@@ -7,6 +7,8 @@
 Base64、HTTP 日期、错误与 `Result<T>`、`Endpoint`、方法和状态码、
 有序多值 `Headers` 与 `QueryParams`，以及 HTTP URL 解析与相对引用解析。
 HTTP 协议核心支持有大小限制的增量请求/响应解析、分块与 trailer、头部序列化和分块编码。
+异步基础已提供 `Task<T>`、`Runtime`、`Sleep`、`Offload` 和 `SyncWait`，
+支持 strand 恢复、停止取消和协程资源清理。
 监听器、连接会话和客户端 I/O 待后续阶段实现。
 
 ## 构建
@@ -42,6 +44,7 @@ python tools/check_test_support.py
 
 边界规则与检查方法见 [模块边界](docs/module_boundaries.md)。
 协议层的输入、借用生命周期和分帧契约见 [HTTP 协议核心](docs/protocol_core.md)。
+协程所有权、运行时生命周期和阻塞任务约束见 [异步基础](docs/async_core.md)。
 依赖 Asio 的库代码限定在 `src/**/impl/` 的实现分区内。
 当前检查已在 Windows 本地通过；Linux 由 CI 验证。
 
