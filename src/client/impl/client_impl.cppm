@@ -15,6 +15,7 @@ import :client.redirect_policy;
 import :client.impl.deadlines;
 import :client.response;
 import :utils.base64;
+import :utils.authorization;
 
 namespace mhttp::impl {
 
@@ -195,14 +196,7 @@ namespace mhttp::impl {
          * @return Success or InvalidHeaders; invalid tokens preserve the preceding authorization.
          */
         [[nodiscard]] auto SetBearerToken(std::string_view token) -> Result<void> {
-            bool padding{};
-            if (token.empty() || token.front() == '=') { return std::unexpected{ Error::InvalidHeaders }; }
-            for (unsigned char value : token) {
-                if (value == '=') { padding = true; continue; }
-                bool const allowed = (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z')
-                    || (value >= '0' && value <= '9') || std::string_view{ "-._~+/" }.contains(static_cast<char>(value));
-                if (padding || !allowed) { return std::unexpected{ Error::InvalidHeaders }; }
-            }
+            if (!detail::is_bearer_token(token)) { return std::unexpected{ Error::InvalidHeaders }; }
             std::lock_guard lock{ m_headers_mutex };
             return m_default_headers.Set("Authorization", std::string{ "Bearer " } + std::string{ token });
         }

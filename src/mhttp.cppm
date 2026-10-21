@@ -31,6 +31,7 @@ export import :server.request_data;
 export import :server.response;
 export import :server.request;
 export import :server.handler;
+export import :server.auth;
 export import :server.router;
 export import :server.options;
 export import :server.response_policy;

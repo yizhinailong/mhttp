@@ -72,6 +72,27 @@ QueryParams::Encode 可生成客户端上传的表单字符串，空格编码为
 缺失、非法数字、溢出及非有限浮点数返回空值。数字要求消费全部字符，不接受前导 `+`。
 string 返回独立副本，string_view 继续借用 Request；空字符串捕获与缺失可以区分。
 
+## 认证中间件
+
+`server::BasicAuth::Create(username, password, realm)` 与
+`server::BearerAuth::Create(token, realm)` 返回 Result 中的认证 aspect，复制并拥有凭据及 realm。
+也可传入自定义 Validator：Basic 接收解码后的用户名和密码，Bearer 接收 token。
+校验器由 aspect 拥有，借用参数只在调用期间有效；校验器必须快速返回，并自行同步共享状态。
+创建时拒绝空校验器、Basic 用户名中的冒号、非法 Bearer token，以及会造成头部注入的 realm。
+realm 中的引号和反斜杠会正确转义；Basic 的密码允许包含冒号。
+
+将认证 aspect 传给路由注册函数，或通过 `Use` 应用到全部匹配路由。
+scheme 大小写无关；缺失、重复、错误 scheme、格式错误或校验失败均短路为 401，
+带相应的 WWW-Authenticate 挑战，受保护 handler 不会执行。
+Basic 要求规范 Base64 和用户名/密码分隔符；Bearer 验证 RFC 6750 的 token 字符规则。
+合法凭据不改变已有响应。校验器抛出的异常走现有异常处理器。
+客户端的 SetBasicAuth / SetBearerToken 与这两个中间件配套使用。
+
+```cpp
+auto auth = mhttp::server::BasicAuth::Create("user", "password", "REST API");
+server.Use(std::move(*auth)).value();
+```
+
 ## 响应
 
 Response 默认是空的 200 OK，只可移动，内部拥有状态、按顺序保存的头部和二进制 body。
