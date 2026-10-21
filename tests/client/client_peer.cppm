@@ -154,7 +154,8 @@ namespace mhttp::test {
     auto run_client_peer(
         ClientPeerPlan plan,
         client::ClientOptions options = {},
-        client::Request request = client::Request{}
+        client::Request request = client::Request{},
+        client::TransferCallbacks callbacks = {}
     ) -> ClientPeerResult {
         TransportRuntime peer_runtime;
         auto listener = std::make_shared<asio::ip::tcp::acceptor>(peer_runtime.Executor(),
@@ -170,7 +171,7 @@ namespace mhttp::test {
         Check(runtime.Start(4).has_value(), "start public client against raw peer");
         client::HttpClient client{ runtime, "127.0.0.1", port, std::move(options) };
         auto const started = std::chrono::steady_clock::now();
-        auto response = SyncWait(runtime, client.Send(std::move(request)));
+        auto response = SyncWait(runtime, client.Send(std::move(request), std::move(callbacks)));
         auto const elapsed = std::chrono::steady_clock::now() - started;
         bool const open = client.IsOpen();
         worker.join();

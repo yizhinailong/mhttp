@@ -225,6 +225,42 @@ auto client_stream_callback_stop() -> void {
 }
 
 /**
+ * @brief Propagate cancellation from a server handler calling this client while its runtime remains active.
+ */
+auto client_stream_caller_cancellation() -> void {
+    mhttp::Runtime runtime;
+    Check(runtime.Start(4).has_value(), "start inherited-cancellation runtime");
+    mhttp::server::HttpServer upstream{ runtime };
+    Check(upstream.Get("/body", [](auto&, auto& response) { static_cast<void>(response.SetContent("body", "text/plain")); }).has_value(),
+        "inherited-cancellation upstream");
+    mhttp::client::HttpClient outbound{ runtime, "127.0.0.1", start_client_stream_server(upstream),
+        { .timeout_policy = mhttp::client::TimeoutPolicy::Never } };
+    std::atomic<unsigned> active{};
+    std::latch entered{ 1 };
+    mhttp::server::HttpServer proxy{ runtime };
+    Check(proxy.Get("/proxy", [&](auto&, auto&) -> mhttp::Task<void> {
+        mhttp::client::TransferCallbacks callbacks;
+        callbacks.on_body = [&](std::string) -> mhttp::Task<mhttp::Result<void>> {
+            CallbackFrame frame{ active };
+            entered.count_down();
+            co_await mhttp::Sleep(20s);
+            co_return mhttp::Result<void>{};
+        };
+        static_cast<void>(co_await outbound.Send(mhttp::client::Request{ mhttp::Method::Get, "/body" }, std::move(callbacks)));
+    }).has_value(), "proxy handler owns nested client operation");
+    mhttp::client::HttpClient caller{ runtime, "127.0.0.1", start_client_stream_server(proxy) };
+    mhttp::Result<mhttp::client::Response> result = std::unexpected{ mhttp::Error::Unknown };
+    std::jthread worker{ [&] { result = mhttp::SyncWait(runtime, caller.Get("/proxy")); } };
+    entered.wait();
+    Check(proxy.Stop().has_value(), "cancel only the proxy session and drain its nested client callback");
+    worker.join();
+    Check(!result && active == 0 && !outbound.IsOpen(), "caller cancellation closes nested transfer without stopping its runtime");
+    auto recovered = mhttp::SyncWait(runtime, outbound.Get("/body"));
+    Check(recovered && recovered->Body() == "body", "inherited cancellation releases Busy and preserves a running client runtime");
+    Check(upstream.Stop().has_value(), "drain inherited-cancellation upstream");
+}
+
+/**
  * @brief Run bounded client streaming scenarios.
  * @param argc Argument count.
  * @param argv Optional case filters.
@@ -236,5 +272,6 @@ auto main(int argc, char** argv) -> int {
         { "client stream redirects and upload progress", client_stream_redirects_and_upload_progress },
         { "client callback failures", client_stream_callback_failures },
         { "client callback stop", client_stream_callback_stop },
+        { "client inherited caller cancellation", client_stream_caller_cancellation },
     });
 }

@@ -244,3 +244,8 @@ auto response = co_await client.Send(std::move(request));
 来源按顺序等待完成，沿用上传阶段的超时策略和进度语义，可使用 Offload 处理阻塞来源。
 返回错误、抛出异常、取消或超时均会清理嵌套 Task 后返回；异常映射为 Unknown，写预算耗尽为 WriteTimeout。
 不得捕获已经离开作用域的 handler 局部引用；Runtime 和捕获的外部对象必须存活到 Send 完成。
+
+`tests/integration/client_stream_test.cpp` 覆盖首块提前送达、拥有块、进度、重定向过滤、回调异常/超时，
+以及客户端、Runtime 和调用者会话的取消传播。
+`python tools/check_client.py streamed` 使用原始响应覆盖固定长度/chunked/EOF、HEAD/204/304、
+二进制、trailer、截断、总量限制及逐次回调的超时策略。

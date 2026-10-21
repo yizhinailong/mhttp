@@ -12,6 +12,7 @@ import :test.transport;
 import :test.client_peer;
 import :test.client_write_fault;
 import :test.client_expect;
+import :test.client_streaming;
 
 namespace mhttp::test {
 
@@ -323,6 +324,9 @@ export namespace mhttp::test {
      */
     auto RunClientTests(int argc, char* argv[]) -> int {
         return RunTests(argc, argv, {
+            { "client streamed raw framing", client_streamed_raw_framing },
+            { "client streamed raw failures", client_streamed_raw_failures },
+            { "client streamed callback policies", client_streamed_callback_policies },
             { "client response framing", client_response_framing },
             { "client truncated responses", client_truncated_responses },
             { "client response limits", client_response_limits },
