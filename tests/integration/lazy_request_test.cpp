@@ -131,6 +131,51 @@ auto lazy_registration() -> void {
 }
 
 /**
+ * @brief Retire completed intake before a deferred response provider and reject old reads during socket reuse.
+ */
+auto lazy_response_and_reuse() -> void {
+    mhttp::Runtime runtime;
+    Check(runtime.Start(4).has_value(), "start composable lazy runtime");
+    std::optional<mhttp::Task<mhttp::Result<std::optional<std::string>>>> late;
+    std::latch next_entered{ 1 };
+    mhttp::server::HttpServer server{ runtime, { .read_timeout = 50ms, .request_chunk_bytes = 3 } };
+    Check(server.RouteLazy(mhttp::Method::Post, "/echo", [&](auto& request, auto& response) -> mhttp::Task<void> {
+        std::string body;
+        for (;;) {
+            auto chunk = co_await request.ReadBody();
+            Check(chunk.has_value(), "read before installing response provider");
+            if (!*chunk) { break; }
+            body += **chunk;
+        }
+        late.emplace(request.ReadBody());
+        Check(response.SetChunkedContentProvider([&request, body = std::move(body)](
+            auto& writer
+        ) -> mhttp::Task<mhttp::Result<void>> {
+            auto retired = co_await request.ReadBody();
+            Check(!retired && retired.error() == mhttp::Error::InvalidRequest, "provider cannot reopen request intake");
+            co_return co_await writer.Write(body);
+        }).has_value(), "defer owned streamed echo after complete upload");
+    }).has_value(), "combine lazy upload and streamed response");
+    Check(server.Get("/next", [&](auto&, auto& response) -> mhttp::Task<void> {
+        next_entered.count_down();
+        co_await mhttp::Sleep(100ms);
+        Check(response.SetContent("next", "text/plain").has_value(), "complete successor after old intake deadline");
+    }).has_value(), "register delayed successor");
+    mhttp::client::HttpClient client{ runtime, "127.0.0.1", start_lazy_server(server) };
+    auto echo = mhttp::SyncWait(runtime, client.Post("/echo", "echo"));
+    Check(echo && echo->Body() == "echo", "lazy intake composes with chunked output");
+    mhttp::Result<mhttp::client::Response> next = std::unexpected{ mhttp::Error::Unknown };
+    std::jthread caller{ [&] { next = mhttp::SyncWait(runtime, client.Get("/next")); } };
+    next_entered.wait();
+    auto retired = mhttp::SyncWait(runtime, std::move(*late));
+    Check(!retired && retired.error() == mhttp::Error::InvalidRequest, "old reader cannot consume an active successor");
+    late.reset();
+    caller.join();
+    Check(next && next->Body() == "next" && next->LocalEndpoint() == echo->LocalEndpoint(), "retired reads preserve socket reuse");
+    Check(server.Stop().has_value(), "drain composable lazy requests");
+}
+
+/**
  * @brief Run bounded public lazy-body scenarios.
  * @param argc Argument count.
  * @param argv Optional case filters.
@@ -141,5 +186,6 @@ auto main(int argc, char** argv) -> int {
         { "lazy binary persistence", lazy_binary_persistence },
         { "lazy failure and retirement", lazy_failure_and_retirement },
         { "lazy registration policy", lazy_registration },
+        { "lazy response and reused input", lazy_response_and_reuse },
     });
 }

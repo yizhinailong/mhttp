@@ -361,7 +361,8 @@ Error::Canceled 保持为取消控制流，不转成 500，也不会继续调用
 
 首个头部和每个 body 使用 read_timeout；后续头部使用 keep_alive_timeout。
 每个阶段使用整体截止时间，单个字节到达不会重新计时。请求已有字节时，读超时先取消读取，
-生成 408，经错误钩子和 post-routing 改写后发送并关闭；不 dispatch handler，也不暴露未完成 body。
+生成 408，经错误钩子和 post-routing 改写后发送并关闭；普通路由不 dispatch handler，也不暴露未完成 body。
+lazy 路由在已开始的 handler 读取时返回错误，并保留该失败供最终错误处理。
 没有请求字节的空闲读超时及空闲 EOF 直接关闭，不生成响应；写超时关闭连接。
 半关闭导致的截断请求生成 400。
 非法协议、URI、头部或 body 分别写回解析器指定的状态码，再关闭连接。
@@ -480,3 +481,8 @@ handler 验收还覆盖全局/路由 aspect 顺序、403 短路、带 aspect 的
 整条响应期限、两种停机路径、遗留写入和旧定时器的清理；总输出超过缓冲响应上限仍能成功。
 原始对端的三个 stream 用例用接收首块后才放行 provider 的 gate 验证增量发送，覆盖 HTTP/1.0 EOF、
 流水线顺序、编码后块大小的精确边界、非法/超限 trailer、peer reset，以及不读取时的背压和写超时。
+
+`tests/integration/lazy_request_test.cpp` 覆盖拥有块的二进制读取、普通缓冲路由共存、连接复用、
+延迟读取的退休保护、读取错误钩子及与流式响应的组合。
+`python tools/check_server.py lazy` 使用原始回环 TCP 校验分段上传、Expect 延迟、提前拒绝、
+未读正文关闭、截断/超限/超时、流水线边界及服务端与 Runtime 停止时的资源清理。

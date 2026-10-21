@@ -21,6 +21,7 @@ import :test.server_deadlines;
 import :test.server_multipart;
 import :test.server_proxies;
 import :test.server_streams;
+import :test.server_lazy;
 
 namespace mhttp::test {
 
@@ -841,6 +842,10 @@ export namespace mhttp::test {
             { "listener incremental streams", server_incremental_streams },
             { "listener committed stream failures", server_failed_streams },
             { "listener stream backpressure", server_stream_backpressure },
+            { "listener lazy incremental intake", server_lazy_incremental },
+            { "listener lazy early rejection", server_lazy_rejection },
+            { "listener lazy input failures", server_lazy_failures },
+            { "listener lazy stop", server_lazy_stop },
             { "listener request bodies", server_request_bodies },
             { "listener response mutations", server_response_mutations },
             { "listener rejected input", server_rejected_input },
