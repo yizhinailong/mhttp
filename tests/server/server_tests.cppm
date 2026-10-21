@@ -13,6 +13,7 @@ import :test.transport;
 import :test.session;
 import :test.server_peer;
 import :test.server_routes;
+import :test.server_handlers;
 
 namespace mhttp::test {
 
@@ -291,6 +292,7 @@ namespace mhttp::test {
             CheckEq(reply.head.status, path == std::string_view{ "/ok" } ? Status::Ok : Status::InternalServerError,
                 "listener survives application and post-routing exceptions");
             Check(!wire.contains("secret failure"), "default exception responses contain no private exception message");
+            Check(!reply.head.headers.Has("Injected"), "default exception handling rejects CRLF header injection");
             CheckEq(reply.head.headers.Get("X-Server"), "default", "configured response defaults reach every final reply");
         }
     }
@@ -825,6 +827,8 @@ export namespace mhttp::test {
             { "listener bound-only stop", server_bound_only_stop },
             { "listener route paths", server_route_paths },
             { "listener route methods", server_route_methods },
+            { "listener handler order", server_handler_order },
+            { "listener exception concurrency", server_exception_concurrency },
             { "listener in-flight stop", server_inflight_stop },
             { "listener Offload drain", server_offload_drain },
             { "listener callback isolation", server_callback_isolation },
