@@ -8,6 +8,7 @@ import std;
 import asio;
 import :core.impl.io_error;
 import :server.http_server;
+import :server.impl.socket_options;
 import :test.transport;
 import :test.session;
 
@@ -468,6 +469,122 @@ namespace mhttp::test {
         CheckEq(handlers.load(), 6, "only admitted requests execute handlers");
     }
 
+    /**
+     * @brief Check actual listener option values and protection against competing reuse-enabled binds.
+     */
+    auto server_listener_socket_options() -> void {
+        asio::io_context context;
+        for (bool reuse : { false, true }) {
+            asio::ip::tcp::acceptor acceptor{ context };
+            acceptor.open(asio::ip::tcp::v4());
+            Check(!impl::configure_listener_socket(acceptor, asio::ip::tcp::v4(), { .reuse_address = reuse }),
+                "configure initialized IPv4 acceptor");
+            asio::socket_base::reuse_address actual;
+            acceptor.get_option(actual);
+#ifdef _WIN32
+            Check(!actual.value(), "Windows never enables SO_REUSEADDR");
+            impl::ExclusiveAddressUse exclusive;
+            acceptor.get_option(exclusive);
+            Check(exclusive.value(), "Windows explicitly reserves an exclusive address");
+#else
+            CheckEq(actual.value(), reuse, "POSIX applies the configured reuse policy");
+#endif
+            acceptor.bind({ asio::ip::address_v4::loopback(), 0 });
+            acceptor.listen();
+            asio::ip::tcp::acceptor competitor{ context };
+            competitor.open(asio::ip::tcp::v4());
+            competitor.set_option(asio::socket_base::reuse_address{ true });
+            asio::error_code error;
+            competitor.bind(acceptor.local_endpoint(), error);
+            Check(static_cast<bool>(error), "reuse-enabled competitor cannot take a live listener's address");
+        }
+        asio::ip::tcp::acceptor probe{ context };
+        asio::error_code error;
+        probe.open(asio::ip::tcp::v6(), error);
+        if (error) { std::println("[skip] local IPv6 socket support unavailable: {}", error.message()); return; }
+        probe.close();
+        for (bool ipv6_only : { false, true }) {
+            asio::ip::tcp::acceptor acceptor{ context };
+            acceptor.open(asio::ip::tcp::v6());
+            Check(!impl::configure_listener_socket(acceptor, asio::ip::tcp::v6(), { .ipv6_only = ipv6_only }),
+                "configure explicit IPv6 mode");
+            impl::IPv6Only actual{ false };
+            acceptor.get_option(actual);
+            CheckEq(actual.value(), ipv6_only, "native IPV6_V6ONLY matches configuration");
+        }
+    }
+
+    /**
+     * @brief Check actual TCP_NODELAY values before handing a connected socket to a session.
+     * @param executor Independent fixture strand.
+     */
+    auto server_peer_options_scenario(asio::any_io_executor executor) -> asio::awaitable<void> {
+        auto pair = co_await make_loopback(executor);
+        for (bool no_delay : { false, true }) {
+            auto& socket = pair->connection->SocketForInitialization();
+            Check(!impl::configure_session_socket(socket, { .tcp_no_delay = no_delay }), "configure TCP_NODELAY");
+            asio::ip::tcp::no_delay actual;
+            socket.get_option(actual);
+            CheckEq(actual.value(), no_delay, "native TCP_NODELAY matches configuration");
+        }
+        pair->connection->Close();
+    }
+
+    /**
+     * @brief Run accepted-socket initialization on a real loopback pair.
+     */
+    auto server_peer_socket_options() -> void {
+        TransportRuntime peers;
+        peers.Run(server_peer_options_scenario(peers.Executor()));
+    }
+
+    /**
+     * @brief Request the same IPv6 listener through native IPv6 and optionally mapped IPv4.
+     * @param executor Fixture strand.
+     * @param port Bound dynamic listener port.
+     * @param dual_stack Whether to verify IPv4 requests in addition to IPv6.
+     */
+    auto server_ipv6_scenario(
+        asio::any_io_executor executor,
+        std::uint16_t port,
+        bool dual_stack
+    ) -> asio::awaitable<void> {
+        for (auto host : { "::1", "127.0.0.1" }) {
+            if (!dual_stack && host == std::string_view{ "127.0.0.1" }) { continue; }
+            auto wire = co_await server_exchange(executor, { host, port },
+                "GET / HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n");
+            std::size_t offset{};
+            CheckEq(parse_session_reply(wire, offset).body, "IPv6", "IPv6 listener serves the requested loopback family");
+        }
+    }
+
+    /**
+     * @brief Verify dual-stack and IPv6-only listeners, skipping only unavailable local IPv6 support.
+     */
+    auto server_ipv6_and_dual_stack() -> void {
+        asio::io_context probe_context;
+        asio::ip::tcp::acceptor probe{ probe_context };
+        asio::error_code error;
+        probe.open(asio::ip::tcp::v6(), error);
+        if (!error) { probe.bind({ asio::ip::address_v6::loopback(), 0 }, error); }
+        if (error) { std::println("[skip] local IPv6 loopback unavailable: {}", error.message()); return; }
+        probe.close();
+        Runtime runtime;
+        Check(runtime.Start(4).has_value(), "start IPv6 runtime");
+        TransportRuntime peers;
+        for (bool ipv6_only : { false, true }) {
+            server::HttpServer server{ runtime, { .ipv6_only = ipv6_only } };
+            Check(server.Get("/", [](auto&, auto& response) {
+                Check(response.SetContent("IPv6", "text/plain").has_value(), "IPv6 response");
+            }).has_value(), "register IPv6 route");
+            auto port = server.BindToAnyPort("::");
+            if (!Check(port.has_value(), "bind IPv6 wildcard listener")) { continue; }
+            Check(server.Start().has_value(), "start IPv6 listener");
+            peers.Run(server_ipv6_scenario(peers.Executor(), *port, !ipv6_only));
+            Check(server.Stop().has_value(), "drain IPv6 listener");
+        }
+    }
+
 } // namespace mhttp::test
 
 export namespace mhttp::test {
@@ -487,6 +604,9 @@ export namespace mhttp::test {
             { "listener callback isolation", server_callback_isolation },
             { "listener Listen execution", server_listen_execution },
             { "listener connection limit", server_connection_limit },
+            { "listener socket options", server_listener_socket_options },
+            { "listener accepted socket options", server_peer_socket_options },
+            { "listener IPv6 dual stack", server_ipv6_and_dual_stack },
         });
     }
 

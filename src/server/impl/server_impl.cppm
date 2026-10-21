@@ -9,6 +9,7 @@ import asio;
 import :core.impl.io_error;
 import :core.runtime;
 import :server.impl.session;
+import :server.impl.socket_options;
 
 namespace mhttp::impl {
 
@@ -88,6 +89,8 @@ namespace mhttp::impl {
             for (auto const& entry : endpoints) {
                 auto acceptor = std::make_shared<asio::ip::tcp::acceptor>(m_executor);
                 acceptor->open(entry.endpoint().protocol(), error);
+                if (error) { continue; }
+                error = configure_listener_socket(*acceptor, entry.endpoint().protocol(), m_options);
                 if (error) { continue; }
                 acceptor->bind(entry.endpoint(), error);
                 if (error) { continue; }
@@ -320,6 +323,10 @@ namespace mhttp::impl {
                 if (generation->stopping) { (*connection)->Close(); break; }
                 if (error) { co_return std::unexpected{ Error::Connection }; }
                 if (generation->sessions.size() >= self->m_options.max_connections) {
+                    (*connection)->Close();
+                    continue;
+                }
+                if (configure_session_socket((*connection)->SocketForInitialization(), self->m_options)) {
                     (*connection)->Close();
                     continue;
                 }

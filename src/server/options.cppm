@@ -26,6 +26,9 @@ export namespace mhttp::server {
         std::uint64_t body_bytes{ 8 * 1024 * 1024 }; ///< Maximum decoded buffered request body.
         std::size_t max_response_bytes{ 16 * 1024 * 1024 }; ///< Maximum complete buffered wire response.
         std::size_t max_connections{ 1024 }; ///< Maximum registered sessions, including idle/closing sessions.
+        bool reuse_address{ true }; ///< Reuse closed POSIX bindings; Windows always reserves exclusively.
+        bool tcp_no_delay{ true }; ///< Disable Nagle on each accepted socket before session startup.
+        bool ipv6_only{}; ///< Restrict IPv6 listeners to IPv6; false enables IPv4-mapped dual stack.
         Headers default_headers; ///< Fallback response fields; explicit application fields take precedence.
     };
 

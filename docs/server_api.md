@@ -231,6 +231,14 @@ Listen(host, port) 组合 Bind、Start 与阻塞等待。Runtime 空闲时，它
 max_connections 默认 1024，必须为正数，统计包括空闲、正在关闭和等待 Offload 排空的已登记会话。
 达到上限后接受到的额外套接字直接关闭，不解析请求、不执行 handler，也不发送 HTTP 响应。
 会话根完成回调从全局 strand 的注册表移除条目后才释放容量；已有 keep-alive 会话继续工作。
+
+reuse_address 默认 true，仅在 POSIX 上配置 SO_REUSEADDR，允许关闭后的本地地址复用。
+Windows 使用 SO_EXCLUSIVEADDRUSE，阻止其他开启复用的监听器抢占正在使用的绑定；
+该选项不会强制立即回收仍由操作系统维护的连接状态，详见
+[Windows 地址复用与独占绑定](https://learn.microsoft.com/en-us/windows/win32/winsock/using-so-reuseaddr-and-so-exclusiveaddruse)。
+tcp_no_delay 默认 true，在会话启动前给每个接收套接字设置 TCP_NODELAY。
+IPv6 绑定显式设置 IPV6_V6ONLY：ipv6_only 默认 false，绑定 `::` 时可同时接收 IPv6 和 IPv4 映射连接；
+设为 true 则仅接收 IPv6。IPv4 绑定忽略 ipv6_only。端点保留操作系统报告的地址，包括 IPv4 映射形式。
 当前尚未提供日志钩子。
 
 对应独立测试为 `tests/server/request_test.cpp`、`response_test.cpp`、
