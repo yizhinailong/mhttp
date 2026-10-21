@@ -7,19 +7,9 @@ module mhttp:core.impl.runtime;
 import std;
 import asio;
 import :core.error;
+import :core.impl.io_error;
 
 namespace mhttp::impl {
-
-    /**
-     * @brief Throw an owned mhttp error through standard exception handling.
-     * @param error Library failure to report at a coroutine or synchronous wait boundary.
-     * @note Keep this definition before RuntimeImpl: on Clang/MSVC, instantiating imported
-     *       thread code first can emit system_error throw metadata without its copy constructor.
-     *       A captured exception would then shallow-copy its owned message and double-free it.
-     */
-    [[noreturn]] auto throw_error(Error error) -> void {
-        throw std::system_error{ make_error_code(error) };
-    }
 
     class RuntimeImpl;
     inline thread_local RuntimeImpl* g_current_runtime{}; ///< Runtime whose I/O callback is executing.

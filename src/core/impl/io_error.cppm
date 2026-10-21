@@ -11,6 +11,17 @@ import :core.error;
 namespace mhttp::impl {
 
     /**
+     * @brief Throw an owned mhttp error through standard exception handling.
+     * @param error Library failure to report at a coroutine or synchronous wait boundary.
+     * @note Keep this definition before imported I/O/thread code is instantiated: on Clang/MSVC,
+     *       otherwise system_error throw metadata can omit its copy constructor and double-free
+     *       the owned message during exception transport. Transport implementations import this partition.
+     */
+    [[noreturn]] auto throw_error(Error error) -> void {
+        throw std::system_error{ make_error_code(error) };
+    }
+
+    /**
      * @brief Identify the operation whose fallback and timeout errors should be reported.
      */
     enum class IoOperation {
