@@ -2,7 +2,7 @@
 
 客户端的请求与响应类型通过 `import mhttp;` 使用，公共接口只包含标准库和 mhttp 类型。
 `client::HttpClient` 提供惰性连接和 `Send(Request) -> Task<Result<Response>>`。
-构造时不进行 DNS 或 socket I/O；连接、发送与读取均异步进行。完整的空闲连接重连和重定向待后续接入。
+构造时不进行 DNS 或 socket I/O；连接、发送与读取均异步进行。重定向与可选整体超时策略待后续接入。
 
 ```cpp
 import std;
@@ -73,8 +73,10 @@ Content-Length 按实际二进制 body 长度生成，调用方填写的旧长�
 
 同一客户端只允许一个执行中的 Send；并发请求返回 Busy，不会中断先前的请求。
 Keep-alive 在完整分帧且双方均允许时复用同一连接。收到 close 或读到关闭的响应后不复用。
-当前只在复用连接的头部发送返回 ConnectionClosed 且已完成字节为零时重试一次，body 尚未交给发送操作。
-头部已有完成前缀、body 发送失败、读失败或超时都不会重发；空闲对端关闭的主动检测待补充。
+空闲连接通过异步可读等待检测 FIN / reset 或非预期数据。下一次请求先取消并排空等待，再使用连接，
+等待不会消耗响应字节；已检测到关闭则直接重新连接。
+复用连接的头部发送返回 ConnectionClosed 且已完成字节为零时只重试一次，body 尚未交给发送操作。
+头部已有完成前缀、body 发送失败、读失败或超时都不会重发。
 Stop 可由任意线程调用，立即清除 IsOpen 的已知状态，投递取消 DNS / socket 操作；在途请求返回 Canceled。
 Stop 前签发但尚未执行的 Task 同样被取消；之后新签发的请求可重新连接。
 Runtime 停止会关闭空闲及在途连接，Join 排空后重启 Runtime，可继续使用原客户端。
@@ -90,3 +92,6 @@ Content-Length 或 chunked 尚未完成就断开时返回 ConnectionClosed。
 Busy、四个客户端的跨线程 Stop、读超时、空闲/在途 Runtime 取消与重启，以及消息在网络状态销毁后的所有权。
 `python tools/check_client.py` 使用隔离工程中的原始 TCP 对端验证 CL / chunked / EOF、trailer、
 HEAD / 204 / 304 / 404、截断、字段和 body 上限、编码错误、连接拒绝、真实 body 读超时和上传写超时。
+它还在 POST 请求头部分写入后主动 reset，并确认没有额外连接或请求重发。
+`tests/client/keep_alive_test.cpp` 验证空闲关闭后的透明重连、200 次同连接复用、服务端每连接请求上限、
+禁用复用、Stop 世代竞争及销毁客户端时的空闲等待排空。

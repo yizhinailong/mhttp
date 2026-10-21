@@ -57,6 +57,26 @@ namespace mhttp::impl {
             }
         };
 
+        /**
+         * @brief Retain an idle wait until cancellation/readability is joined before the next request phase.
+         */
+        struct IdleWatch {
+            std::shared_ptr<Connection> connection; ///< Transport owner through wait completion.
+            asio::cancellation_signal cancel; ///< Cancels only the readiness wait, preserving the socket.
+            asio::cancellation_signal neutral; ///< Drain must complete even if the next Send is canceled.
+            asio::experimental::channel<void(asio::error_code)> done; ///< One buffered completion on the client strand.
+            bool stopping{}; ///< A new request deliberately retires this watch.
+            bool finished{}; ///< The wait and its receive guard have drained.
+
+            /**
+             * @brief Bind readiness publication and retain the observed transport.
+             * @param executor Client strand, shared by every callback touching this state.
+             * @param transport Current complete-response connection.
+             */
+            IdleWatch(asio::any_io_executor executor, std::shared_ptr<Connection> transport) :
+                connection{ std::move(transport) }, done{ executor, 1 } {}
+        };
+
         std::shared_ptr<RuntimeImpl> m_runtime; ///< Context owner; public lifetime contract still requires Runtime.
         asio::any_io_executor m_executor; ///< Strand serializing every mutable network field below.
         asio::ip::tcp::resolver m_resolver; ///< Lazy asynchronous DNS, canceled only on m_executor.
@@ -64,6 +84,7 @@ namespace mhttp::impl {
         std::optional<Error> m_initialization_error; ///< Immutable constructor validation failure.
         client::ClientOptions m_options; ///< Owned configuration snapshot.
         std::shared_ptr<Connection> m_connection; ///< Current connecting or connected transport.
+        std::shared_ptr<IdleWatch> m_idle_watch; ///< Idle peer-close detection, retired before another Send.
         std::shared_ptr<ConnectDeadline> m_connect_deadline; ///< Active connection phase only.
         std::unique_ptr<std::stop_callback<std::function<void()>>> m_runtime_stop; ///< Idle and active runtime cancellation.
         std::stop_token m_runtime_token; ///< Generation owning the current resolver/socket.
@@ -88,6 +109,14 @@ namespace mhttp::impl {
             else { m_initialization_error = origin.error(); }
             auto valid = detail::validate_client_options(m_options);
             if (!m_initialization_error && !valid) { m_initialization_error = valid.error(); }
+        }
+
+        /**
+         * @brief Close a retained idle transport even if the public Stop post outlives this last owner.
+         * @note Active Send frames retain this owner; only independently owned idle waits can remain here.
+         */
+        ~ClientImpl() {
+            if (m_connection) { m_connection->Close(); }
         }
 
         /**
@@ -151,9 +180,54 @@ namespace mhttp::impl {
          */
         auto closeConnection() -> void {
             m_open.store(false);
+            if (m_idle_watch) {
+                m_idle_watch->stopping = true;
+                if (!m_idle_watch->finished) { m_idle_watch->cancel.emit(asio::cancellation_type::all); }
+                m_idle_watch.reset();
+            }
             if (m_connection) { m_connection->Close(); m_connection.reset(); }
             m_remote = {};
             m_local = {};
+        }
+
+        /**
+         * @brief Detect idle FIN/reset or unsolicited bytes without consuming a future response.
+         * @note The connection executor is nested in the client strand, so all wait callbacks remain serialized.
+         */
+        auto watchIdleConnection() -> void {
+            if (!m_connection) { return; }
+            auto watch = std::make_shared<IdleWatch>(m_executor, m_connection);
+            m_idle_watch = watch;
+            asio::co_spawn(m_executor, watch->connection->WaitForPeerData(), asio::bind_cancellation_slot(watch->cancel.slot(),
+                [weak = weak_from_this(), watch](std::exception_ptr failure, Result<void> result) {
+                    watch->finished = true;
+                    bool canceled = !failure && !result && result.error() == Error::Canceled;
+                    if (failure) {
+                        try { std::rethrow_exception(failure); }
+                        catch (std::system_error const& error) { canceled = error.code() == asio::error::operation_aborted || error.code() == Error::Canceled; }
+                        catch (...) {}
+                    }
+                    if (auto self = weak.lock(); self && self->m_idle_watch == watch
+                        && self->m_connection == watch->connection && !(watch->stopping && canceled)) {
+                        self->closeConnection();
+                    }
+                    static_cast<void>(watch->done.try_send(asio::error_code{}));
+                }));
+        }
+
+        /**
+         * @brief Join idle-wait cancellation before request I/O can reuse its receive direction or socket.
+         * @return Completion after the wait and callback have both drained.
+         */
+        auto stopIdleWatch() -> asio::awaitable<void> {
+            auto watch = m_idle_watch;
+            if (!watch) { co_return; }
+            watch->stopping = true;
+            if (!watch->finished) {
+                watch->cancel.emit(asio::cancellation_type::all);
+                co_await watch->done.async_receive(asio::bind_cancellation_slot(watch->neutral.slot(), asio::use_awaitable));
+            }
+            if (m_idle_watch == watch) { m_idle_watch.reset(); }
         }
 
         /**
@@ -353,6 +427,8 @@ namespace mhttp::impl {
             if (self->m_active_epoch != epoch) { self->closeConnection(); }
             self->m_active_epoch = epoch;
             self->linkRuntime(token);
+            co_await self->stopIdleWatch();
+            if (self->isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
             bool const reused = static_cast<bool>(self->m_connection);
             if (!self->m_connection) {
                 auto connected = co_await self->connect(epoch);
@@ -378,7 +454,9 @@ namespace mhttp::impl {
             if (!body) { co_return std::unexpected{ body.error() }; }
             auto response = co_await self->readResponse(*prepared, epoch);
             if (!response) { co_return response; }
+            if (self->isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
             if (!response->KeepAlive()) { self->closeConnection(); }
+            else { self->watchIdleConnection(); }
             scope.succeeded = true;
             co_return response;
         }

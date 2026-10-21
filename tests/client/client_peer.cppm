@@ -98,6 +98,44 @@ namespace mhttp::test {
     };
 
     /**
+     * @brief Reset a persistent socket after reading a large successor head prefix and count any unsafe replay.
+     * @param listener Owned dynamic loopback listener.
+     * @param connections Accepted TCP connection count, inspected only after this coroutine is joined.
+     */
+    auto reset_client_head_prefix(
+        std::shared_ptr<asio::ip::tcp::acceptor> listener,
+        unsigned& connections
+    ) -> asio::awaitable<void> {
+        auto executor = co_await asio::this_coro::executor;
+        asio::ip::tcp::socket first{ executor };
+        co_await listener->async_accept(first, asio::use_awaitable);
+        ++connections;
+        static_cast<void>(co_await read_client_head(first));
+        std::string const response{ "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" };
+        co_await asio::async_write(first, asio::buffer(response), asio::use_awaitable);
+        std::string prefix(128 * 1024, '\0');
+        co_await asio::async_read(first, asio::buffer(prefix), asio::use_awaitable);
+        Check(prefix.starts_with("POST /large HTTP/1.1\r\n"), "peer observes the second request's header prefix before reset");
+        Check(!prefix.contains("\r\n\r\n"), "large request head has not completed when peer resets");
+        first.set_option(asio::socket_base::linger{ true, 0 });
+        first.close();
+        asio::steady_timer deadline{ executor };
+        deadline.expires_after(150ms);
+        deadline.async_wait([listener](asio::error_code error) {
+            if (!error) { listener->cancel(); }
+        });
+        asio::ip::tcp::socket replay{ executor };
+        auto const [error] = co_await listener->async_accept(replay, asio::as_tuple(asio::use_awaitable));
+        if (!error) {
+            ++connections;
+            co_await asio::async_read(replay, asio::buffer(prefix), asio::use_awaitable);
+            replay.set_option(asio::socket_base::linger{ true, 0 });
+            replay.close();
+        } else if (error != asio::error::operation_aborted) { throw std::system_error{ error }; }
+        static_cast<void>(deadline.cancel());
+    }
+
+    /**
      * @brief Run the raw peer on independent I/O threads and wait for public Send from this non-I/O caller.
      * @param plan Owned response script.
      * @param options Buffered client limits and phase deadlines.

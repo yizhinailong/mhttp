@@ -133,6 +133,34 @@ namespace mhttp::test {
         Check(!refused && refused.error() == Error::Connection && !client.IsOpen(), "refused dynamic loopback endpoint reports Connection");
     }
 
+    /**
+     * @brief Never transparently replay a non-idempotent request whose head has already completed a prefix write.
+     */
+    auto client_partial_head_no_retry() -> void {
+        TransportRuntime peer_runtime;
+        auto listener = std::make_shared<asio::ip::tcp::acceptor>(peer_runtime.Executor(),
+            asio::ip::tcp::endpoint{ asio::ip::address_v4::loopback(), 0 });
+        auto const port = listener->local_endpoint().port();
+        unsigned connections{};
+        std::exception_ptr failure;
+        std::jthread worker{ [&] {
+            try { peer_runtime.Run(reset_client_head_prefix(listener, connections)); }
+            catch (...) { failure = std::current_exception(); }
+        } };
+        Runtime runtime;
+        Check(runtime.Start(4).has_value(), "start partial-head client runtime");
+        client::HttpClient client{ runtime, "127.0.0.1", port, { .write_timeout = 500ms } };
+        Check(SyncWait(runtime, client.Get()).has_value(), "establish the persistent socket before resetting its successor head");
+        client::Request request{ Method::Post, "/large" };
+        Check(request.Headers().Set("X-Large", std::string(8 * 1024 * 1024, 'h')).has_value(), "bounded large request head spans many transfer completions");
+        Check(request.SetContent("non-idempotent-body").has_value(), "body stays owned until head transfer completes");
+        auto result = SyncWait(runtime, client.Send(std::move(request)));
+        Check(!result && result.error() == Error::ConnectionClosed && !client.IsOpen(), "head prefix reset reports failure instead of replaying the request");
+        worker.join();
+        if (failure) { std::rethrow_exception(failure); }
+        CheckEq(connections, 1U, "peer observes no second TCP connection or request replay after a completed head prefix");
+    }
+
 } // namespace mhttp::test
 
 export namespace mhttp::test {
@@ -151,6 +179,7 @@ export namespace mhttp::test {
             { "client content encoding", client_content_encoding },
             { "client phase deadlines", client_phase_deadlines },
             { "client connection refused", client_connection_refused },
+            { "client partial head no retry", client_partial_head_no_retry },
         });
     }
 
