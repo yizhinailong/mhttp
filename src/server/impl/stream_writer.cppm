@@ -21,7 +21,8 @@ namespace mhttp::impl {
         using Clock = std::chrono::steady_clock; ///< Monotonic whole-response deadline clock.
         std::shared_ptr<Connection> m_connection; ///< Retain transport through every issued write.
         detail::ChunkEncoder m_encoder; ///< Own initial fields for terminal trailer validation.
-        detail::BodyKind m_kind; ///< Chunked or EOF framing selected before the first wire write.
+        detail::BodyKind m_kind; ///< Fixed-length, chunked, or EOF framing selected before transmission.
+        std::uint64_t m_remaining; ///< Unsent decoded bytes of a fixed-length representation.
         std::size_t m_chunk_bytes; ///< Maximum decoded size of one owned write.
         Clock::time_point m_deadline; ///< Shared deadline, including header and provider work.
         asio::steady_timer m_timer; ///< Cancel provider awaits even when no socket write is pending.
@@ -34,19 +35,22 @@ namespace mhttp::impl {
         /**
          * @brief Own the validated session dependencies without starting callbacks from a constructor.
          * @param connection Owned connected transport, accessed on its strand.
-         * @param kind Validated chunked or EOF body framing.
+         * @param kind Validated fixed-length, chunked, or EOF body framing.
          * @param headers Final initial fields, including defaults and Connection nominations.
          * @param chunk_bytes Positive decoded write bound.
          * @param deadline Absolute whole-response deadline already including header transmission.
+         * @param content_length Exact decoded length when kind is ContentLength.
          */
         StreamWriterImpl(
             std::shared_ptr<Connection> connection,
             detail::BodyKind kind,
             Headers headers,
             std::size_t chunk_bytes,
-            Clock::time_point deadline
+            Clock::time_point deadline,
+            std::uint64_t content_length
         ) : m_connection{ std::move(connection) }, m_encoder{ std::move(headers) }, m_kind{ kind },
-            m_chunk_bytes{ chunk_bytes }, m_deadline{ deadline }, m_timer{ m_connection->Executor() } {}
+            m_remaining{ content_length }, m_chunk_bytes{ chunk_bytes }, m_deadline{ deadline },
+            m_timer{ m_connection->Executor() } {}
 
         /**
          * @brief Check stream state before modifying framing or sending bytes.
@@ -99,6 +103,13 @@ namespace mhttp::impl {
             auto ready = self->ready();
             if (!ready) { co_return ready; }
             if (bytes.empty()) { co_return Result<void>{}; }
+            if (self->m_kind == detail::BodyKind::ContentLength) {
+                if (bytes.size() > self->m_remaining) {
+                    self->Fail(Error::ProtocolError);
+                    co_return std::unexpected{ Error::ProtocolError };
+                }
+                self->m_remaining -= bytes.size();
+            }
             std::size_t overhead{};
             if (self->m_kind == detail::BodyKind::Chunked) {
                 overhead = 4;
@@ -128,10 +139,14 @@ namespace mhttp::impl {
         ) -> asio::awaitable<Result<void>> {
             auto ready = self->ready();
             if (!ready) { co_return ready; }
-            if (self->m_kind == detail::BodyKind::UntilEof) {
+            if (self->m_kind != detail::BodyKind::Chunked) {
                 if (!trailers.Empty()) {
                     self->Fail(Error::InvalidHeaders);
                     co_return std::unexpected{ Error::InvalidHeaders };
+                }
+                if (self->m_kind == detail::BodyKind::ContentLength && self->m_remaining != 0) {
+                    self->Fail(Error::ProtocolError);
+                    co_return std::unexpected{ Error::ProtocolError };
                 }
                 self->m_finished = true;
                 co_return Result<void>{};
@@ -159,10 +174,11 @@ namespace mhttp::impl {
         /**
          * @brief Publish owned stream state and arm one deadline for the entire provider and output.
          * @param connection Owned connected transport on its strand.
-         * @param kind Chunked or EOF body framing.
+         * @param kind Fixed-length, chunked, or EOF body framing.
          * @param headers Owned final fields used for trailer validation.
          * @param chunk_bytes Positive raw segment bound.
          * @param deadline Absolute phase deadline, including the already-written response head.
+         * @param content_length Exact decoded length for fixed-length output, ignored otherwise.
          * @return Owned stream state whose timer cannot affect a later response after Retire.
          */
         static auto Create(
@@ -170,10 +186,11 @@ namespace mhttp::impl {
             detail::BodyKind kind,
             Headers headers,
             std::size_t chunk_bytes,
-            Clock::time_point deadline
+            Clock::time_point deadline,
+            std::uint64_t content_length = 0
         ) -> std::shared_ptr<StreamWriterImpl> {
             auto state = std::shared_ptr<StreamWriterImpl>{ new StreamWriterImpl{
-                std::move(connection), kind, std::move(headers), chunk_bytes, deadline } };
+                std::move(connection), kind, std::move(headers), chunk_bytes, deadline, content_length } };
             state->m_timer.expires_at(deadline);
             state->m_timer.async_wait([weak = std::weak_ptr{ state }](asio::error_code error) {
                 if (auto owner = weak.lock(); owner && !error && !owner->m_retired) { owner->Fail(Error::WriteTimeout); }

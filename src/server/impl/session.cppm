@@ -265,7 +265,7 @@ namespace mhttp::impl {
             SessionResult& result
         ) -> asio::awaitable<bool> {
             auto state = StreamWriterImpl::Create(m_connection, wire.body_kind,
-                std::move(wire.stream_headers), m_options.stream_chunk_bytes, deadline);
+                std::move(wire.stream_headers), m_options.stream_chunk_bytes, deadline, wire.content_length);
             StreamRetirement retirement{ state };
             std::stop_callback stopped{ m_stop_source.get_token(), [weak = std::weak_ptr{ state }] {
                 if (auto owner = weak.lock()) { owner->Cancel(); }

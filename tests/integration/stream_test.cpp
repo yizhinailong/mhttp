@@ -248,6 +248,52 @@ auto streamed_retirement() -> void {
 }
 
 /**
+ * @brief Enforce declared lengths without aggregate buffering and preserve reuse after exact output.
+ */
+auto streamed_fixed_lengths() -> void {
+    mhttp::Runtime runtime;
+    Check(runtime.Start(2).has_value(), "start fixed stream runtime");
+    std::atomic<unsigned> calls{};
+    mhttp::server::HttpServer server{ runtime, { .max_response_bytes = 512, .stream_chunk_bytes = 64 } };
+    Check(server.Get("/fixed/:mode", [&](auto& request, auto& response) {
+        auto mode = std::string{ request.PathParam("mode") };
+        auto const length = mode == "zero" ? 0u : mode == "short" ? 66u : mode == "long" ? 1u : 1024u;
+        Check(response.SetContentProvider(length, [&, mode = std::move(mode)](auto& writer) -> mhttp::Task<mhttp::Result<void>> {
+            ++calls;
+            if (mode == "zero") { co_return mhttp::Result<void>{}; }
+            auto const count = mode == "short" || mode == "long" ? 1 : 16;
+            for (int i{}; i < count; ++i) {
+                auto written = co_await writer.Write(std::string(64, static_cast<char>(i)));
+                if (!written) { co_return written; }
+            }
+            if (mode == "trailers") {
+                mhttp::Headers trailers;
+                static_cast<void>(trailers.Set("X-Forbidden", "yes"));
+                co_return co_await writer.Finish(std::move(trailers));
+            }
+            co_return mhttp::Result<void>{};
+        }).has_value(), "register exact length source");
+    }).has_value(), "register fixed stream route");
+    mhttp::client::HttpClient client{ runtime, "127.0.0.1", start_stream_server(server) };
+    auto head = mhttp::SyncWait(runtime, client.Send(mhttp::client::Request{ mhttp::Method::Head, "/fixed/exact" }));
+    Check(head && head->Header("Content-Length") == "1024" && head->Body().empty() && calls == 0,
+        "HEAD carries declared length and never calls source");
+    auto full = mhttp::SyncWait(runtime, client.Get("/fixed/exact"));
+    Check(full && full->Body().size() == 1024 && full->Header("Content-Length") == "1024"
+        && !full->Headers().Has("Transfer-Encoding"), "fixed stream exceeds buffered wire bound with exact framing");
+    auto empty = mhttp::SyncWait(runtime, client.Get("/fixed/zero"));
+    Check(full && empty && empty->Body().empty() && full->LocalEndpoint() == empty->LocalEndpoint(),
+        "exact and zero length streams preserve persistence");
+    for (auto mode : { "short", "long" }) {
+        auto failed = mhttp::SyncWait(runtime, client.Get(std::string{ "/fixed/" } + mode));
+        Check(!failed, "too few or too many bytes close incomplete framing");
+        auto recovered = mhttp::SyncWait(runtime, client.Get("/fixed/exact"));
+        Check(recovered && recovered->Body().size() == 1024, "length failure cannot corrupt the next response");
+    }
+    Check(server.Stop().has_value(), "drain fixed streams");
+}
+
+/**
  * @brief Run bounded streaming integration scenarios.
  * @param argc Argument count.
  * @param argv Borrowed arguments.
@@ -259,5 +305,6 @@ auto main(int argc, char** argv) -> int {
         { "stream provider errors and deadlines", streamed_failures },
         { "stream listener and runtime shutdown", streamed_shutdown },
         { "stream timer and lazy write retirement", streamed_retirement },
+        { "stream exact lengths", streamed_fixed_lengths },
     });
 }

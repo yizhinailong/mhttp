@@ -22,7 +22,7 @@ export namespace mhttp::server {
      * @brief Own a move-only buffered or streamed response for one serialized request handler chain.
      * @note Views and references borrow this response's state and expire on relevant mutation or
      *       destruction. Concurrent mutation requires external synchronization. A moved-from response
-     *       may only be destroyed or assigned. Wire framing is recomputed from Body by the serializer.
+     *       may only be destroyed or assigned. Wire framing follows Body or the provider's declared length.
      *       Do not move a session-supplied borrowed response or retain it beyond its handler chain.
      */
     class Response {
@@ -110,6 +110,31 @@ export namespace mhttp::server {
          * @note Body remains empty for streams; no complete aggregate representation is retained.
          */
         [[nodiscard]] auto IsStreaming() const noexcept -> bool { return m_impl->streaming; }
+
+        /**
+         * @brief Inspect the representation length independently of wire body suppression.
+         * @return Buffered byte count, declared stream length, or no value for an unknown stream.
+         */
+        [[nodiscard]] auto ContentLength() const noexcept -> std::optional<std::uint64_t> {
+            return m_impl->streaming ? m_impl->content_length : std::optional<std::uint64_t>{ m_impl->body.size() };
+        }
+
+        /**
+         * @brief Own a deferred producer with an exact Content-Length for either HTTP version.
+         * @param length Exact decoded byte count, including zero.
+         * @param provider Nonempty owned producer invoked after final hooks and head transmission.
+         * @param content_type Validated media type, or empty to remove Content-Type.
+         * @return Success, InvalidRequest, or InvalidHeaders without changing the prior representation.
+         * @note HEAD/204/304 skip the producer. Too many or too few bytes, trailers, cancellation,
+         *       or timeout close the connection. Each Write remains bounded by server stream limits.
+         */
+        [[nodiscard]] auto SetContentProvider(
+            std::uint64_t length,
+            ContentProvider provider,
+            std::string_view content_type = "application/octet-stream"
+        ) -> Result<void> {
+            return m_impl->SetChunkedContentProvider(std::move(provider), content_type, length);
+        }
 
         /**
          * @brief Own a deferred content producer while preserving status and unrelated fields.

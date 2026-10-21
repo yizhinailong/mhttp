@@ -238,6 +238,21 @@ auto response_stream_framing() -> void {
         Check(old && old->keep_alive && !old->streaming && old->bytes.contains("Connection: keep-alive\r\n"),
             "HTTP/1.0 bodyless responses still permit explicit persistence without running the provider");
     }
+    Check(response.SetEmpty(mhttp::Status::Ok).has_value(), "restore body status");
+    Check(response.SetContentProvider(1048576, [](auto&) -> mhttp::Task<mhttp::Result<void>> {
+        Check(false, "fixed source never runs during preparation");
+        co_return mhttp::Result<void>{};
+    }).has_value(), "configure fixed stream");
+    for (auto version : { mhttp::Version::Http10, mhttp::Version::Http11 }) {
+        mhttp::detail::RequestHead head{ .method = "GET", .version = version };
+        static_cast<void>(head.headers.Set("Connection", "keep-alive"));
+        auto request = ServerRequestAccess::Create(std::move(head));
+        auto wire = serialize_server_response(request, response, { .max_response_bytes = 512 });
+        Check(wire && wire->streaming && wire->keep_alive && wire->content_length == 1048576
+            && wire->body_kind == mhttp::detail::BodyKind::ContentLength
+            && wire->bytes.contains("Content-Length: 1048576\r\n") && !wire->bytes.contains("Transfer-Encoding:"),
+            "both HTTP versions frame exact streams and retain persistence without aggregate wire bounds");
+    }
     Check(!mhttp::detail::validate_server_options({ .stream_chunk_bytes = 0 }), "zero chunk bound rejected before bind");
 }
 

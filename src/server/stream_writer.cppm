@@ -60,10 +60,10 @@ export namespace mhttp::server {
 
         /**
          * @brief Finish once with optional bounded safe trailers; successful provider return also finishes.
-         * @param trailers Owned validated fields; HTTP/1.0 EOF streams require an empty collection.
+         * @param trailers Owned validated fields; only chunked streams accept trailers.
          * @return Lazy operation; unsafe fields, oversized terminal bytes, or repeated completion fail.
          * @note No body writes are permitted after completion. Await this operation before returning
-         *       from the provider. The session closes HTTP/1.0 output after the provider returns.
+         *       from the provider. The session closes EOF output after the provider returns.
          */
         [[nodiscard]] auto Finish(Headers trailers = {}) -> Task<Result<void>> {
             return impl::ToTask(m_impl->Executor(), m_impl->Finish(std::move(trailers)));

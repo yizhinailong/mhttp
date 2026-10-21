@@ -19,6 +19,7 @@ namespace mhttp::impl {
         std::string body; ///< Owned binary representation, independent of wire body suppression.
         server::ContentProvider provider; ///< Owned deferred producer, consumed only after final hooks.
         bool streaming{}; ///< Streaming representation, retained for observation after producer consumption.
+        std::optional<std::uint64_t> content_length; ///< Declared stream length; absent for unknown streams.
 
         /**
          * @brief Set a three-digit response status without changing content.
@@ -47,6 +48,7 @@ namespace mhttp::impl {
             body = std::move(bytes);
             provider = {};
             streaming = false;
+            content_length.reset();
             return {};
         }
 
@@ -54,11 +56,13 @@ namespace mhttp::impl {
          * @brief Replace buffered content with an owned deferred stream after validating all inputs.
          * @param source Nonempty producer, not invoked until final response hooks and head transmission.
          * @param content_type Borrowed validated field value, or empty to remove Content-Type.
+         * @param length Exact decoded stream length, or absent for chunked/EOF output.
          * @return Success, InvalidRequest for an empty callback, or InvalidHeaders without state changes.
          */
         auto SetChunkedContentProvider(
             server::ContentProvider source,
-            std::string_view content_type
+            std::string_view content_type,
+            std::optional<std::uint64_t> length = std::nullopt
         ) -> Result<void> {
             if (!source) { return std::unexpected{ Error::InvalidRequest }; }
             if (content_type.empty()) { headers.Erase("Content-Type"); }
@@ -69,6 +73,7 @@ namespace mhttp::impl {
             body.clear();
             provider = std::move(source);
             streaming = true;
+            content_length = length;
             return {};
         }
 
@@ -84,6 +89,7 @@ namespace mhttp::impl {
             body.clear();
             provider = {};
             streaming = false;
+            content_length.reset();
             return {};
         }
 
@@ -100,6 +106,7 @@ namespace mhttp::impl {
             status = value;
             provider = {};
             streaming = false;
+            content_length.reset();
             return {};
         }
 
@@ -122,6 +129,7 @@ namespace mhttp::impl {
             status = value;
             provider = {};
             streaming = false;
+            content_length.reset();
             return {};
         }
     };

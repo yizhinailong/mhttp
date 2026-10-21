@@ -32,6 +32,7 @@ export namespace mhttp::detail {
         bool streaming{}; ///< Invoke the owned provider only when wire body semantics allow it.
         BodyKind body_kind{ BodyKind::None }; ///< Chunked or EOF mode for active streams.
         Headers stream_headers; ///< Final initial fields for validating trailers, empty for buffered output.
+        std::uint64_t content_length{}; ///< Exact length for a ContentLength stream.
     };
 
     /**
@@ -65,7 +66,8 @@ export namespace mhttp::detail {
         }
         if (!head.headers.Has("Date")) { static_cast<void>(head.headers.Add("Date", FormatHttpDate(now))); }
         bool const streaming = response.IsStreaming();
-        bool const closing_stream = streaming && request.Version() == Version::Http10
+        bool const unknown_stream = streaming && !response.ContentLength();
+        bool const closing_stream = unknown_stream && request.Version() == Version::Http10
             && response.Status() != Status::NoContent && response.Status() != Status::NotModified;
         bool const keep_alive = !closing_stream && request.KeepAlive() && !routing.close && session.body_complete
             && !session.stopping && session.completed_requests < options.keep_alive_max_requests;
@@ -75,8 +77,8 @@ export namespace mhttp::detail {
             static_cast<void>(head.headers.Add("Connection", "keep-alive"));
         }
         auto serialized = serialize_response_head(head, request.Method().value_or(Method::Get),
-            { .body_bytes = response.Body().size(), .chunked = streaming && request.Version() == Version::Http11,
-                .keep_alive = keep_alive, .close_delimited = streaming && request.Version() == Version::Http10 });
+            { .body_bytes = response.ContentLength().value_or(0), .chunked = unknown_stream && request.Version() == Version::Http11,
+                .keep_alive = keep_alive, .close_delimited = unknown_stream && request.Version() == Version::Http10 });
         if (!serialized) { return std::unexpected{ serialized.error() }; }
         if (serialized->bytes.size() > options.max_response_bytes
             || (serialized->send_body && response.Body().size() > options.max_response_bytes - serialized->bytes.size())) {
@@ -86,7 +88,8 @@ export namespace mhttp::detail {
         bool const send_stream = streaming && serialized->send_body;
         return SerializedServerResponse{ .bytes = std::move(serialized->bytes), .keep_alive = serialized->keep_alive,
             .streaming = send_stream, .body_kind = serialized->body_kind,
-            .stream_headers = send_stream ? std::move(head.headers) : Headers{} };
+            .stream_headers = send_stream ? std::move(head.headers) : Headers{},
+            .content_length = response.ContentLength().value_or(0) };
     }
 
 } // namespace mhttp::detail
