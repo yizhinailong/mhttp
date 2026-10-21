@@ -10,6 +10,7 @@ export import :core.message;
 export import :core.query;
 export import :core.endpoint;
 export import :server.request_data;
+export import :server.trusted_proxies;
 export import :core.json_support;
 export import :core.form_data;
 
@@ -204,6 +205,14 @@ export namespace mhttp::server {
         [[nodiscard]] auto RemoteEndpoint() const noexcept -> Endpoint const& { return m_impl->remote; }
 
         /**
+         * @brief Borrow the client IP computed from the server's immutable trusted proxy policy.
+         * @return Owned address valid throughout this request's lifetime, including awaited handlers.
+         * @note Defaults to RemoteEndpoint().address. Forwarded fields are considered only when the
+         *       direct peer is trusted; the transport endpoint and its port always remain unchanged.
+         */
+        [[nodiscard]] auto ClientIp() const noexcept -> std::string const& { return m_impl->client_ip; }
+
+        /**
          * @brief Borrow the independent local address and port value.
          * @return Endpoint valid throughout this request's lifetime.
          */
@@ -248,15 +257,17 @@ export namespace mhttp::detail {
          * @param head Validated and normalized parser metadata, consumed by value.
          * @param remote Owned peer endpoint.
          * @param local Owned local endpoint.
+         * @param proxies Borrowed immutable policy, not retained after computing the client IP.
          * @return Move-only initialized request with an empty body and no captures or trailers yet.
          */
         [[nodiscard]] static auto Create(
             RequestHead head,
             Endpoint remote = {},
-            Endpoint local = {}
+            Endpoint local = {},
+            server::TrustedProxies const& proxies = {}
         ) -> server::Request {
             return server::Request{ std::make_shared<impl::ServerRequestImpl>(
-                std::move(head), std::move(remote), std::move(local)) };
+                std::move(head), std::move(remote), std::move(local), proxies) };
         }
 
         /**

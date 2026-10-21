@@ -11,6 +11,7 @@ import :core.endpoint;
 import :utils.percent;
 import :utils.string;
 import :server.request_data;
+import :server.trusted_proxies;
 
 namespace mhttp::impl {
 
@@ -27,6 +28,7 @@ namespace mhttp::impl {
         Headers trailers; ///< Validated trailers, kept separate from ordinary fields.
         Endpoint remote; ///< Owned peer endpoint.
         Endpoint local; ///< Owned local endpoint.
+        std::string client_ip; ///< Owned resolved IP, independent of headers and the transport peer.
         server::RequestData data; ///< Thread-safe per-request context.
         bool keep_alive; ///< HTTP persistence semantics from the original request metadata.
 
@@ -35,12 +37,15 @@ namespace mhttp::impl {
          * @param source Owned normalized origin-form request head, or OPTIONS asterisk.
          * @param remote_endpoint Owned peer endpoint, optionally empty in standalone tests.
          * @param local_endpoint Owned local endpoint, optionally empty in standalone tests.
+         * @param proxies Borrowed immutable policy, used only to compute this request's owned client IP.
          */
         ServerRequestImpl(
             detail::RequestHead source,
             Endpoint remote_endpoint,
-            Endpoint local_endpoint
+            Endpoint local_endpoint,
+            server::TrustedProxies const& proxies
         ) : head{ std::move(source) }, remote{ std::move(remote_endpoint) }, local{ std::move(local_endpoint) },
+            client_ip{ proxies.Resolve(remote.address, head.headers) },
             keep_alive{ detail::allows_keep_alive(head.version, head.headers) } {
             path = UrlDecode(EncodedPath(), UrlEncoding::PathSegment);
             auto const separator = head.target.find('?');

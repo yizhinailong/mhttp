@@ -72,6 +72,36 @@ QueryParams::Encode 可生成客户端上传的表单字符串，空格编码为
 缺失、非法数字、溢出及非有限浮点数返回空值。数字要求消费全部字符，不接受前导 `+`。
 string 返回独立副本，string_view 继续借用 Request；空字符串捕获与缺失可以区分。
 
+### 客户端 IP 与可信代理
+
+`ClientIp()` 返回请求独立拥有的 IP 字符串，默认等于 `RemoteEndpoint().address`。
+通过 `ServerOptions::trusted_proxies` 配置可信代理后，只有直连对端属于可信集合时才读取
+`X-Forwarded-For`。所有同名字段按接收顺序组成一个地址列表，从右向左跳过可信地址，
+选取第一个有效的非可信地址；客户端预置的左侧地址不能覆盖更近的非可信地址。
+无效或空项被跳过，没有该字段、全部无效或全部可信时回退到真实对端。
+`Forwarded`、`X-Real-IP` 和 trailer 不参与解析。
+
+```cpp
+auto proxies = mhttp::server::TrustedProxies::Create({ "127.0.0.1", "10.0.0.0/8", "fd00::/8" });
+if (!proxies) { return 1; }
+mhttp::server::ServerOptions options;
+options.trusted_proxies = *proxies;
+mhttp::server::HttpServer server{ runtime, options };
+```
+
+`TrustedProxies::Create` 接受 IPv4/IPv6 单地址或 CIDR，任何非法项使整个配置返回
+InvalidRequest。CIDR 的主机位会被掩码；支持 `/0`、IPv4 `/32` 和 IPv6 `/128`。
+地址只接受无端口、无方括号、无 zone 的数字形式，不解析主机名，也不接受简写或带前导零的
+IPv4。IPv4 与 IPv6 分别匹配，IPv4 CIDR 不信任 IPv4-mapped IPv6；双栈监听器需要按
+实际对端地址另行配置相应 IPv6 网段。转发列表使用相同的地址规则并去除项两侧的空格和制表符，
+返回的有效转发地址采用规范数字格式。
+
+配置由服务器在构造时取得不可变快照，修改原始 options 或替换策略副本不会影响已有服务器。
+请求在预路由前计算客户端 IP，处理器挂起、后置钩子和访问日志均可读取同一份值；
+`RemoteEndpoint()` 的真实地址与端口始终保留。只有复制出的字符串能在请求结束后继续使用。
+头部大小和字段数量受原有服务器输入上限约束；单独使用 `TrustedProxies::Resolve(peer, headers)`
+时由调用方限制输入大小。`Contains(address)` 可在启动前检查地址是否属于配置网段。
+
 ## 认证中间件
 
 `server::BasicAuth::Create(username, password, realm)` 与

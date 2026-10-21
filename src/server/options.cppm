@@ -6,6 +6,7 @@ export module mhttp:server.options;
 
 import std;
 export import :core.message;
+export import :server.trusted_proxies;
 
 export namespace mhttp::server {
 
@@ -30,6 +31,7 @@ export namespace mhttp::server {
         bool tcp_no_delay{ true }; ///< Disable Nagle on each accepted socket before session startup.
         bool ipv6_only{}; ///< Restrict IPv6 listeners to IPv6; false enables IPv4-mapped dual stack.
         Headers default_headers; ///< Fallback response fields; explicit application fields take precedence.
+        TrustedProxies trusted_proxies; ///< Immutable client-IP policy; default ignores forwarded addresses.
     };
 
 } // namespace mhttp::server

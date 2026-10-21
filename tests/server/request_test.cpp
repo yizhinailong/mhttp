@@ -35,6 +35,7 @@ auto request_metadata() -> void {
     CheckEq(request.Header("missing", "fallback"), "fallback"sv, "header fallback");
     CheckEq(request.ContentType(), "text/plain; charset=utf-8"sv, "content type retains parameters");
     CheckEq(request.RemoteEndpoint(), mhttp::Endpoint{ "127.0.0.1", 1234 }, "peer endpoint value");
+    CheckEq(request.ClientIp(), "127.0.0.1", "client IP defaults to real peer");
     CheckEq(request.LocalEndpoint(), mhttp::Endpoint{ "::1", 8080 }, "local endpoint value");
     CheckEq(request.Version(), mhttp::Version::Http11, "wire version");
     Check(request.KeepAlive() && request.Body().empty(), "body initially empty and HTTP/1.1 persistent");

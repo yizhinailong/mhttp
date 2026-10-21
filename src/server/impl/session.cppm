@@ -263,7 +263,8 @@ namespace mhttp::impl {
         ) -> asio::awaitable<void> {
             detail::RequestHead head{ .version = parser.Head().version };
             if (parser.Head().method == "HEAD") { head.method = "HEAD"; }
-            auto request = detail::ServerRequestAccess::Create(std::move(head), m_remote, m_local);
+            auto request = detail::ServerRequestAccess::Create(
+                std::move(head), m_remote, m_local, m_options.trusted_proxies);
             server::Response response;
             static_cast<void>(response.SetError(status));
             auto route = m_router->PrepareError();
@@ -295,7 +296,8 @@ namespace mhttp::impl {
                     co_await rejectHead(parser, event->failure->status, result);
                     co_return;
                 }
-                auto request = detail::ServerRequestAccess::Create(parser.Head(), m_remote, m_local);
+                auto request = detail::ServerRequestAccess::Create(
+                    parser.Head(), m_remote, m_local, m_options.trusted_proxies);
                 server::Response response;
                 auto route = co_await AwaitTask(m_router->Prepare(request, response),
                     m_connection->Executor(), m_stop_source.get_token(), m_runtime);

@@ -6,7 +6,7 @@ export module mhttp:server.trusted_proxies;
 
 import std;
 import :server.impl.trusted_proxies;
-export import :core.error;
+export import :core.headers;
 
 export namespace mhttp::server {
 
@@ -56,6 +56,22 @@ export namespace mhttp::server {
             if (!m_impl) { return false; }
             auto parsed = impl::parse_proxy_address(address);
             return parsed && m_impl->Contains(*parsed);
+        }
+
+        /**
+         * @brief Resolve a client IP from trusted proxy headers without changing transport metadata.
+         * @param peer Borrowed numeric transport address; untrusted/invalid peers ignore every header.
+         * @param headers Borrowed fields; callers outside a server must bound their own input size.
+         * @return Owned canonical IP of the rightmost valid untrusted hop, or the original peer.
+         * @note All X-Forwarded-For fields are read as one ordered list. Trusted and invalid/empty
+         *       items are skipped from right to left. Missing, all-trusted, or all-invalid lists fall
+         *       back to peer. Other forwarding headers are ignored; no DNS queries are performed.
+         */
+        [[nodiscard]] auto Resolve(
+            std::string_view peer,
+            Headers const& headers
+        ) const -> std::string {
+            return m_impl ? m_impl->Resolve(peer, headers) : std::string{ peer };
         }
     };
 

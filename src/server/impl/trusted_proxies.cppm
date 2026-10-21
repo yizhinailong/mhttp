@@ -7,6 +7,7 @@ module mhttp:server.impl.trusted_proxies;
 import std;
 import asio;
 import :core.error;
+import :core.headers;
 import :core.url;
 import :utils.string;
 
@@ -17,7 +18,9 @@ namespace mhttp::impl {
      * @param text Borrowed numeric address without brackets, port, whitespace, or zone identifier.
      * @return Numeric address, or nullopt without performing name resolution.
      */
-    [[nodiscard]] auto parse_proxy_address(std::string_view text) -> std::optional<asio::ip::address> {
+    [[nodiscard]] auto parse_proxy_address(
+        std::string_view text
+    ) -> std::optional<asio::ip::address> {
         if (text.size() > 45 || (!detail::is_url_ipv4(text) && !detail::is_url_ipv6(text))) {
             return std::nullopt;
         }
@@ -107,6 +110,36 @@ namespace mhttp::impl {
                 if (matches) { return true; }
             }
             return false;
+        }
+
+        /**
+         * @brief Resolve the closest untrusted valid hop only after authenticating the direct peer.
+         * @param peer Borrowed transport address, returned unchanged on fallback.
+         * @param headers Borrowed validated fields in wire order, bounded by the server parser.
+         * @return Owned canonical forwarded IP, or the real peer if no untrusted valid hop exists.
+         * @note Repeated fields form one list. Scan backwards without building a joined string or
+         *       retaining token views. Invalid/empty items are skipped as in the reference policy.
+         */
+        [[nodiscard]] auto Resolve(
+            std::string_view peer,
+            Headers const& headers
+        ) const -> std::string {
+            auto address = parse_proxy_address(peer);
+            if (networks.empty() || !address || !Contains(*address)) { return std::string{ peer }; }
+            for (auto const& [name, content] : std::views::reverse(headers)) {
+                if (!utils::iequals(name, "X-Forwarded-For")) { continue; }
+                std::string_view remaining{ content };
+                for (;;) {
+                    auto const comma = remaining.rfind(',');
+                    auto const token = utils::trim_ows(comma == std::string_view::npos
+                        ? remaining : remaining.substr(comma + 1));
+                    auto candidate = parse_proxy_address(token);
+                    if (candidate && !Contains(*candidate)) { return candidate->to_string(); }
+                    if (comma == std::string_view::npos) { break; }
+                    remaining = remaining.substr(0, comma);
+                }
+            }
+            return std::string{ peer };
         }
     };
 
