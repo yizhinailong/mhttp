@@ -7,6 +7,7 @@
 404 / 405、路由 aspect、Basic / Bearer 认证、CORS 和有界的按客户端 IP 限速。请求与响应拥有数据，
 支持 URL 编码表单、multipart 文件与字段，以及可选的 JSON 适配。
 协议处理支持有界增量解析、分块、trailer、keep-alive、超时、取消和错误响应后关闭连接。
+服务端支持带截止时间的优雅停机：先完成已开始的请求，到期后取消并等待资源清理。
 
 客户端提供 Get / Head / Post / Put / Patch / Delete / Options、连接复用、
 有界重定向、默认头部与认证、分阶段或整体超时，以及按目标限额的异步连接池。`Task<T>`、`Runtime`、`Sleep`、

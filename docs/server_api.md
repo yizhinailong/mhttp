@@ -502,6 +502,24 @@ AsyncStop 在独立的控制 Task 中等待相同的排空条件；不要在该�
 Runtime::Stop 同样会取消监听器和会话，Join 会等待相关操作排空。
 停止保留路由，重新 Bind/Start 无需再次注册；Runtime 停止后须先 Join，再 Start 一个新执行代。
 
+`Stop(grace) -> Result<void>` 和 `AsyncStop(grace) -> Task<Result<void>>` 提供有截止时间的优雅停机。
+例如在非 I/O 控制线程调用 `server.Stop(std::chrono::seconds{ 5 })`，
+或在独立控制 Task 中 `co_await server.AsyncStop(std::chrono::seconds{ 5 })`。
+两者立即关闭新请求入口并停止接受连接；空闲连接立即关闭。
+已经开始解析首批字节的请求可继续接收剩余请求头、正文，执行 handler 并完成一次响应，
+包括 lazy 正文与流式 provider；同一连接中缓冲的下一条请求不会再执行。
+响应头尚未发送时加入 `Connection: close`；响应头已经提交时保留原头部，完成正文后关闭连接。
+
+grace 使用 steady_clock 的非负 duration，同步调用从调用时计时，异步版本从惰性 Task 开始执行时计时。
+负数或超出可表示范围的预算返回 InvalidRequest，并保留原有运行状态；零表示立即到达取消截止点。
+在截止前自然排空返回成功；到期仍有会话则取消其 Task、关闭套接字，排空后返回 ShutdownTimeout。
+并发优雅停机调用共享最早的截止时间与最终结果，后来的调用只能缩短预算。
+仍有会话时调用无参数 Stop、AsyncStop、Runtime::Stop，或取消等待中的 AsyncStop(grace)，
+会升级为立即取消；优雅停机等待方在清理完成后得到 Canceled。
+截止时间约束发起取消的时刻，清理仍会等待已执行的 Offload 及嵌套协程退出，
+因此停机返回时间可能超过预算。优雅停机同样保留路由并等待截止计时器回调排空后才允许重新启动；
+不要在该服务端自己的 handler 中等待 AsyncStop(grace)。
+
 全局 strand 独占 acceptor 与会话表；会话先登记，再启动连接 strand 上的协程。
 停止只向连接 strand 投递取消，所有会话根完成后才解冻路由并通知等待方。
 只 Bind 而未 Start 的套接字也能在 Runtime 启动前直接 Stop。
