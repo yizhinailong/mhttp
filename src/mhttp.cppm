@@ -6,6 +6,8 @@ export module mhttp;
 
 export import :core.error;
 export import :core.endpoint;
+export import :core.method;
+export import :core.status;
 
 export import :utils.string;
 export import :utils.percent;
