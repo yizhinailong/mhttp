@@ -1,6 +1,6 @@
 /**
  * @file http_client.cppm
- * @brief Expose an Asio-free single-flight buffered HTTP client on a borrowed Runtime.
+ * @brief Expose an Asio-free single-flight bounded HTTP client on a borrowed Runtime.
  */
 export module mhttp:client.http_client;
 
@@ -10,6 +10,7 @@ export import :core.runtime;
 export import :client.options;
 export import :client.request;
 export import :client.response;
+export import :client.transfer;
 
 export namespace mhttp::client {
 
@@ -129,6 +130,22 @@ export namespace mhttp::client {
          *       original scheduler; unexpected allocation/executor exceptions may still propagate.
          */
         [[nodiscard]] auto Send(Request request) -> Task<Result<Response>> { return m_impl->Send(std::move(request)); }
+
+        /**
+         * @brief Send with owned asynchronous receivers and progress callbacks, applying bounded backpressure.
+         * @param request Owned outgoing data transferred before initial suspension.
+         * @param callbacks Owned callbacks; on_body streams chunks and leaves returned Body() empty.
+         * @return Complete final metadata/trailers, or error after closing and draining an incomplete transfer.
+         * @note Automatic redirects suppress intermediate headers/body/download callbacks. Upload samples
+         *       identify each hop. All callbacks must finish before Send completes; Runtime outlives the Task.
+         */
+        [[nodiscard]] auto Send(
+            Request request,
+            TransferCallbacks callbacks
+        ) -> Task<Result<Response>> {
+            return m_impl->Send(std::move(request), std::move(callbacks));
+        }
+
 
         /**
          * @brief Send GET with an owned target, ordered query parameters, and explicit fields.

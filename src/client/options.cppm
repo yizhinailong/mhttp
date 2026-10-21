@@ -34,7 +34,7 @@ export namespace mhttp::client {
         std::chrono::milliseconds write_timeout{ 30'000 }; ///< One deadline for the complete request write phase.
         std::size_t header_bytes{ 64 * 1024 }; ///< Response fields and trailers together, including delimiters.
         std::size_t header_fields{ 100 }; ///< Response fields and trailers together, including discarded fields.
-        std::uint64_t body_bytes{ 8 * 1024 * 1024 }; ///< Maximum decoded buffered response body.
+        std::uint64_t body_bytes{ 8 * 1024 * 1024 }; ///< Maximum decoded response body, buffered or streamed.
         std::size_t max_request_bytes{ 16 * 1024 * 1024 }; ///< Maximum complete buffered wire request.
         bool keep_alive{ true }; ///< Permit connection reuse unless either peer requests closure.
         std::string user_agent{ std::string{ "mhttp/" } + std::string{ VERSION } }; ///< Validated optional fallback.
@@ -44,6 +44,8 @@ export namespace mhttp::client {
         std::chrono::milliseconds timeout{ 30'000 }; ///< Positive budget used by Overall and Step.
         std::size_t expect_continue_threshold{}; ///< Add Expect for nonempty bodies at least this large; zero disables automatic insertion.
         std::chrono::milliseconds expect_continue_timeout{ 1'000 }; ///< Positive maximum handshake wait before sending the body without 100.
+        std::size_t response_chunk_bytes{ 16 * 1024 }; ///< Maximum decoded bytes passed to one response receiver; positive.
+        std::size_t upload_chunk_bytes{ 64 * 1024 }; ///< Maximum decoded bytes per upload/progress segment; positive.
     };
 
 } // namespace mhttp::client
@@ -66,6 +68,7 @@ export namespace mhttp::detail {
             || !valid_timeout(options.write_timeout) || !valid_timeout(options.timeout)
             || !valid_timeout(options.expect_continue_timeout) || options.header_bytes == 0
             || options.header_fields == 0 || options.max_request_bytes == 0
+            || options.response_chunk_bytes == 0 || options.upload_chunk_bytes == 0
             || options.body_bytes > std::numeric_limits<std::size_t>::max()) {
             return std::unexpected{ Error::InvalidRequest };
         }

@@ -177,3 +177,33 @@ Never 延迟响应和整体上传超时。
 以及提前和上传后 307、303 的 body 所有权。隔离客户端验收还用独立 TCP 对端检查 103 与
 分段 100 之前没有上传字节、有限等待回退、晚到 100 不重复上传、提前最终响应后的 EOF 与新连接、
 读写及整体期限、客户端和 Runtime 取消、异常中间响应，以及握手前断连。
+
+## 流式接收与进度
+
+`Send(Request, TransferCallbacks)` 在同一个单次发送和重定向操作中拥有全部回调，逐个等待完成。
+`on_headers(Response const&)` 在最终响应头通过校验后运行，借用的快照仅在该次等待期间有效，
+此时 Body/Trailers 为空且 KeepAlive 为 false；最终返回的 Response 才具有完整 trailer 与复用状态。
+`on_body(std::string)` 收到独立拥有的非空二进制块，最多 `response_chunk_bytes` 字节。
+设置 on_body 后不累计正文，最终 Response::Body() 为空；省略它时保留完整缓冲行为。
+
+```cpp
+mhttp::client::TransferCallbacks callbacks;
+callbacks.on_body = [](std::string chunk) -> mhttp::Task<mhttp::Result<void>> {
+    // 逐块处理；耗时业务可交给 Offload。
+    co_return mhttp::Result<void>{};
+};
+auto response = co_await client.Send(mhttp::client::Request{ mhttp::Method::Get, "/large" }, std::move(callbacks));
+```
+
+`on_progress(TransferProgress)` 接收初始、每块成功传输后及完整结束的样本。
+`direction` 区分 Upload/Download，`transferred` 只计解码后的应用字节，`total` 对固定长度为已知值，
+对 chunked/EOF 为 nullopt，`complete` 表示正文与分帧均已完成。最后一块与完成样本的字节数可以相同。
+上传按 `upload_chunk_bytes` 划分进度段；`hop` 是从零开始的重定向序号，每跳重新统计上传。
+自动跟随的中间响应不调用 headers/body/download 回调；只有最终响应交给接收器。
+
+所有回调返回 `Task<Result<void>>`，可用 Sleep/Offload，在客户端 strand 上串行运行。
+返回错误会中止传输，异常转换为 Unknown；未完成的连接关闭，后续 Send 可重连。
+同一客户端的回调内再次 Send 返回 Busy。Stop、Runtime 取消及调用者取消会取消等待并清理全部嵌套 Task。
+选定的 Phase/Overall/Step/Never 策略也约束回调：下载回调超时为 ReadTimeout，上传进度超时为 WriteTimeout。
+已运行的 Offload 函数仍须执行完毕后才报告取消。回调捕获的对象及 Runtime 必须存活至整个 Send 完成。
+总响应正文仍受 `body_bytes` 限制，trailer 与初始字段共同受头部限制；流式读取不会放宽协议校验。

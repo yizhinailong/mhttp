@@ -13,6 +13,8 @@ import :core.parser;
 import :client.request_policy;
 import :client.redirect_policy;
 import :client.impl.deadlines;
+import :client.impl.callback;
+import :client.transfer;
 import :client.response;
 import :utils.base64;
 import :utils.authorization;
@@ -92,6 +94,7 @@ namespace mhttp::impl {
         std::shared_ptr<Connection> m_connection; ///< Current connecting or connected transport.
         std::optional<Url> m_connection_origin; ///< Actual transport origin, distinct from the constructor URL.
         std::shared_ptr<IdleWatch> m_idle_watch; ///< Idle peer-close detection, retired before another Send.
+        std::shared_ptr<ClientCallback> m_callback; ///< Active awaited callback, canceled with the current network generation.
         std::shared_ptr<ConnectDeadline> m_connect_deadline; ///< Active connection phase only.
         std::unique_ptr<std::stop_callback<std::function<void()>>> m_runtime_stop; ///< Idle and active runtime cancellation.
         std::stop_token m_runtime_token; ///< Generation owning the current resolver/socket.
@@ -154,11 +157,15 @@ namespace mhttp::impl {
         /**
          * @brief Issue an owned lazy Send whose state survives destruction of the public wrapper.
          * @param request Owned method/target/fields/body, retained before initial suspension.
+         * @param callbacks Owned optional asynchronous receivers and progress.
          * @return Complete response or a recoverable validation, transport, timeout, Busy, or cancellation error.
          */
-        [[nodiscard]] auto Send(client::Request request) -> Task<Result<client::Response>> {
+        [[nodiscard]] auto Send(
+            client::Request request,
+            client::TransferCallbacks callbacks = {}
+        ) -> Task<Result<client::Response>> {
             std::lock_guard lock{ m_headers_mutex };
-            return sendTask(shared_from_this(), std::move(request), m_default_headers, m_stop_epoch.load());
+            return sendTask(shared_from_this(), std::move(request), std::move(callbacks), m_default_headers, m_stop_epoch.load());
         }
 
         /**
@@ -285,6 +292,7 @@ namespace mhttp::impl {
          */
         auto cancelNetwork() -> void {
             m_resolver.cancel();
+            if (m_callback) { m_callback->Cancel(); }
             closeConnection();
         }
 
@@ -311,6 +319,7 @@ namespace mhttp::impl {
          * @brief Bridge client I/O back to the caller's original Task scheduler and normalize pre-start cancellation.
          * @param self Owned client retained before initial suspension.
          * @param request Owned outgoing data.
+         * @param callbacks Owned asynchronous receivers/progress, retained through all redirect hops.
          * @param headers Issue-time fallback field snapshot.
          * @param epoch Issue-time cancellation epoch.
          * @return Owned response or a recoverable failure.
@@ -318,6 +327,7 @@ namespace mhttp::impl {
         static auto sendTask(
             std::shared_ptr<ClientImpl> self,
             client::Request request,
+            client::TransferCallbacks callbacks,
             Headers headers,
             std::uint64_t epoch
         ) -> Task<Result<client::Response>> {
@@ -326,7 +336,7 @@ namespace mhttp::impl {
             auto token = self->m_runtime->StopToken();
             if (!token) { co_return std::unexpected{ token.error() }; }
             try {
-                co_return co_await ToTask(self->m_executor, send(self, std::move(request), std::move(headers), epoch, *token));
+                co_return co_await ToTask(self->m_executor, send(self, std::move(request), std::move(callbacks), std::move(headers), epoch, *token));
             } catch (std::system_error const& error) {
                 if (error.code() == Error::Canceled) { co_return std::unexpected{ Error::Canceled }; }
                 throw;
@@ -413,97 +423,223 @@ namespace mhttp::impl {
         }
 
         /**
-         * @brief Transfer an owned body once, retaining a replay copy only for configured redirects.
+         * @brief Invoke a stable Send-owned callback inside a Task so even synchronous exceptions are contained.
+         * @tparam F Callback returning Task<Result<T>>.
+         * @tparam Args Owned arguments or explicit reference wrappers borrowing the awaiting frame.
+         * @param callback Borrowed callable retained by the Send until the complete Task tree drains.
+         * @param args Owned arguments, forwarded only when the Task starts.
+         * @return Lazy callback result.
+         */
+        template <typename F, typename... Args>
+        static auto callbackTask(F& callback, Args... args) -> std::invoke_result_t<F&, Args...> {
+            co_return co_await std::invoke(callback, std::move(args)...);
+        }
+
+        /**
+         * @brief Link one callback await to client Stop, inherited cancellation, runtime workers, and its budget.
+         * @tparam T Owned callback result, including void.
+         * @param task Owned callback Task whose callable remains in the awaiting Send frame.
+         * @param remaining Remaining transfer budget, or nullopt for Never.
+         * @param timeout_error Contextual timeout classification.
+         * @return Result after all callback frames and nested operations have drained.
+         */
+        template <typename T>
+        auto runCallback(
+            Task<Result<T>> task,
+            std::optional<Duration> remaining,
+            Error timeout_error
+        ) -> asio::awaitable<Result<T>> {
+            if (isCanceled(m_active_epoch)) { co_return std::unexpected{ Error::Canceled }; }
+            auto state = std::make_shared<ClientCallback>(m_executor);
+            m_callback = state;
+            /**
+             * @brief Clear active cancellation ownership even on unexpected bridge allocation failures.
+             */
+            struct CallbackLease {
+                std::shared_ptr<ClientCallback>& active; ///< Slot owned by the awaiting ClientImpl.
+                /**
+                 * @brief Release only after the callback root has drained.
+                 */
+                ~CallbackLease() { active.reset(); }
+            } lease{ m_callback };
+            co_return co_await state->Run(std::move(task), remaining, timeout_error, m_runtime);
+        }
+
+        /**
+         * @brief Await optional progress under the same budget as its associated transfer phase.
+         * @param callbacks Borrowed Send-owned callback identities.
+         * @param progress Owned decoded-byte sample.
+         * @param remaining Remaining transfer budget.
+         * @param timeout_error Direction-specific timeout classification.
+         * @return Success when absent or accepted, otherwise a terminal transfer error.
+         */
+        auto reportProgress(
+            client::TransferCallbacks& callbacks,
+            client::TransferProgress progress,
+            std::optional<Duration> remaining,
+            Error timeout_error
+        ) -> asio::awaitable<Result<void>> {
+            if (!callbacks.on_progress) { co_return Result<void>{}; }
+            co_return co_await runCallback(callbackTask(callbacks.on_progress, progress), remaining, timeout_error);
+        }
+
+        /**
+         * @brief Transfer an owned buffered body once, retaining replay storage for configured redirects.
          * @param request Send-owned prepared request, alive throughout this coroutine.
          * @param epoch Current request cancellation epoch.
          * @param deadlines Send-owned timeout policy.
          * @param until Fixed write phase/overall deadline, absent for Step/Never.
-         * @return Complete upload or a classified cancellation/write failure.
+         * @param callbacks Borrowed Send-owned callbacks, awaited before another segment is sent.
+         * @param hop Zero-based redirect index for upload progress.
+         * @return Complete upload or a classified write/callback/cancellation failure.
          */
         auto writeBody(
             detail::PreparedClientRequest& request,
             std::uint64_t epoch,
             ClientDeadlines const& deadlines,
-            std::optional<std::chrono::steady_clock::time_point> until
+            std::optional<Clock::time_point> until,
+            client::TransferCallbacks& callbacks,
+            std::size_t hop
         ) -> asio::awaitable<Result<void>> {
             if (isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
             auto connection = m_connection;
             auto bytes = m_options.max_redirects == 0 ? std::move(request.request.m_impl->body)
                 : std::string{ request.request.Body() };
-            auto written = co_await connection->WriteAll(std::move(bytes), deadlines.Remaining(until));
-            if (isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
-            co_return written;
+            if (!callbacks.on_progress) {
+                auto written = co_await connection->WriteAll(std::move(bytes), deadlines.Remaining(until));
+                if (isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
+                co_return written;
+            }
+            auto const total = static_cast<std::uint64_t>(bytes.size());
+            auto reported = co_await reportProgress(callbacks, { client::TransferDirection::Upload, 0, total, hop },
+                deadlines.Remaining(until), Error::WriteTimeout);
+            if (!reported) { co_return reported; }
+            std::size_t offset{};
+            while (offset != bytes.size()) {
+                auto const count = std::min(m_options.upload_chunk_bytes, bytes.size() - offset);
+                auto written = co_await connection->WriteAll(bytes.substr(offset, count), deadlines.Remaining(until));
+                if (isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
+                if (!written) { co_return written; }
+                offset += count;
+                reported = co_await reportProgress(callbacks, { client::TransferDirection::Upload, offset, total, hop },
+                    deadlines.Remaining(until), Error::WriteTimeout);
+                if (!reported) { co_return reported; }
+            }
+            co_return co_await reportProgress(callbacks, { client::TransferDirection::Upload, total, total, hop, true },
+                deadlines.Remaining(until), Error::WriteTimeout);
         }
 
         /**
-         * @brief Negotiate an optional upload and read one bounded final response under the Send's deadline policy.
-         * @param request Prepared request; body storage may be transferred after upload permission or fallback.
+         * @brief Negotiate an upload and consume one final response with bounded awaited receivers and callbacks.
+         * @param request Prepared request, retaining replayable upload storage.
          * @param epoch Current request cancellation epoch.
-         * @param deadlines Borrowed Send-owned budget, retained through every asynchronous read.
-         * @return Immutable complete response or classified read/framing/content-encoding failure.
+         * @param deadlines Borrowed Send-owned budget, retained through asynchronous reads and callbacks.
+         * @param callbacks Owned by Send; on_body disables aggregate response buffering.
+         * @param current Effective hop URL for deciding whether to suppress an intermediate redirect body.
+         * @param hop Zero-based redirect index.
+         * @return Immutable complete final metadata or a classified transport/protocol/callback failure.
          */
         auto readResponse(
             detail::PreparedClientRequest& request,
             std::uint64_t epoch,
-            ClientDeadlines const& deadlines
+            ClientDeadlines const& deadlines,
+            client::TransferCallbacks& callbacks,
+            Url const& current,
+            std::size_t hop
         ) -> asio::awaitable<Result<client::Response>> {
             detail::ResponseParser parser{ request.request.Method().value_or(Method::Get),
                 detail::client_parser_limits(m_options), true };
             auto until = deadlines.Until(m_options.read_timeout);
-            auto const continue_until = std::chrono::steady_clock::now() + m_options.expect_continue_timeout;
+            auto const continue_until = Clock::now() + m_options.expect_continue_timeout;
             auto connection = m_connection;
             std::string input, body;
             std::size_t offset{};
+            std::uint64_t received{};
+            std::optional<std::uint64_t> total;
+            std::optional<client::Response> head_snapshot;
             bool eof{};
             bool body_pending = request.expect_continue;
             bool body_suppressed{};
+            bool discard_body{};
             for (;;) {
                 if (isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
-                auto step = parser.Feed(std::span{ input.data(), input.size() }.subspan(offset));
+                auto bytes = std::span{ input.data(), input.size() }.subspan(offset);
+                auto step = parser.Feed(bytes.first(std::min(bytes.size(), m_options.response_chunk_bytes)));
                 offset += step.consumed;
-                if (step.event == detail::ParseEvent::NeedMore && eof) { step = parser.Finish(); }
+                if (step.event == detail::ParseEvent::NeedMore && eof && offset == input.size()) { step = parser.Finish(); }
                 bool send_body{};
                 switch (step.event) {
                 case detail::ParseEvent::Informational:
                     if (parser.Head().status == Status::SwitchingProtocols) { co_return std::unexpected{ Error::ProtocolError }; }
                     send_body = body_pending && parser.Head().status == Status::Continue;
                     break;
-                case detail::ParseEvent::HeadersComplete:
+                case detail::ParseEvent::HeadersComplete: {
                     if (body_pending) { body_pending = false; body_suppressed = true; }
                     if (unsupportedEncoding(parser.Head().headers)) { co_return std::unexpected{ Error::UnsupportedContentEncoding }; }
+                    auto destination = detail::client_redirect_target(current, parser.Head().status, parser.Head().headers,
+                        m_options.max_redirects, hop);
+                    if (!destination) { co_return std::unexpected{ destination.error() }; }
+                    discard_body = destination->has_value();
+                    if (discard_body) { break; }
+                    if (parser.Framing().kind == detail::BodyKind::ContentLength) { total = parser.Framing().content_length; }
+                    else if (parser.Framing().kind == detail::BodyKind::None) { total = 0; }
+                    if (callbacks.on_headers) {
+                        head_snapshot.emplace(detail::ClientResponseAccess::Create(parser.Head(), {}, {}, false, m_remote, m_local));
+                        auto accepted = co_await runCallback(callbackTask(callbacks.on_headers, std::cref(*head_snapshot)),
+                            deadlines.Remaining(until), Error::ReadTimeout);
+                        if (!accepted) { co_return std::unexpected{ accepted.error() }; }
+                    }
+                    auto reported = co_await reportProgress(callbacks,
+                        { client::TransferDirection::Download, 0, total, hop }, deadlines.Remaining(until), Error::ReadTimeout);
+                    if (!reported) { co_return std::unexpected{ reported.error() }; }
                     break;
+                }
                 case detail::ParseEvent::Body:
-                    body.append(step.data.data(), step.data.size());
+                    if (!discard_body) {
+                        if (callbacks.on_body) {
+                            auto accepted = co_await runCallback(callbackTask(callbacks.on_body,
+                                std::string{ step.data.data(), step.data.size() }), deadlines.Remaining(until), Error::ReadTimeout);
+                            if (!accepted) { co_return std::unexpected{ accepted.error() }; }
+                        } else { body.append(step.data.data(), step.data.size()); }
+                        received += step.data.size();
+                        auto reported = co_await reportProgress(callbacks,
+                            { client::TransferDirection::Download, received, total, hop }, deadlines.Remaining(until), Error::ReadTimeout);
+                        if (!reported) { co_return std::unexpected{ reported.error() }; }
+                    }
                     break;
                 case detail::ParseEvent::Failed:
                     co_return std::unexpected{ step.failure->error };
                 case detail::ParseEvent::Complete: {
                     if (offset != input.size()) { co_return std::unexpected{ Error::ProtocolError }; }
+                    if (!discard_body) {
+                        auto reported = co_await reportProgress(callbacks,
+                            { client::TransferDirection::Download, received, total, hop, true }, deadlines.Remaining(until), Error::ReadTimeout);
+                        if (!reported) { co_return std::unexpected{ reported.error() }; }
+                    }
                     bool const keep_alive = request.head.keep_alive && parser.Framing().keep_alive && !eof && !body_suppressed;
                     co_return detail::ClientResponseAccess::Create(parser.Head(), std::move(body), parser.Trailers(),
                         keep_alive, m_remote, m_local);
                 }
                 case detail::ParseEvent::NeedMore: {
+                    if (offset != input.size()) { break; }
                     auto remaining = deadlines.Remaining(until);
                     if (remaining && *remaining <= Duration::zero()) { co_return std::unexpected{ Error::ReadTimeout }; }
                     if (body_pending) {
-                        auto const gap = continue_until - std::chrono::steady_clock::now();
+                        auto const gap = continue_until - Clock::now();
                         if (gap <= Duration::zero()) { send_body = true; break; }
-                        auto const read_until = remaining
-                            ? std::optional{ std::chrono::steady_clock::now() + *remaining } : std::nullopt;
+                        auto const read_until = remaining ? std::optional{ Clock::now() + *remaining } : std::nullopt;
                         bool const fallback_wait = !remaining || gap < *remaining;
                         auto ready = co_await connection->WaitForPeerData(fallback_wait ? gap : *remaining);
                         if (isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
                         if (!ready) {
-                            if (ready.error() == Error::ReadTimeout && fallback_wait
-                                && (!read_until || std::chrono::steady_clock::now() < *read_until)) {
+                            if (ready.error() == Error::ReadTimeout && fallback_wait && (!read_until || Clock::now() < *read_until)) {
                                 send_body = true;
                                 break;
                             }
                             co_return std::unexpected{ ready.error() };
                         }
                         if (read_until) {
-                            remaining = *read_until - std::chrono::steady_clock::now();
+                            remaining = *read_until - Clock::now();
                             if (*remaining <= Duration::zero()) { co_return std::unexpected{ Error::ReadTimeout }; }
                         }
                     }
@@ -520,7 +656,7 @@ namespace mhttp::impl {
                 }
                 if (send_body) {
                     body_pending = false;
-                    auto written = co_await writeBody(request, epoch, deadlines, deadlines.Until(m_options.write_timeout));
+                    auto written = co_await writeBody(request, epoch, deadlines, deadlines.Until(m_options.write_timeout), callbacks, hop);
                     if (!written) { co_return std::unexpected{ written.error() }; }
                     until = deadlines.Until(m_options.read_timeout);
                 }
@@ -531,6 +667,7 @@ namespace mhttp::impl {
          * @brief Run a bounded redirect chain on the client strand without admitting overlapping Sends.
          * @param self Owned implementation for the entire operation.
          * @param request Owned outgoing data.
+         * @param callbacks Owned asynchronous receivers/progress, retained through all redirect hops.
          * @param headers Issue-time fallback fields, isolated from later configuration changes.
          * @param epoch Issue-time Stop epoch.
          * @param token Client runtime generation cancellation.
@@ -539,6 +676,7 @@ namespace mhttp::impl {
         static auto send(
             std::shared_ptr<ClientImpl> self,
             client::Request request,
+            client::TransferCallbacks callbacks,
             Headers headers,
             std::uint64_t epoch,
             std::stop_token token
@@ -588,10 +726,10 @@ namespace mhttp::impl {
                 if (self->isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
                 if (written.error) { co_return std::unexpected{ *written.error }; }
                 if (!prepared->expect_continue) {
-                    auto body = co_await self->writeBody(*prepared, epoch, deadlines, until);
+                    auto body = co_await self->writeBody(*prepared, epoch, deadlines, until, callbacks, followed);
                     if (!body) { co_return std::unexpected{ body.error() }; }
                 }
-                auto response = co_await self->readResponse(*prepared, epoch, deadlines);
+                auto response = co_await self->readResponse(*prepared, epoch, deadlines, callbacks, *current, followed);
                 if (!response) { co_return response; }
                 if (self->isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
                 if (!response->KeepAlive()) { self->closeConnection(); }
