@@ -268,6 +268,57 @@ namespace mhttp::test {
     }
 
     /**
+     * @brief Cancel an idle monitor, reuse its socket, and distinguish data/EOF readiness without consumption.
+     * @param executor Fixture strand.
+     * @param weak Observe ownership after all wait callbacks drain.
+     */
+    auto idle_readiness_scenario(
+        asio::any_io_executor executor,
+        std::weak_ptr<impl::Connection>& weak
+    ) -> asio::awaitable<void> {
+        auto pair = co_await make_loopback(executor);
+        weak = pair->connection;
+        asio::cancellation_signal cancel;
+        auto waited = std::make_shared<TransportResult<Result<void>>>(executor);
+        asio::co_spawn(executor, pair->connection->WaitForPeerData(), asio::bind_cancellation_slot(cancel.slot(),
+            [waited](std::exception_ptr failure, Result<void> result) {
+                waited->failure = failure;
+                if (!failure) { waited->value.emplace(std::move(result)); }
+                static_cast<void>(waited->done.try_send(asio::error_code{}));
+            }));
+        asio::steady_timer started{ executor };
+        started.expires_after(10ms);
+        co_await started.async_wait(asio::use_awaitable);
+        auto overlap = co_await pair->connection->ReadSome(1s);
+        Check(!overlap && overlap.error() == Error::Busy, "idle readiness and data reads share the receive guard");
+        cancel.emit(asio::cancellation_type::all);
+        auto canceled = co_await waited->Wait();
+        Check(!canceled && canceled.error() == Error::Canceled, "idle wait cancellation drains without closing socket");
+        co_await asio::async_write(pair->peer, asio::buffer("a", 1), asio::use_awaitable);
+        auto readable = co_await pair->connection->WaitForPeerData();
+        Check(readable.has_value(), "pending peer bytes produce readiness");
+        auto data = co_await pair->connection->ReadSome(1s);
+        Check(data && *data == "a", "readiness and prior cancellation leave every peer byte unconsumed");
+        pair->peer.shutdown(asio::socket_base::shutdown_send);
+        Check((co_await pair->connection->WaitForPeerData()).has_value(), "peer FIN produces readability");
+        auto eof = co_await pair->connection->ReadSome(1s);
+        Check(!eof && eof.error() == Error::ConnectionClosed, "normal read still observes the unconsumed FIN");
+        pair->connection->Close();
+    }
+
+    /**
+     * @brief Verify idle readiness ownership and cancellation on independent strands.
+     */
+    auto connection_idle_readiness() -> void {
+        std::weak_ptr<impl::Connection> weak;
+        {
+            TransportRuntime runtime;
+            runtime.Run(idle_readiness_scenario(runtime.Executor(), weak));
+        }
+        Check(weak.expired(), "idle wait callbacks and cancellation do not retain the connection after drain");
+    }
+
+    /**
      * @brief Reset a raw peer after observing enough bytes to ensure a composed write completed a prefix.
      * @param pair Owned pair retained until the peer has received and reset its socket.
      * @return Success after receiving the expected prefix.
@@ -806,6 +857,7 @@ export namespace mhttp::test {
             { "I/O error mapping", io_error_mapping },
             { "connection limits", connection_limits },
             { "connection transfers", connection_transfers },
+            { "connection idle readiness", connection_idle_readiness },
             { "connection write progress", connection_write_progress },
             { "connection read deadlines", connection_read_deadlines },
             { "connection write deadlines", connection_write_deadlines },

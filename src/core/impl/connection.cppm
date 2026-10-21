@@ -156,6 +156,16 @@ namespace mhttp::impl {
         }
 
         /**
+         * @brief Observe readable data or peer closure without consuming bytes from an otherwise idle connection.
+         * @return Success for readability, Busy for an active receive, or a classified wait failure.
+         * @note This cancellable wait has no deadline. Canceling only the wait preserves the socket;
+         *       Close still aborts it. Join completion before beginning another read or write phase.
+         */
+        [[nodiscard]] auto WaitForPeerData() -> asio::awaitable<Result<void>> {
+            return asio::co_spawn(m_executor, waitForPeerData(shared_from_this()), asio::use_awaitable);
+        }
+
+        /**
          * @brief Send every byte of an owned payload with one deadline for the whole transfer.
          * @param bytes Payload moved into the operation, retained through partial writes and cancellation.
          * @param timeout Relative deadline; nullopt disables it, nonpositive durations expire immediately.
@@ -202,6 +212,28 @@ namespace mhttp::impl {
         }
 
     private:
+        /**
+         * @brief Wait without draining peer bytes, allowing a canceled idle monitor to hand the socket back.
+         * @param self Owned connection throughout the wait and cancellation completion.
+         * @return Readiness or a contextual error; wait cancellation does not close the connection.
+         */
+        static auto waitForPeerData(std::shared_ptr<Connection> self) -> asio::awaitable<Result<void>> {
+            co_await asio::this_coro::throw_if_cancelled(false);
+            if (self->m_closed || self->m_read_eof) { co_return std::unexpected{ Error::ConnectionClosed }; }
+            if (self->m_reading) { co_return std::unexpected{ Error::Busy }; }
+            auto cancellation = co_await asio::this_coro::cancellation_state;
+            if (cancellation.cancelled() != asio::cancellation_type::none) { co_return std::unexpected{ Error::Canceled }; }
+            ActiveOperation active{ self->m_reading, std::make_shared<Deadline>(self->m_executor) };
+            auto const [error] = co_await self->m_socket.async_wait(
+                asio::ip::tcp::socket::wait_read, asio::as_tuple(asio::use_awaitable));
+            if (self->m_closed) { co_return std::unexpected{ Error::Canceled }; }
+            if (auto failure = map_io_error(error, IoOperation::Read)) {
+                if (*failure != Error::Canceled) { self->close(); }
+                co_return std::unexpected{ *failure };
+            }
+            co_return Result<void>{};
+        }
+
         /**
          * @brief Arm one operation deadline, retaining connection ownership until timer completion.
          * @param deadline Operation state, accessed only on this strand.
