@@ -21,6 +21,7 @@ export namespace mhttp::server {
      * @note Views and references borrow this response's state and expire on relevant mutation or
      *       destruction. Concurrent mutation requires external synchronization. A moved-from response
      *       may only be destroyed or assigned. Wire framing is recomputed from Body by the serializer.
+     *       Do not move a session-supplied borrowed response or retain it beyond its handler chain.
      */
     class Response {
     private:
