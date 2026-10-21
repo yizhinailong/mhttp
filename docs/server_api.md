@@ -93,6 +93,40 @@ auto auth = mhttp::server::BasicAuth::Create("user", "password", "REST API");
 server.Use(std::move(*auth)).value();
 ```
 
+## CORS
+
+`server::Cors::Create(CorsOptions)` 验证并拥有配置，再通过 `Use` 安装全局 aspect，
+也可作为单路由 aspect。全局 CORS 应放在认证之前，让 OPTIONS 预检先完成。
+默认允许任意有效 Origin，支持常用方法及 Origin、Content-Type、Accept、Authorization 请求头，
+不允许 credentials，不设置预检缓存时长。
+
+origins 可配置精确序列化 origin 列表（含 `null`），或单独的 `*`；空列表不允许任何 origin。
+origin 不接受路径、查询或 fragment。多个允许值只回显请求中匹配的一个值。
+credentials 启用后输出 Allow-Credentials: true，并回显允许的 origin；即使配置 `*` 也不输出
+Allow-Origin: *。expose_headers 指定可供浏览器脚本读取的响应头；启用 credentials 时必须指定具体名称。
+
+预检需同时满足 OPTIONS、Origin 和 Access-Control-Request-Method。
+methods 大小写敏感；headers 大小写无关。有效且被允许的预检返回空的 204，跳过后续 Before 与 handler；
+格式错误返回 400，origin、方法或请求头未被允许时返回 403。
+Access-Control-Request-Headers 可跨多个字段组合，Authorization 需要显式列在 headers 中。
+methods 中的 `*` 允许任意方法；headers 中的 `*` 允许 Authorization 以外的任意请求头，
+响应将展开为具体请求的方法或头名。max_age 为非负秒数，正数生成 Access-Control-Max-Age。
+普通 OPTIONS 按原有路由处理，未允许的普通跨源请求继续处理但不授予 CORS 权限。
+
+缺少 Origin 的响应不加 CORS 权限字段。所有经过 CORS 的响应均合并 Vary: Origin，
+预检另按请求的方法和头名变化；已有 Vary 字段与通配符保留，token 不重复添加。
+After 在 handler 或认证短路之后重新应用 origin 权限，因此普通 401/404 仍有对应的 CORS 字段。
+行为依据 [Fetch 标准的 CORS 协议](https://fetch.spec.whatwg.org/#cors-protocol)。
+
+```cpp
+auto cors = mhttp::server::Cors::Create({
+    .origins = { "https://app.example" },
+    .credentials = true,
+});
+auto auth = mhttp::server::BearerAuth::Create("token");
+server.Use(std::move(*cors), std::move(*auth)).value();
+```
+
 ## 响应
 
 Response 默认是空的 200 OK，只可移动，内部拥有状态、按顺序保存的头部和二进制 body。
