@@ -89,7 +89,9 @@ export namespace mhttp::server {
          */
         template <typename T>
             requires std::is_copy_constructible_v<std::decay_t<T>>
-        [[nodiscard]] auto Fetch(std::string_view tag = {}) const -> std::optional<std::decay_t<T>> {
+        [[nodiscard]] auto Fetch(
+            std::string_view tag = {}
+        ) const -> std::optional<std::decay_t<T>> {
             auto key = Key{ typeid(std::decay_t<T>), std::string{ tag } };
             std::shared_ptr<std::any const> snapshot;
             {

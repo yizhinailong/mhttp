@@ -89,7 +89,9 @@ export namespace mhttp::detail {
      * @return Owned decoded segments; encoded / remains part of one segment, and + stays literal.
      * @internal
      */
-    [[nodiscard]] auto decode_path_segments(std::string_view encoded_path) -> std::vector<std::string> {
+    [[nodiscard]] auto decode_path_segments(
+        std::string_view encoded_path
+    ) -> std::vector<std::string> {
         std::vector<std::string> result;
         for (auto segment : utils::split(encoded_path, '/')) {
             result.push_back(UrlDecode(segment, UrlEncoding::PathSegment));
