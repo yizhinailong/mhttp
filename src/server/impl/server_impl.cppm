@@ -21,6 +21,7 @@ namespace mhttp::impl {
      */
     class ServerImpl : public std::enable_shared_from_this<ServerImpl> {
     private:
+        using Clock = std::chrono::steady_clock; ///< Monotonic graceful shutdown budget.
         /**
          * @brief Distinguish a bound idle socket from a submitted or draining accept loop.
          */
@@ -34,6 +35,12 @@ namespace mhttp::impl {
             std::unordered_map<std::size_t, std::shared_ptr<Session>> sessions; ///< Server-strand registry.
             std::vector<std::shared_ptr<asio::steady_timer>> waiters; ///< AsyncStop drain notifications.
             std::unique_ptr<std::stop_callback<std::function<void()>>> runtime_stop; ///< Owned cancellation link.
+            std::shared_ptr<std::atomic<bool>> admission_closed{ std::make_shared<std::atomic<bool>>() }; ///< New-request fence.
+            std::shared_ptr<asio::steady_timer> shutdown_timer; ///< Optional strand-owned graceful deadline.
+            std::optional<Clock::time_point> shutdown_deadline; ///< Earliest requested graceful deadline.
+            std::size_t drain_commands{}; ///< Session drain commands whose completions must be joined.
+            bool timer_pending{}; ///< Deadline callback still owns generation state.
+            bool aborting{}; ///< Immediate cancellation has superseded graceful completion.
             std::stop_token token; ///< Runtime generation cancellation for each accepted session.
             ServerObservers observers; ///< Owned callback snapshot, immutable after submission.
             Endpoint local; ///< Immutable bound address snapshot for diagnostics.
@@ -46,6 +53,7 @@ namespace mhttp::impl {
             bool ready{}; ///< Published under the API mutex.
             bool completed{}; ///< Published under the API mutex after all roots drain.
             std::optional<Error> error; ///< Published terminal accept/start failure under API mutex.
+            std::optional<Error> shutdown_error; ///< Forced drain cause, published under the API mutex.
         };
 
         std::shared_ptr<RuntimeImpl> m_runtime; ///< Context owner; public Runtime must still outlive the server.
@@ -270,13 +278,63 @@ namespace mhttp::impl {
         }
 
         /**
+         * @brief Stop admission, allow begun requests to finish, then cancel survivors at the deadline.
+         * @param grace Nonnegative budget beginning at this call; excessive durations are rejected.
+         * @return Success after natural drain, ShutdownTimeout after deadline cancellation, or lifecycle failure.
+         * @note Cleanup still waits for executing Offload functions; a deadline initiates cancellation.
+         */
+        auto Stop(Clock::duration grace) -> Result<void> {
+            if (RuntimeImpl::IsIoThread()) { return std::unexpected{ Error::Busy }; }
+            auto deadline = shutdownDeadline(grace);
+            if (!deadline) { return std::unexpected{ deadline.error() }; }
+            auto generation = requestStop(*deadline);
+            if (generation) {
+                std::unique_lock lock{ m_mutex };
+                m_changed.wait(lock, [&] { return generation->completed; });
+            }
+            return shutdownResult(generation);
+        }
+
+        /**
          * @brief Own the server before publishing a lazy drain Task.
          * @return Task completing after the accept loop, callbacks, and session registry drain.
          * @note Await outside this server's own handlers: a handler is itself part of the drain.
          */
-        auto AsyncStop() -> Task<void> { return ToTask(m_executor, stopAndWait(shared_from_this())); }
+        auto AsyncStop() -> Task<void> { return stopTask(shared_from_this()); }
+
+        /**
+         * @brief Own a graceful stop operation before initial suspension.
+         * @param grace Nonnegative budget measured when the lazy Task starts.
+         * @return Cancellation-aware complete drain result on the caller's scheduler.
+         */
+        auto AsyncStop(Clock::duration grace) -> Task<Result<void>> { return gracefulStopTask(shared_from_this(), grace); }
 
     private:
+        /**
+         * @brief Validate and own an absolute shutdown deadline without mutating lifecycle state.
+         * @param grace Nonnegative, representable relative budget.
+         * @return Absolute monotonic deadline or InvalidRequest.
+         */
+        static auto shutdownDeadline(Clock::duration grace) -> Result<Clock::time_point> {
+            auto const now = Clock::now();
+            if (grace < Clock::duration::zero() || grace > Clock::duration::max() / 2
+                || now.time_since_epoch() > Clock::duration::max() - grace) {
+                return std::unexpected{ Error::InvalidRequest };
+            }
+            return now + grace;
+        }
+
+        /**
+         * @brief Read one completed generation's result without inspecting a later restarted listener.
+         * @param generation Owned completed generation, or absent for an idle/bound-only stop.
+         * @return Natural completion or the first terminal accept/forced shutdown cause.
+         */
+        auto shutdownResult(std::shared_ptr<Generation> const& generation) const -> Result<void> {
+            if (!generation) { return {}; }
+            std::lock_guard lock{ m_mutex };
+            auto const error = generation->error ? generation->error : generation->shutdown_error;
+            return error ? Result<void>{ std::unexpected{ *error } } : Result<void>{};
+        }
         /**
          * @brief Configure and bind a new socket while the API mutex excludes submission and replacement.
          * @param host Requested bind hostname or numeric address.
@@ -318,9 +376,10 @@ namespace mhttp::impl {
 
         /**
          * @brief Publish stopping before posting strand-owned cancellation; close unsubmitted sockets directly.
+         * @param deadline Graceful cutoff, or absent to cancel all sessions immediately.
          * @return Owned active generation, or empty if no asynchronous drain is needed.
          */
-        auto requestStop() -> std::shared_ptr<Generation> {
+        auto requestStop(std::optional<Clock::time_point> deadline = {}) -> std::shared_ptr<Generation> {
             std::shared_ptr<Generation> generation;
             {
                 std::lock_guard lock{ m_mutex };
@@ -331,12 +390,21 @@ namespace mhttp::impl {
                     m_state = State::Idle;
                 } else {
                     generation = m_active;
+                    generation->admission_closed->store(true);
                     m_state = State::Stopping;
                 }
             }
             m_changed.notify_all();
             if (generation) {
-                asio::post(m_executor, [self = shared_from_this(), generation] { self->stopGeneration(generation); });
+                asio::post(m_executor, [self = shared_from_this(), generation, deadline] {
+                    try {
+                        if (deadline) { self->drainGeneration(generation, *deadline); }
+                        else { self->stopGeneration(generation); }
+                    } catch (...) {
+                        { std::lock_guard lock{ self->m_mutex }; generation->error = Error::Unknown; }
+                        self->stopGeneration(generation);
+                    }
+                });
             }
             return generation;
         }
@@ -368,7 +436,8 @@ namespace mhttp::impl {
                         generation->observers.Log(server::LogEvent::AcceptFailure, error, generation->accept_error,
                             failure, nullptr, &generation->local);
                     }
-                    self->stopGeneration(generation);
+                    if (failure || !result) { self->stopGeneration(generation); }
+                    else { self->finishGeneration(generation); }
                 });
             {
                 std::lock_guard lock{ m_mutex };
@@ -387,13 +456,13 @@ namespace mhttp::impl {
             std::shared_ptr<ServerImpl> self,
             std::shared_ptr<Generation> generation
         ) -> asio::awaitable<Result<void>> {
-            while (!generation->stopping) {
+            while (!generation->stopping && !generation->admission_closed->load()) {
                 auto connection = Connection::Create(self->m_runtime->Context().get_executor(),
                     { .max_write_size = self->m_options.max_response_bytes });
                 if (!connection) { co_return std::unexpected{ connection.error() }; }
                 auto [error] = co_await generation->acceptor->async_accept((*connection)->SocketForInitialization(),
                     asio::as_tuple(asio::use_awaitable));
-                if (generation->stopping) { (*connection)->Close(); break; }
+                if (generation->stopping || generation->admission_closed->load()) { (*connection)->Close(); break; }
                 if (error) { generation->accept_error = error; co_return std::unexpected{ Error::Connection }; }
                 if (generation->sessions.size() >= self->m_options.max_connections) {
                     self->logRejected(*generation, **connection, Error::Busy);
@@ -406,7 +475,7 @@ namespace mhttp::impl {
                     continue;
                 }
                 auto session = Session::Create(*connection, self->m_router, self->m_options,
-                    self->m_runtime, generation->token, generation->observers);
+                    self->m_runtime, generation->token, generation->observers, generation->admission_closed);
                 if (!session) {
                     self->logRejected(*generation, **connection, session.error());
                     (*connection)->Close();
@@ -460,21 +529,98 @@ namespace mhttp::impl {
         }
 
         /**
+         * @brief Close the acceptor and publish the new-request fence without canceling begun requests.
+         * @param generation Owned strand-confined state.
+         */
+        auto closeAdmission(std::shared_ptr<Generation> const& generation) -> void {
+            if (generation->stopping) { return; }
+            generation->stopping = true;
+            generation->admission_closed->store(true);
+            {
+                std::lock_guard lock{ m_mutex };
+                if (m_active == generation) { m_state = State::Stopping; }
+            }
+            asio::error_code ignored;
+            generation->acceptor->close(ignored);
+            m_changed.notify_all();
+        }
+
+        /**
+         * @brief Arm a deadline callback, rearming only after an earlier cutoff canceled the previous wait.
+         * @param generation Owned generation retained until timer cancellation or expiry has drained.
+         */
+        auto armShutdownTimer(std::shared_ptr<Generation> const& generation) -> void {
+            generation->shutdown_timer->expires_at(*generation->shutdown_deadline);
+            generation->shutdown_timer->async_wait([self = shared_from_this(), generation](asio::error_code error) {
+                generation->timer_pending = false;
+                if (!generation->aborting && !generation->sessions.empty()) {
+                    if (!error) {
+                        { std::lock_guard lock{ self->m_mutex }; generation->shutdown_error = Error::ShutdownTimeout; }
+                        self->stopGeneration(generation);
+                    } else if (error == asio::error::operation_aborted) {
+                        self->armShutdownTimer(generation);
+                    } else {
+                        { std::lock_guard lock{ self->m_mutex }; generation->error = Error::Unknown; }
+                        self->stopGeneration(generation);
+                    }
+                }
+                self->finishGeneration(generation);
+            });
+            generation->timer_pending = true;
+        }
+
+        /**
+         * @brief Retire idle sessions and let active requests finish before the earliest requested deadline.
+         * @param generation Owned strand-confined state.
+         * @param deadline Absolute cutoff; later requests can shorten but never extend it.
+         */
+        auto drainGeneration(std::shared_ptr<Generation> const& generation, Clock::time_point deadline) -> void {
+            if (generation->finished || generation->aborting) { return; }
+            bool const first = !generation->stopping;
+            closeAdmission(generation);
+            if (first) {
+                for (auto const& [id, session] : generation->sessions) {
+                    auto operation = session->Drain();
+                    ++generation->drain_commands;
+                    try {
+                        asio::co_spawn(m_executor, std::move(operation),
+                            [self = shared_from_this(), generation](std::exception_ptr failure) {
+                                --generation->drain_commands;
+                                if (failure) {
+                                    { std::lock_guard lock{ self->m_mutex }; generation->error = Error::Unknown; }
+                                    self->stopGeneration(generation);
+                                } else { self->finishGeneration(generation); }
+                            });
+                    } catch (...) { --generation->drain_commands; throw; }
+                }
+            }
+            if (!generation->sessions.empty()
+                && (!generation->shutdown_deadline || deadline < *generation->shutdown_deadline)) {
+                generation->shutdown_deadline = deadline;
+                if (!generation->shutdown_timer) {
+                    generation->shutdown_timer = std::make_shared<asio::steady_timer>(m_executor);
+                }
+                if (generation->timer_pending) { generation->shutdown_timer->expires_at(deadline); }
+                else { armShutdownTimer(generation); }
+            }
+            finishGeneration(generation);
+        }
+
+        /**
          * @brief Cancel accept and every registered connection before checking the drain predicate.
          * @param generation Owned strand-confined state; repeated or late calls are harmless.
          */
         auto stopGeneration(std::shared_ptr<Generation> const& generation) -> void {
             if (generation->finished) { return; }
-            if (!generation->stopping) {
-                generation->stopping = true;
-                {
+            closeAdmission(generation);
+            if (!generation->aborting) {
+                generation->aborting = true;
+                if (!generation->sessions.empty()) {
                     std::lock_guard lock{ m_mutex };
-                    if (m_active == generation) { m_state = State::Stopping; }
+                    if (!generation->shutdown_error) { generation->shutdown_error = Error::Canceled; }
                 }
-                asio::error_code ignored;
-                generation->acceptor->close(ignored);
+                if (generation->timer_pending) { generation->shutdown_timer->cancel(); }
                 for (auto const& [id, session] : generation->sessions) { session->Stop(); }
-                m_changed.notify_all();
             }
             finishGeneration(generation);
         }
@@ -485,7 +631,8 @@ namespace mhttp::impl {
          */
         auto finishGeneration(std::shared_ptr<Generation> const& generation) -> void {
             if (!generation->stopping || !generation->accept_done || !generation->sessions.empty()
-                || generation->finished) { return; }
+                || generation->drain_commands != 0 || generation->finished) { return; }
+            if (generation->timer_pending) { generation->shutdown_timer->cancel(); return; }
             generation->finished = true;
             generation->runtime_stop.reset();
             generation->observers = {};
@@ -500,25 +647,82 @@ namespace mhttp::impl {
                     m_state = State::Idle;
                 }
             }
-            for (auto const& waiter : generation->waiters) { waiter->cancel(); }
+            for (auto const& waiter : generation->waiters) { waiter->expires_at(Clock::time_point::min()); }
             generation->waiters.clear();
             m_changed.notify_all();
         }
 
         /**
-         * @brief Ignore caller cancellation until server drain completes, then let the Task bridge report it.
+         * @brief Join one generation, escalating caller cancellation and retiring its callback before returning.
          * @param self Owned server, retained before initial suspension.
+         * @param generation Owned generation selected before dispatch.
+         * @return Whether the calling Task requested cancellation during this drain.
          */
-        static auto stopAndWait(std::shared_ptr<ServerImpl> self) -> asio::awaitable<void> {
-            co_await asio::this_coro::reset_cancellation_state([](asio::cancellation_type) {
-                return asio::cancellation_type::none;
-            });
-            auto generation = self->requestStop();
-            if (!generation || generation->finished) { co_return; }
+        static auto stopAndWait(
+            std::shared_ptr<ServerImpl> self,
+            std::shared_ptr<Generation> generation
+        ) -> asio::awaitable<bool> {
+            co_await asio::this_coro::throw_if_cancelled(false);
+            auto cancellation = co_await asio::this_coro::cancellation_state;
+            if (generation->finished) { co_return cancellation.cancelled() != asio::cancellation_type::none; }
             auto waiter = std::make_shared<asio::steady_timer>(self->m_executor,
-                std::chrono::steady_clock::time_point::max());
+                Clock::time_point::max());
             generation->waiters.push_back(waiter);
-            static_cast<void>(co_await waiter->async_wait(asio::as_tuple(asio::use_awaitable)));
+            /**
+             * @brief Remove the upstream cancellation callback before its owned coroutine state retires.
+             */
+            struct SlotScope {
+                decltype(std::declval<asio::cancellation_signal&>().slot()) slot; ///< Owned operation's slot.
+                /**
+                 * @brief Release handler captures on every normal or exceptional exit.
+                 */
+                ~SlotScope() { if (slot.is_connected()) { slot.clear(); } }
+            } scope{ cancellation.slot() };
+            if (scope.slot.is_connected()) {
+                scope.slot.assign([self, generation](asio::cancellation_type) { self->stopGeneration(generation); });
+            }
+            if (cancellation.cancelled() != asio::cancellation_type::none) { self->stopGeneration(generation); }
+            asio::cancellation_signal neutral;
+            static_cast<void>(co_await waiter->async_wait(asio::bind_cancellation_slot(neutral.slot(),
+                asio::as_tuple(asio::use_awaitable))));
+            co_return cancellation.cancelled() != asio::cancellation_type::none;
+        }
+
+        /**
+         * @brief Preserve immediate asynchronous Stop while handling idle targets without dispatch.
+         * @param self Owned server retained before initial suspension.
+         */
+        static auto stopTask(std::shared_ptr<ServerImpl> self) -> Task<void> {
+            auto work = asio::make_work_guard(self->m_executor);
+            auto generation = self->requestStop();
+            if (!generation) { co_return; }
+            if (co_await ToTask(self->m_executor, stopAndWait(self, generation))) { throw_error(Error::Canceled); }
+        }
+
+        /**
+         * @brief Start the grace budget on the original Task scheduler and retain target work through drain.
+         * @param self Owned server retained before initial suspension.
+         * @param grace Nonnegative capacity budget, validated before changing lifecycle state.
+         * @return Complete shutdown outcome; cancellation first forces and joins remaining sessions.
+         */
+        static auto gracefulStopTask(
+            std::shared_ptr<ServerImpl> self,
+            Clock::duration grace
+        ) -> Task<Result<void>> {
+            auto deadline = shutdownDeadline(grace);
+            if (!deadline) { co_return std::unexpected{ deadline.error() }; }
+            auto work = asio::make_work_guard(self->m_executor);
+            auto generation = self->requestStop(*deadline);
+            if (!generation) { co_return Result<void>{}; }
+            try {
+                if (co_await ToTask(self->m_executor, stopAndWait(self, generation))) {
+                    co_return std::unexpected{ Error::Canceled };
+                }
+            } catch (std::system_error const& error) {
+                if (error.code() == Error::Canceled) { co_return std::unexpected{ Error::Canceled }; }
+                throw;
+            }
+            co_return self->shutdownResult(generation);
         }
     };
 

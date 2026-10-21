@@ -37,6 +37,7 @@ export namespace mhttp {
         AlreadyRunning, ///< Component is already running.
         NotRunning, ///< Operation requires a running component.
         AcquireTimeout, ///< No pool connection became available within the acquisition deadline.
+        ShutdownTimeout, ///< Graceful shutdown reached its deadline and canceled remaining sessions.
     };
 
     /**
@@ -77,6 +78,7 @@ export namespace mhttp {
         case Error::AlreadyRunning: return "Component already running";
         case Error::NotRunning: return "Component not running";
         case Error::AcquireTimeout: return "Pool acquisition timed out";
+        case Error::ShutdownTimeout: return "Graceful shutdown timed out";
         }
         return "Unrecognized mhttp error";
     }

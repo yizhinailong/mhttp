@@ -146,10 +146,34 @@ export namespace mhttp::server {
         }
 
         /**
+         * @brief Close admission and wait for begun requests, canceling remaining sessions when grace expires.
+         * @param grace Nonnegative monotonic budget, starting now; concurrent callers can only shorten it.
+         * @return Success after natural drain, ShutdownTimeout after forced cancellation, Canceled after
+         *       immediate Stop/runtime escalation, Busy on I/O threads, or InvalidRequest for invalid grace.
+         * @note Idle sessions close immediately. Each begun request may finish one response; successors are
+         *       rejected. Cleanup joins executing Offload work even if it outlasts the cancellation deadline.
+         */
+        [[nodiscard]] auto Stop(std::chrono::steady_clock::duration grace) -> Result<void> {
+            auto implementation = m_impl;
+            return implementation->Stop(grace);
+        }
+
+        /**
          * @brief Own a lazy asynchronous stop-and-drain operation before initial suspension.
          * @return Task completing after all sessions and acceptance drain; never await from this server's handler.
          */
         [[nodiscard]] auto AsyncStop() -> Task<void> { return m_impl->AsyncStop(); }
+
+        /**
+         * @brief Own a lazy graceful stop and complete its cancellation/drain without blocking I/O execution.
+         * @param grace Nonnegative budget starting when this Task runs; concurrent calls cannot extend it.
+         * @return Same outcome as Stop(grace), on the original scheduler; caller cancellation forces drain.
+         * @note Runtime must outlive the Task. Never await this from this server's own request handler,
+         *       because that handler is part of the drain. Use an independent control Task or non-I/O caller.
+         */
+        [[nodiscard]] auto AsyncStop(
+            std::chrono::steady_clock::duration grace
+        ) -> Task<Result<void>> { return m_impl->AsyncStop(grace); }
     };
 
 } // namespace mhttp::server
