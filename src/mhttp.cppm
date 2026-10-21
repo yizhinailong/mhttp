@@ -5,6 +5,7 @@
 export module mhttp;
 
 export import :core.error;
+export import :core.version;
 export import :core.endpoint;
 export import :core.method;
 export import :core.status;
@@ -19,6 +20,8 @@ export import :core.runtime;
 
 export import :client.request;
 export import :client.response;
+export import :client.options;
+export import :client.request_policy;
 
 export import :server.route_pattern;
 export import :server.route_tree;
