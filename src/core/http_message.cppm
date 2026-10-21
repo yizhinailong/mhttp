@@ -74,7 +74,7 @@ export namespace mhttp::detail {
         std::size_t header_fields{ 100 }; ///< Fields and trailers together, including discarded trailers.
         std::uint64_t body_bytes{ 8 * 1024 * 1024 }; ///< Decoded body byte limit.
         std::size_t chunk_line_bytes{ 8 * 1024 }; ///< Chunk-size line, including extensions, excluding CRLF.
-        std::size_t interim_responses{ 8 }; ///< Maximum skipped informational responses.
+        std::size_t interim_responses{ 8 }; ///< Maximum informational responses before the final response.
     };
 
     /**
@@ -101,6 +101,7 @@ export namespace mhttp::detail {
     enum class ParseEvent {
         NeedMore, ///< All supplied bytes were consumed; supply more or signal EOF.
         HeadersComplete, ///< Final headers are available before body processing starts.
+        Informational, ///< Optional response-only event; Head borrows one complete 1xx response until the next Feed.
         Body, ///< A nonempty borrowed body span is available.
         Complete, ///< One message ended; leave all unconsumed bytes for its successor.
         Failed, ///< Fatal error; discard the connection instead of parsing a successor.

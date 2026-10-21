@@ -28,7 +28,7 @@ export namespace mhttp::detail {
          */
         enum class State {
             StartLine, Headers, FixedBody, UntilEof, ChunkSize, ChunkData, ChunkCr, ChunkLf, Trailers,
-            Complete, Failed
+            Informational, Complete, Failed
         };
 
         ParserLimits m_limits; ///< Immutable limits for this parser's messages.
@@ -45,7 +45,8 @@ export namespace mhttp::detail {
         std::uint64_t m_remaining{}; ///< Remaining fixed-body or current chunk bytes.
         std::uint64_t m_body_bytes{}; ///< Decoded body bytes delivered to the caller.
         Method m_response_to{ Method::Get }; ///< Request method determining response body semantics.
-        std::size_t m_interim_responses{}; ///< Informational responses skipped before the final response.
+        std::size_t m_interim_responses{}; ///< Informational responses received before the final response.
+        bool m_emit_informational{}; ///< Expose each complete informational head instead of silently skipping it.
         std::optional<ProtocolFailure> m_failure; ///< Stable terminal failure until Reset.
 
     public:
@@ -59,12 +60,14 @@ export namespace mhttp::detail {
          * @brief Construct a response parser with the originating request's method.
          * @param response_to Method that caused the response; HEAD never carries a wire body.
          * @param limits Bounds applied to each message, with a separate informational-response limit.
+         * @param emit_informational Emit Informational before resetting each 1xx head on the next Feed call.
          */
         explicit MessageParser(
             Method response_to,
-            ParserLimits limits = {}
+            ParserLimits limits = {},
+            bool emit_informational = false
         ) requires std::same_as<HeadType, ResponseHead> :
-            m_limits{ limits }, m_response_to{ response_to } {}
+            m_limits{ limits }, m_response_to{ response_to }, m_emit_informational{ emit_informational } {}
 
         /**
          * @brief Feed input until one observable event or input exhaustion.
@@ -75,6 +78,13 @@ export namespace mhttp::detail {
         [[nodiscard]] auto Feed(std::span<char const> input) -> ParseStep {
             std::size_t consumed{};
             for (;;) {
+                if (m_state == State::Informational) {
+                    m_head = HeadType{};
+                    m_framing = {};
+                    m_state = State::StartLine;
+                    m_header_bytes = 0;
+                    m_field_count = 0;
+                }
                 if (m_state == State::Failed) {
                     return { ParseEvent::Failed, consumed, {}, m_failure };
                 }
@@ -183,8 +193,8 @@ export namespace mhttp::detail {
         }
 
         /**
-         * @brief Borrow the current message metadata after HeadersComplete.
-         * @return Reference valid until Reset or destruction.
+         * @brief Borrow final metadata after HeadersComplete, or one 1xx head after Informational.
+         * @return Final metadata remains valid until Reset/destruction; an informational head only until the next Feed.
          */
         [[nodiscard]] auto Head() const noexcept -> HeadType const& { return m_head; }
 
@@ -195,8 +205,8 @@ export namespace mhttp::detail {
         [[nodiscard]] auto Trailers() const noexcept -> Headers const& { return m_trailers; }
 
         /**
-         * @brief Inspect validated framing after HeadersComplete.
-         * @return Reference valid until Reset or destruction.
+         * @brief Inspect validated framing after HeadersComplete or Informational.
+         * @return Final framing remains valid until Reset/destruction; informational framing only until the next Feed.
          */
         [[nodiscard]] auto Framing() const noexcept -> MessageFraming const& { return m_framing; }
 
@@ -368,6 +378,11 @@ export namespace mhttp::detail {
                     if (IsInformational(m_head.status)) {
                         if (m_interim_responses == m_limits.interim_responses) { fail({}); return std::nullopt; }
                         ++m_interim_responses;
+                        if (m_emit_informational) {
+                            m_framing = *framing;
+                            m_state = State::Informational;
+                            return ParseEvent::Informational;
+                        }
                         m_head = HeadType{};
                         m_state = State::StartLine;
                         m_header_bytes = 0;
@@ -404,7 +419,7 @@ export namespace mhttp::detail {
     using RequestParser = MessageParser<RequestHead>;
 
     /**
-     * @brief Parse a final HTTP response, skipping a bounded number of informational responses.
+     * @brief Parse a final response, optionally exposing its bounded preceding informational responses.
      * @internal
      */
     using ResponseParser = MessageParser<ResponseHead>;

@@ -19,6 +19,7 @@ namespace mhttp::test {
         std::string body; ///< Copied body event bytes.
         std::size_t consumed{}; ///< Total input consumed across all supplied spans.
         std::size_t header_events{}; ///< Number of final header events.
+        std::vector<std::remove_cvref_t<decltype(std::declval<Parser>().Head())>> informational; ///< Owned opt-in 1xx heads.
         bool complete{}; ///< A Complete event was observed.
         std::optional<detail::ProtocolFailure> failure; ///< Terminal parse failure, if any.
     };
@@ -43,6 +44,10 @@ namespace mhttp::test {
             }
             observed.consumed += step.consumed;
             switch (step.event) {
+            case detail::ParseEvent::Informational:
+                observed.informational.push_back(parser.Head());
+                Check(parser.Framing().kind == detail::BodyKind::None, "informational events never carry a body");
+                break;
             case detail::ParseEvent::HeadersComplete:
                 ++observed.header_events;
                 observed.head = parser.Head();

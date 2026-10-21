@@ -144,6 +144,48 @@ auto interim_responses() -> void {
 }
 
 /**
+ * @brief Observe bounded 1xx metadata at every split without consuming following response bytes prematurely.
+ */
+auto observable_interim_responses() -> void {
+    constexpr auto FIRST = "HTTP/1.1 103 Early Hints\r\nLink: </asset>\r\n\r\n"sv;
+    constexpr auto SECOND = "HTTP/1.1 100 Continue\r\nX-Interim: yes\r\n\r\n"sv;
+    constexpr auto FINAL = "HTTP/1.1 201 Created\r\nContent-Length: 3\r\n\r\nabc"sv;
+    auto const wire = std::string{ FIRST } + std::string{ SECOND } + std::string{ FINAL };
+    for (std::size_t split{}; split <= wire.size(); ++split) {
+        std::array const cuts{ split, wire.size() };
+        auto const parsed = mhttp::test::parse_wire<ResponseParser>(wire, cuts,
+            ResponseParser{ mhttp::Method::Post, { .interim_responses = 2 }, true });
+        Check(parsed.complete && !parsed.failure && parsed.body == "abc", "observable interims preserve final body at every split");
+        if (CheckEq(parsed.informational.size(), std::size_t{ 2 }, "one event per complete 1xx head")) {
+            CheckEq(parsed.informational[0].status, mhttp::Status::EarlyHints, "103 remains distinct from permission to upload");
+            CheckEq(parsed.informational[0].headers.Get("Link"), "</asset>"sv, "snapshot retains 103 fields");
+            CheckEq(parsed.informational[1].status, mhttp::Status::Continue, "100 is observable before final headers");
+            CheckEq(parsed.informational[1].headers.Get("X-Interim"), "yes"sv, "second interim owns separate fields");
+        }
+        CheckEq(parsed.header_events, std::size_t{ 1 }, "only final response emits HeadersComplete");
+        CheckEq(parsed.head.status, mhttp::Status::Created, "final head replaces every interim");
+        Check(!parsed.head.headers.Has("X-Interim"), "interim fields do not leak");
+        CheckEq(parsed.consumed, wire.size(), "all supplied response bytes consumed exactly once");
+    }
+    ResponseParser parser{ mhttp::Method::Post, { .interim_responses = 1 }, true };
+    auto first = parser.Feed(FIRST);
+    Check(first.event == ParseEvent::Informational && first.consumed == FIRST.size(), "interim event stops precisely at its terminator");
+    auto second = parser.Feed(SECOND);
+    Check(second.event == ParseEvent::Failed && second.failure->error == mhttp::Error::ProtocolError,
+        "observable interims keep the same admission limit");
+    ResponseParser eof{ mhttp::Method::Post, {}, true };
+    Check(eof.Feed(SECOND).event == ParseEvent::Informational, "100 is observable without a coalesced final response");
+    Check(eof.Finish().event == ParseEvent::Failed, "EOF after an observable 100 still requires a final response");
+    ResponseParser reusable{ mhttp::Method::Post, { .interim_responses = 2 }, true };
+    for (unsigned repeat{}; repeat < 2; ++repeat) {
+        mhttp::test::ParsedMessage<ResponseParser> parsed;
+        for (char const& byte : wire) { mhttp::test::drain_parser(reusable, { &byte, 1 }, parsed); }
+        Check(parsed.complete && parsed.informational.size() == 2, "bytewise input and Reset preserve opt-in mode with fresh limits");
+        reusable.Reset();
+    }
+}
+
+/**
  * @brief Verify huge declared lengths never reserve body storage before bytes arrive.
  */
 auto huge_lengths_and_eof_events() -> void {
@@ -179,6 +221,7 @@ auto main(int argc, char* argv[]) -> int {
         { "bodyless responses", bodyless_responses },
         { "response body framing", response_body_framing },
         { "interim responses", interim_responses },
+        { "observable interim responses", observable_interim_responses },
         { "huge lengths and EOF events", huge_lengths_and_eof_events },
     });
 }

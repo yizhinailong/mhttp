@@ -15,6 +15,7 @@
 | --- | --- |
 | `NeedMore` | 当前输入已耗尽，读取更多字节；收到 EOF 时调用 `Finish()`。 |
 | `HeadersComplete` | 通过 `Head()`、`Framing()` 读取最终头部与分帧信息，再处理剩余输入。 |
+| `Informational` | 仅在响应解析器显式启用时产生；读取或复制当前完整的 1xx 头部，下一次 Feed 会重置它。 |
 | `Body` | 消费 `data`；消费完成前保持原始输入缓冲区存活且内容不变。 |
 | `Complete` | 当前消息结束；保留尚未消费的字节供下一条消息使用。 |
 | `Failed` | 读取 `failure`，停止使用此连接。服务端可用其中的 `status` 生成错误响应。 |
@@ -29,7 +30,11 @@
 
 响应解析器默认按 GET 的响应语义工作。解析 HEAD 的响应时，使用
 `ResponseParser{ Method::Head, limits }`。HEAD、204 和 304 在头部结束；
-1xx 中间响应被跳过，并受 `interim_responses` 次数上限约束。
+1xx 中间响应默认被跳过，并受 `interim_responses` 次数上限约束。
+用 `ResponseParser{ method, limits, true }` 可在每个完整 1xx 后收到 `Informational`；
+事件恰好消费到该响应头的结束位置，不消费下一条响应字节。此时 Head / Framing
+只借用到下一次 Feed；需要保留时应复制。100 和其他 1xx 可据此区分，均无 body。
+两种模式使用相同的中间响应次数与字段上限，Reset 保留模式并重置计数。
 没有分帧头的普通响应只有在 `Finish()` 收到 EOF 后才会完成，且不能复用连接。
 定长或 chunked body 提前 EOF 返回 `Error::ConnectionClosed`。
 
