@@ -12,6 +12,10 @@ export import :client.request;
 export import :client.response;
 export import :client.transfer;
 
+namespace mhttp::impl {
+    class ClientPoolImpl;
+} // namespace mhttp::impl
+
 export namespace mhttp::client {
 
     /**
@@ -23,6 +27,8 @@ export namespace mhttp::client {
     class HttpClient {
     private:
         std::shared_ptr<impl::ClientImpl> m_impl; ///< Owned connection/configuration independent of public lifetime.
+        std::weak_ptr<void> m_pool_lease; ///< Each issued operation independently retains its optional pool loan.
+        friend class impl::ClientPoolImpl;
 
     public:
         /**
@@ -93,6 +99,14 @@ export namespace mhttp::client {
         [[nodiscard]] auto IsOpen() const noexcept -> bool { return m_impl->IsOpen(); }
 
         /**
+         * @brief Probe an established idle connection asynchronously without connecting or consuming bytes.
+         * @return True for a quiet socket; false for no socket or observed closure; Busy during a transfer.
+         * @note This best-effort probe waits up to one millisecond. The peer may close immediately afterward.
+         *       Issuing a probe through a pooled handle retains its loan until the Task frame retires.
+         */
+        [[nodiscard]] auto IsAlive() -> Task<Result<bool>> { return m_impl->IsAlive(m_pool_lease.lock()); }
+
+        /**
          * @brief Replace default fields for Tasks issued after this call, safely from any thread.
          * @param headers Owned fallback fields; an empty collection also clears configured authorization.
          * @return Success or InvalidHeaders for an invalid Host; failure preserves prior configuration.
@@ -129,7 +143,9 @@ export namespace mhttp::client {
          * @note HTTP error statuses are successful response values. The awaiting Task resumes on its
          *       original scheduler; unexpected allocation/executor exceptions may still propagate.
          */
-        [[nodiscard]] auto Send(Request request) -> Task<Result<Response>> { return m_impl->Send(std::move(request)); }
+        [[nodiscard]] auto Send(Request request) -> Task<Result<Response>> {
+            return m_impl->Send(std::move(request), {}, m_pool_lease.lock());
+        }
 
         /**
          * @brief Send with owned asynchronous receivers and progress callbacks, applying bounded backpressure.
@@ -143,7 +159,7 @@ export namespace mhttp::client {
             Request request,
             TransferCallbacks callbacks
         ) -> Task<Result<Response>> {
-            return m_impl->Send(std::move(request), std::move(callbacks));
+            return m_impl->Send(std::move(request), std::move(callbacks), m_pool_lease.lock());
         }
 
 

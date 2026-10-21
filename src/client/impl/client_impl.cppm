@@ -102,6 +102,7 @@ namespace mhttp::impl {
         Endpoint m_local; ///< Connected local snapshot, accessed only on the strand.
         std::atomic<std::uint64_t> m_stop_epoch{}; ///< Stop invalidates issued requests before posting closure.
         std::atomic<bool> m_open{}; ///< Published connected state, never reads a socket from another thread.
+        std::atomic<bool> m_terminal{}; ///< A stopped pool permanently retires its borrowed clients.
         std::uint64_t m_active_epoch{}; ///< Stop epoch of the active request or idle connection.
         bool m_busy{}; ///< Single-flight slot, owned by the client strand.
 
@@ -155,17 +156,29 @@ namespace mhttp::impl {
         [[nodiscard]] auto IsOpen() const noexcept -> bool { return m_open.load(); }
 
         /**
+         * @brief Issue a nonconsuming asynchronous health probe without connecting a lazy client.
+         * @param lifetime Optional pool loan retained through probe completion.
+         * @return False for no connection or observed peer closure; Busy for an overlapping transfer.
+         */
+        auto IsAlive(std::shared_ptr<void> lifetime = {}) -> Task<Result<bool>> {
+            return aliveTask(shared_from_this(), m_stop_epoch.load(), std::move(lifetime));
+        }
+
+        /**
          * @brief Issue an owned lazy Send whose state survives destruction of the public wrapper.
          * @param request Owned method/target/fields/body, retained before initial suspension.
          * @param callbacks Owned optional asynchronous receivers and progress.
+         * @param lifetime Optional pool loan retained from issuance until the complete Task frame retires.
          * @return Complete response or a recoverable validation, transport, timeout, Busy, or cancellation error.
          */
         [[nodiscard]] auto Send(
             client::Request request,
-            client::TransferCallbacks callbacks = {}
+            client::TransferCallbacks callbacks = {},
+            std::shared_ptr<void> lifetime = {}
         ) -> Task<Result<client::Response>> {
             std::lock_guard lock{ m_headers_mutex };
-            return sendTask(shared_from_this(), std::move(request), std::move(callbacks), m_default_headers, m_stop_epoch.load());
+            return sendTask(shared_from_this(), std::move(request), std::move(callbacks), m_default_headers,
+                m_stop_epoch.load(), std::move(lifetime));
         }
 
         /**
@@ -221,6 +234,11 @@ namespace mhttp::impl {
             });
         }
 
+        /**
+         * @brief Permanently reject future operations after the owning pool stops.
+         */
+        auto StopPermanently() -> void { m_terminal.store(true); Stop(); }
+
     private:
         /**
          * @brief Test explicit Stop or runtime generation cancellation on the client strand.
@@ -228,7 +246,7 @@ namespace mhttp::impl {
          * @return Whether no further request I/O may begin.
          */
         [[nodiscard]] auto isCanceled(std::uint64_t epoch) const noexcept -> bool {
-            return m_stop_epoch.load() != epoch || m_runtime_token.stop_requested();
+            return m_terminal.load() || m_stop_epoch.load() != epoch || m_runtime_token.stop_requested();
         }
 
         /**
@@ -322,6 +340,7 @@ namespace mhttp::impl {
          * @param callbacks Owned asynchronous receivers/progress, retained through all redirect hops.
          * @param headers Issue-time fallback field snapshot.
          * @param epoch Issue-time cancellation epoch.
+         * @param lifetime Owned optional pool slot, including while this lazy Task has not started.
          * @return Owned response or a recoverable failure.
          */
         static auto sendTask(
@@ -329,10 +348,11 @@ namespace mhttp::impl {
             client::Request request,
             client::TransferCallbacks callbacks,
             Headers headers,
-            std::uint64_t epoch
+            std::uint64_t epoch,
+            std::shared_ptr<void> lifetime
         ) -> Task<Result<client::Response>> {
             if (self->m_initialization_error) { co_return std::unexpected{ *self->m_initialization_error }; }
-            if (self->m_stop_epoch.load() != epoch) { co_return std::unexpected{ Error::Canceled }; }
+            if (self->m_terminal.load() || self->m_stop_epoch.load() != epoch) { co_return std::unexpected{ Error::Canceled }; }
             auto token = self->m_runtime->StopToken();
             if (!token) { co_return std::unexpected{ token.error() }; }
             try {
@@ -341,6 +361,71 @@ namespace mhttp::impl {
                 if (error.code() == Error::Canceled) { co_return std::unexpected{ Error::Canceled }; }
                 throw;
             }
+        }
+
+        /**
+         * @brief Retain probe ownership before initial suspension and normalize bridge cancellation.
+         * @param self Owned client state.
+         * @param epoch Issue-time Stop epoch.
+         * @param lifetime Optional owned pool loan.
+         * @return Best-effort connection health or a lifecycle failure.
+         */
+        static auto aliveTask(
+            std::shared_ptr<ClientImpl> self,
+            std::uint64_t epoch,
+            std::shared_ptr<void> lifetime
+        ) -> Task<Result<bool>> {
+            if (self->m_initialization_error) { co_return std::unexpected{ *self->m_initialization_error }; }
+            if (self->m_terminal.load() || self->m_stop_epoch.load() != epoch) { co_return std::unexpected{ Error::Canceled }; }
+            auto token = self->m_runtime->StopToken();
+            if (!token) { co_return std::unexpected{ token.error() }; }
+            try { co_return co_await ToTask(self->m_executor, alive(self, epoch, *token)); }
+            catch (std::system_error const& error) {
+                if (error.code() == Error::Canceled) { co_return std::unexpected{ Error::Canceled }; }
+                throw;
+            }
+        }
+
+        /**
+         * @brief Retire idle monitoring, probe socket readability without consuming bytes, then restore monitoring.
+         * @param self Owned client state on its strand.
+         * @param epoch Issue-time Stop epoch.
+         * @param token Current runtime generation.
+         * @return True only when an established socket remains quiet for the bounded probe interval.
+         * @note Readability on an idle HTTP connection means EOF, failure, or unsolicited bytes: all retire it.
+         */
+        static auto alive(
+            std::shared_ptr<ClientImpl> self,
+            std::uint64_t epoch,
+            std::stop_token token
+        ) -> asio::awaitable<Result<bool>> {
+            co_await asio::this_coro::throw_if_cancelled(false);
+            auto const parent = co_await asio::this_coro::cancellation_state;
+            if (self->m_busy) { co_return std::unexpected{ Error::Busy }; }
+            if (self->m_terminal.load() || self->m_stop_epoch.load() != epoch || token.stop_requested()
+                || parent.cancelled() != asio::cancellation_type::none) { co_return std::unexpected{ Error::Canceled }; }
+            self->m_busy = true;
+            SendScope scope{ *self };
+            if (self->m_active_epoch != epoch) { self->closeConnection(); }
+            self->m_active_epoch = epoch;
+            self->linkRuntime(token);
+            co_await self->stopIdleWatch();
+            if (self->isCanceled(epoch) || parent.cancelled() != asio::cancellation_type::none) {
+                co_return std::unexpected{ Error::Canceled };
+            }
+            if (!self->m_connection) { co_return false; }
+            auto connection = self->m_connection;
+            auto ready = co_await connection->WaitForPeerData(std::chrono::milliseconds{ 1 });
+            if (self->isCanceled(epoch) || parent.cancelled() != asio::cancellation_type::none) {
+                co_return std::unexpected{ Error::Canceled };
+            }
+            if (!ready && ready.error() == Error::ReadTimeout) {
+                self->watchIdleConnection();
+                scope.succeeded = true;
+                co_return true;
+            }
+            if (!ready && ready.error() == Error::Canceled) { co_return std::unexpected{ Error::Canceled }; }
+            co_return false;
         }
 
         /**
@@ -769,7 +854,7 @@ namespace mhttp::impl {
         ) -> asio::awaitable<Result<client::Response>> {
             co_await asio::this_coro::throw_if_cancelled(false);
             if (self->m_busy) { co_return std::unexpected{ Error::Busy }; }
-            if (self->m_stop_epoch.load() != epoch || token.stop_requested()) { co_return std::unexpected{ Error::Canceled }; }
+            if (self->m_terminal.load() || self->m_stop_epoch.load() != epoch || token.stop_requested()) { co_return std::unexpected{ Error::Canceled }; }
             auto options = self->m_options;
             options.default_headers = std::move(headers);
             auto prepared = detail::prepare_client_request(std::move(request), *self->m_origin, options);
