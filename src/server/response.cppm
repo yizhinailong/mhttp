@@ -7,6 +7,7 @@ export module mhttp:server.response;
 import std;
 import :server.impl.response;
 export import :core.message;
+export import :core.json_support;
 
 export namespace mhttp::detail {
 
@@ -113,6 +114,21 @@ export namespace mhttp::server {
             std::string_view content_type
         ) -> Result<void> {
             return m_impl->SetContent(std::move(body), content_type);
+        }
+
+        /**
+         * @brief Serialize JSON into owned content and set application/json without changing status.
+         * @tparam T Exact value type supported by the optional JSON adapter.
+         * @tparam Adapter Deferred adapter supplied by the json feature.
+         * @param value Borrowed JSON tree, fully serialized during this call.
+         * @return Success or a serialization error preserving the prior body/headers/status.
+         */
+        template <typename T, typename Adapter = detail::JsonAdapter<>>
+            requires detail::JsonValue<T, Adapter>
+        [[nodiscard]] auto SetJson(T const& value) -> Result<void> {
+            auto serialized = Adapter::Serialize(value);
+            if (!serialized) { return std::unexpected{ serialized.error() }; }
+            return SetContent(std::move(*serialized), "application/json");
         }
 
         /**

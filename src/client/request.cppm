@@ -8,6 +8,7 @@ import std;
 import :client.impl.request;
 export import :core.message;
 export import :core.query;
+export import :core.json_support;
 
 namespace mhttp::impl {
 
@@ -150,6 +151,21 @@ export namespace mhttp::client {
          * @return Bytes owned by this request.
          */
         [[nodiscard]] auto Body() const noexcept -> std::string const& { return m_impl->body; }
+
+        /**
+         * @brief Serialize an optional JSON value into owned request content with application/json.
+         * @tparam T Exact value type supplied by the optional JSON adapter.
+         * @tparam Adapter Deferred adapter supplied by the json feature.
+         * @param value Borrowed tree, serialized synchronously; no reference survives this call.
+         * @return Success or a serialization error preserving the previous request state.
+         */
+        template <typename T, typename Adapter = detail::JsonAdapter<>>
+            requires detail::JsonValue<T, Adapter>
+        [[nodiscard]] auto SetJson(T const& value) -> Result<void> {
+            auto serialized = Adapter::Serialize(value);
+            if (!serialized) { return std::unexpected{ serialized.error() }; }
+            return SetContent(std::move(*serialized), "application/json");
+        }
 
         /**
          * @brief Borrow the complete optional media type.

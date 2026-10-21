@@ -8,6 +8,7 @@ import std;
 import :client.impl.response;
 export import :core.message;
 export import :core.endpoint;
+export import :core.json_support;
 
 export namespace mhttp::detail {
 
@@ -112,6 +113,20 @@ export namespace mhttp::client {
          * @return Owned bytes, empty for bodyless responses.
          */
         [[nodiscard]] auto Body() const noexcept -> std::string const& { return m_impl->body; }
+
+        /**
+         * @brief Parse independently owned JSON from a complete buffered response when json is enabled.
+         * @tparam Adapter Optional adapter, unavailable in a feature-free consumer.
+         * @param limits Positive nesting bound, in addition to the client's HTTP body limit.
+         * @return Owned JSON or a recoverable media-type, syntax, header, or nesting-limit error.
+         */
+        template <typename Adapter = detail::JsonAdapter<>>
+            requires detail::JsonReader<Adapter>
+        [[nodiscard]] auto Json(
+            JsonLimits limits = {}
+        ) const -> decltype(Adapter::Parse(Body(), Headers(), limits)) {
+            return Adapter::Parse(Body(), Headers(), limits);
+        }
 
         /**
          * @brief Borrow trailers separately from ordinary response headers.

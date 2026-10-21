@@ -16,3 +16,13 @@ kind = "lib"
 
 [dependencies.chriskohlhoff]
 asio = "1.38.1"
+
+[features]
+default = []
+json = { sources = ["src/core/json.cppm"] }
+
+[feature-deps.json]
+nlohmann.json = "3.12.0"
+
+[test]
+discover = ["tests/**/*.cpp", "!tests/json/**/*.cpp"]

@@ -10,6 +10,7 @@ export import :core.message;
 export import :core.query;
 export import :core.endpoint;
 export import :server.request_data;
+export import :core.json_support;
 
 export namespace mhttp::detail {
 
@@ -127,6 +128,20 @@ export namespace mhttp::server {
          *       changing it does not affect Body or Query, and it may outlive this request.
          */
         [[nodiscard]] auto Form() const -> Result<QueryParams> { return m_impl->Form(); }
+
+        /**
+         * @brief Parse an independent JSON value on demand when the optional JSON adapter is available.
+         * @tparam Adapter Deferred adapter supplied by the json feature.
+         * @param limits Positive nesting bound; HTTP body admission has already been applied.
+         * @return Owned JSON or a recoverable media-type, syntax, header, or nesting-limit error.
+         */
+        template <typename Adapter = detail::JsonAdapter<>>
+            requires detail::JsonReader<Adapter>
+        [[nodiscard]] auto Json(
+            JsonLimits limits = {}
+        ) const -> decltype(Adapter::Parse(Body(), Headers(), limits)) {
+            return Adapter::Parse(Body(), Headers(), limits);
+        }
 
         /**
          * @brief Borrow the complete Content-Type field value, including parameters.

@@ -17,6 +17,7 @@ export import :core.parser;
 export import :core.serializer;
 export import :core.task;
 export import :core.runtime;
+export import :core.json_support;
 
 export import :client.request;
 export import :client.response;
