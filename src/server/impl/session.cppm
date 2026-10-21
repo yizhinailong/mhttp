@@ -221,6 +221,11 @@ namespace mhttp::impl {
         ) -> asio::awaitable<bool> {
             auto outcome = co_await AwaitTask(RouterImpl::Process(route, request, response),
                 m_connection->Executor(), m_stop_source.get_token(), m_runtime);
+            if (auto complete = detail::ServerRequestAccess::BodyComplete(request)) {
+                body_complete = *complete;
+                force_close = force_close || !body_complete;
+                if (auto failure = detail::ServerRequestAccess::BodyFailure(request)) { result.error = failure->error; }
+            }
             result.failure = outcome.failure;
             if (!outcome.send_response) { result.error = Error::Unknown; co_return false; }
             outcome.close = outcome.close || force_close;
@@ -348,11 +353,17 @@ namespace mhttp::impl {
                 bool const unmatched_unsafe = !route.handled && !route.handler && !safe_method;
                 bool const rejected_expectation = parser.Framing().expect_continue && (route.handled || !route.handler);
                 bool const skip_body = route.handled || unmatched_unsafe || rejected_expectation;
-                if (parser.Framing().expect_continue && !skip_body && !body_complete) {
+                if (parser.Framing().expect_continue && !skip_body && !body_complete && !route.lazy) {
                     auto interim = co_await m_connection->WriteAll("HTTP/1.1 100 Continue\r\n\r\n", m_options.write_timeout);
                     if (!interim) { result.error = interim.error(); co_return; }
                 }
-                if (!skip_body) {
+                RequestBodyRetirement retirement;
+                if (!skip_body && route.lazy) {
+                    retirement.state = std::make_shared<RequestBodyImpl>(m_connection, m_input, std::move(parser),
+                        Clock::now() + m_options.read_timeout, m_options.request_chunk_bytes,
+                        m_options.write_timeout, body_complete);
+                    detail::ServerRequestAccess::AttachBodyReader(request, retirement.state);
+                } else if (!skip_body) {
                     std::string body;
                     auto const deadline = Clock::now() + m_options.read_timeout;
                     for (;;) {
@@ -385,7 +396,7 @@ namespace mhttp::impl {
                     }
                 }
                 if (!co_await writeFinal(request, response, route, body_complete,
-                    unmatched_unsafe || !body_complete || rejected_expectation, result)) { co_return; }
+                    unmatched_unsafe || (!body_complete && !route.lazy) || rejected_expectation, result)) { co_return; }
             }
         }
     };

@@ -182,6 +182,30 @@ export namespace mhttp::server {
         }
 
         /**
+         * @brief Register a handler that may pull bounded request chunks before the full upload arrives.
+         * @tparam F Synchronous void or Task<void> callable accepting Request& and Response&.
+         * @tparam Aspects Owned ordered Before/After objects; global middleware still wraps the route.
+         * @param method Supported method; all normal pattern matching and HEAD fallback rules apply.
+         * @param path Decoded route pattern, copied during registration.
+         * @param handler Callable copied or moved into stable storage; await Request::ReadBody to read.
+         * @param aspects Aspects copied or moved in registration order.
+         * @return Registration result as for Route; replacing a binding also replaces its intake policy.
+         * @note Unread body bytes force close after the response. Body() stays empty; trailers appear
+         *       after ReadBody returns nullopt. Standalone dispatch has no network body to read.
+         */
+        template <typename F, typename... Aspects>
+            requires detail::HttpHandlerFunction<std::decay_t<F>> && (detail::HttpAspect<std::decay_t<Aspects>> && ...)
+        [[nodiscard]] auto RouteLazy(
+            mhttp::Method method,
+            std::string_view path,
+            F&& handler,
+            Aspects&&... aspects
+        ) -> Result<void> {
+            return m_impl->Register(method, path,
+                detail::make_http_handler(std::forward<F>(handler), std::forward<Aspects>(aspects)...), true);
+        }
+
+        /**
          * @brief Register a GET handler, also eligible for implicit HEAD fallback.
          * @tparam F Eligible handler type.
          * @tparam Aspects Eligible ordered aspect types.

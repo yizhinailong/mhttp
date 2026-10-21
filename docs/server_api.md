@@ -53,7 +53,7 @@ Request 独立拥有请求头、target、查询、端点、路径参数、body �
 `Query()` 保持多值顺序，并把查询中的 `+` 解码为空格。
 
 `Headers()` 只读，`Header(name, fallback)` 大小写无关，`ContentType()` 保留完整字段值及参数。
-`Body()` 返回拥有数据的二进制字符串；`Trailers()` 单独提供解析器已过滤的 trailer，
+普通路由的 `Body()` 返回拥有数据的二进制字符串，lazy 路由通过 `ReadBody()` 按需读取；`Trailers()` 单独提供解析器已过滤的 trailer，
 不会把它们合并进普通头部。`RemoteEndpoint()`、`LocalEndpoint()` 返回拥有地址与端口的值。
 `Version()` 和 `KeepAlive()` 描述原始请求语义；服务器停止、响应头及最大请求次数还会影响实际复用。
 
@@ -103,6 +103,45 @@ IPv4。IPv4 与 IPv6 分别匹配，IPv4 CIDR 不信任 IPv4-mapped IPv6；双�
 时由调用方限制输入大小。`Contains(address)` 可在启动前检查地址是否属于配置网段。
 请求头或声明的 body 大小在接收阶段被拒绝时，错误请求保留真实对端 IP，不采信部分解析的转发字段。
 完整请求头被接受后发生的 body 中断仍使用已经计算的客户端 IP。
+
+## 按需读取请求体
+
+使用 `Router::RouteLazy(method, path, handler, aspects...)` 在请求头通过校验后直接进入中间件和处理器。
+注册规则、路径参数、HEAD 回退和 Before/After 顺序与 `Route` 相同；替换路由时同时替换正文读取方式。
+普通路由仍会在执行处理器前完整缓冲正文。
+
+```cpp
+server.RouteLazy(mhttp::Method::Post, "/upload", [](auto& request, auto& response) -> mhttp::Task<void> {
+    std::uint64_t size{};
+    for (;;) {
+        auto chunk = co_await request.ReadBody();
+        if (!chunk) { co_return; } // 会话保留错误，随后运行错误响应钩子。
+        if (!*chunk) { break; }
+        size += (**chunk).size(); // 此处可逐块处理；耗时工作交给 Offload。
+    }
+    response.SetContent(std::to_string(size), "text/plain");
+});
+```
+
+`ReadBody()` 返回 `Task<Result<std::optional<std::string>>>`：非空字符串是独立拥有的二进制正文块，
+`nullopt` 表示已读完，每次最多返回 `request_chunk_bytes` 字节，默认 16 KiB。
+每次读取都必须等待完成，不能并发读取；库只保留当前网络缓冲，不累计正文，`Body()` 始终为空。
+总解码量仍受 `body_bytes` 限制，头与 trailer 共同受字段数量和大小限制。
+读到 `nullopt` 后 `Trailers()` 才包含完整的已校验字段，且不会合入 `Headers()`。
+
+读取窗口覆盖全局中间件、路由 Before/处理器/After；pre-routing、异常、错误与 post-routing 钩子，
+以及稍后执行的响应 provider 均不能继续读取。读取 Task 在创建时拥有内部状态；即使延迟执行时
+原请求已经结束，也只返回 `InvalidRequest`，不会读取下一条请求。Runtime 必须存活到这些 Task 释放。
+普通缓冲请求和脱离会话的 Request 调用 `ReadBody()` 同样返回 `InvalidRequest`。
+
+声明为空的正文无需读取；其他正文须读取到 `nullopt` 才能复用连接。处理器可不读取或只读一部分后
+返回最终响应，此时不会自动排空上传，会话声明 `Connection: close`，并丢弃连接上的后续流水线请求。
+lazy 路由的 `100 Continue` 推迟到第一次读取时发送，因此鉴权可以直接拒绝上传而不发送临时响应。
+
+`read_timeout` 从正文交接时起使用同一个绝对截止时间，每次读取都会检查，处理器等待不会重置计时。
+它限制正文读取，不主动取消处理器的业务工作。截断、无效 chunk、超限和超时分别保留协议错误，
+统一进入最终错误与 post-routing 钩子，并关闭连接；处理器忽略读取错误或设置成功响应也不能清除失败。
+服务端或 Runtime 停止会取消正在等待的网络读取，并等待协程资源清理。
 
 ## 流式响应
 
@@ -338,7 +377,8 @@ Error::Canceled 保持为取消控制流，不转成 500，也不会继续调用
 等待所有嵌套 Task 完成清理后报告最终状态。Run 在初始挂起前持有会话，且只允许执行一次。
 私有测试通过 `python tools/check_session.py` 在临时项目中运行，不向正式消费者导出 Asio 或会话实现。
 HTTP/1.1 的 `Expect: 100-continue` 在 pre-routing 与匹配通过、声明长度未超限且存在 body 时，
-先发送无 body 的 100，再读取完整 body。临时响应不调用响应钩子、不计入最大请求数。
+普通路由先发送无 body 的 100，再读取完整 body；lazy 路由推迟到第一次 ReadBody 才发送。
+临时响应不调用响应钩子、不计入最大请求数。
 未匹配或被 pre-routing 提前处理时直接发送最终响应并关闭，不等待读取 body；
 不支持的期望值由解析器返回 417，超限返回 413。HTTP/1.0 忽略 Expect。
 

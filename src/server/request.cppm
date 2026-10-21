@@ -1,6 +1,6 @@
 /**
  * @file request.cppm
- * @brief Expose owned server request metadata, typed path captures, buffered content, and context.
+ * @brief Expose owned server request metadata, typed path captures, buffered or lazy content, and context.
  */
 export module mhttp:server.request;
 
@@ -13,6 +13,7 @@ export import :server.request_data;
 export import :server.trusted_proxies;
 export import :core.json_support;
 export import :core.form_data;
+export import :core.task;
 
 export namespace mhttp::detail {
 
@@ -121,6 +122,19 @@ export namespace mhttp::server {
          * @return Owned string, empty until body initialization completes.
          */
         [[nodiscard]] auto Body() const noexcept -> std::string const& { return m_impl->body; }
+
+        /**
+         * @brief Pull one owned nonempty decoded body chunk during a RouteLazy handler or its middleware/aspects.
+         * @return Chunk up to request_chunk_bytes, nullopt at end, or an error; await every read sequentially.
+         * @note Body() stays empty. Read through nullopt to permit persistence and publish Trailers().
+         *       Framing that declares an empty body needs no read. Unread bytes force connection closure.
+         *       Pre-routing, exception/error/post hooks, buffered requests, and deferred response providers
+         *       cannot read. Issued Tasks own their reader but fail InvalidRequest after route retirement.
+         *       read_timeout is one absolute intake deadline, enforced on reads without timing application work.
+         *       The session preserves the first read failure for its final error hook, even when ignored.
+         */
+        [[nodiscard]] auto ReadBody() -> Task<Result<std::optional<std::string>>> { return m_impl->ReadBody(); }
+
 
         /**
          * @brief Decode application/x-www-form-urlencoded content on demand into independent owned parameters.
@@ -279,6 +293,53 @@ export namespace mhttp::detail {
             server::Request const& request
         ) noexcept -> std::string_view {
             return request.m_impl->EncodedPath();
+        }
+
+        /**
+         * @brief Attach owned lazy intake before application middleware, publishing trailers through a weak owner.
+         * @param request Borrowed initialized request whose storage must not form a reader ownership cycle.
+         * @param reader Owned state on the connection strand, retired by router/session cleanup.
+         */
+        static auto AttachBodyReader(
+            server::Request& request,
+            std::shared_ptr<impl::RequestBodyImpl> reader
+        ) -> void {
+            reader->OnComplete([weak = std::weak_ptr{ request.m_impl }](Headers trailers) {
+                if (auto owner = weak.lock()) { owner->trailers = std::move(trailers); }
+            });
+            request.m_impl->reader = std::move(reader);
+        }
+
+        /**
+         * @brief End lazy intake before final exception/error/post hooks and response commitment.
+         * @param request Borrowed request, accessed only on its connection strand.
+         */
+        static auto RetireBody(server::Request& request) -> void {
+            if (request.m_impl->reader) { request.m_impl->reader->Retire(); }
+        }
+
+        /**
+         * @brief Inspect lazy body completion after the route chain drains.
+         * @param request Borrowed request on the connection strand.
+         * @return Completion, or nullopt for a buffered/standalone request.
+         */
+        [[nodiscard]] static auto BodyComplete(
+            server::Request const& request
+        ) -> std::optional<bool> {
+            if (request.m_impl->reader) { return request.m_impl->reader->Complete(); }
+            return std::nullopt;
+        }
+
+        /**
+         * @brief Inspect a lazy body's sticky failure even if application code ignored it.
+         * @param request Borrowed request on the connection strand.
+         * @return First owned failure, or nullopt when no lazy read failed.
+         */
+        [[nodiscard]] static auto BodyFailure(
+            server::Request const& request
+        ) -> std::optional<ProtocolFailure> {
+            if (request.m_impl->reader) { return request.m_impl->reader->Failure(); }
+            return std::nullopt;
         }
 
         /**

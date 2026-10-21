@@ -38,9 +38,17 @@ namespace mhttp::impl {
             }
         };
 
+        /**
+         * @brief Keep body admission policy inseparable from its stable owned callback.
+         */
+        struct RouteHandler {
+            detail::HttpHandler handler; ///< Owned adapted route and ordered aspects.
+            bool lazy{}; ///< Dispatch after the head without buffering the body.
+        };
+
         std::mutex m_mutex; ///< Protect configuration, freeze state, and reader registration.
         detail::RouteTree m_tree; ///< Immutable while frozen or any configuration reader exists.
-        std::unordered_map<std::size_t, std::shared_ptr<detail::HttpHandler const>> m_handlers; ///< Owned bindings.
+        std::unordered_map<std::size_t, std::shared_ptr<RouteHandler const>> m_handlers; ///< Owned bindings.
         std::vector<detail::HttpMiddleware> m_middleware; ///< Global aspects, immutable while readers exist.
         std::shared_ptr<detail::HttpHandler const> m_not_found; ///< Optional 404 handler with its own aspects.
         std::shared_ptr<detail::HttpHandler const> m_error_handler; ///< Optional final error response transformation.
@@ -122,15 +130,17 @@ namespace mhttp::impl {
          * @param method Supported method.
          * @param path Borrowed decoded registration pattern.
          * @param handler Owned callable adapter.
+         * @param lazy Whether the route pulls its body after head admission.
          * @return Success, AlreadyRunning while frozen, Busy while prepared readers exist, or InvalidRequest.
          */
         auto Register(
             Method method,
             std::string_view path,
-            detail::HttpHandler handler
+            detail::HttpHandler handler,
+            bool lazy = false
         ) -> Result<void> {
-            auto incoming = std::make_shared<detail::HttpHandler const>(std::move(handler));
-            std::shared_ptr<detail::HttpHandler const> retired;
+            auto incoming = std::make_shared<RouteHandler const>(RouteHandler{ std::move(handler), lazy });
+            std::shared_ptr<RouteHandler const> retired;
             std::lock_guard lock{ m_mutex };
             if (m_frozen) { return std::unexpected{ Error::AlreadyRunning }; }
             if (m_readers != 0) { return std::unexpected{ Error::Busy }; }
@@ -219,9 +229,16 @@ namespace mhttp::impl {
                 try { co_await owner.processRoute(route, request, response); }
                 catch (...) { result.failure = std::current_exception(); }
             }
+            detail::ServerRequestAccess::RetireBody(request);
             if (result.failure) {
                 result.close = true;
                 result.failure = co_await owner.processException(result.failure, request, response, true);
+            }
+            if (auto body_failure = detail::ServerRequestAccess::BodyFailure(request)) {
+                if (body_failure->error == Error::Canceled) { throw std::system_error{ make_error_code(Error::Canceled) }; }
+                result.close = true;
+                response = server::Response{};
+                static_cast<void>(response.SetError(body_failure->status));
             }
             std::exception_ptr error_failure;
             if (static_cast<unsigned>(response.Status()) >= 400 && owner.m_error_handler) {
@@ -386,7 +403,11 @@ namespace mhttp::impl {
                     route.handled = true;
                 } else {
                     route.match = owner.m_tree.Match(request.MethodString(), detail::ServerRequestAccess::EncodedPath(request));
-                    if (route.match.handler) { route.handler = std::as_const(owner.m_handlers).at(*route.match.handler); }
+                    if (route.match.handler) {
+                        auto selected = std::as_const(owner.m_handlers).at(*route.match.handler);
+                        route.handler = std::shared_ptr<detail::HttpHandler const>{ selected, &selected->handler };
+                        route.lazy = selected->lazy;
+                    }
                     detail::ServerRequestAccess::SetPathParams(request, std::move(route.match.params));
                 }
             } catch (...) {

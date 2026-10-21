@@ -12,7 +12,7 @@
 有界重定向、默认头部与认证、分阶段或整体超时。`Task<T>`、`Runtime`、`Sleep`、
 `Offload` 和 `SyncWait` 负责异步执行与停止排空。普通请求与客户端响应仍完整缓冲；
 服务端支持基于 Task 的 StreamWriter 与内容 provider，以有界分块发送响应，HTTP/1.0 使用关闭分帧。
-请求体与客户端的流式接口、TLS 和压缩尚未实现。
+服务端支持 RouteLazy 按需读取请求体；客户端的流式接口、TLS 和压缩尚未实现。
 
 ## 构建
 

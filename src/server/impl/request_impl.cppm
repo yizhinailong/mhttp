@@ -12,6 +12,7 @@ import :utils.percent;
 import :utils.string;
 import :server.request_data;
 import :server.trusted_proxies;
+import :server.impl.request_body;
 
 namespace mhttp::impl {
 
@@ -25,6 +26,7 @@ namespace mhttp::impl {
         QueryParams query; ///< Ordered decoded query parameters.
         QueryParams path_params; ///< Owned route captures populated before middleware and handler execution.
         std::string body; ///< Bounded decoded content, populated after the parser finishes.
+        std::shared_ptr<RequestBodyImpl> reader; ///< Optional lazy body ownership; retired after route processing.
         Headers trailers; ///< Validated trailers, kept separate from ordinary fields.
         Endpoint remote; ///< Owned peer endpoint.
         Endpoint local; ///< Owned local endpoint.
@@ -32,6 +34,25 @@ namespace mhttp::impl {
         server::RequestData data; ///< Thread-safe per-request context.
         bool keep_alive; ///< HTTP persistence semantics from the original request metadata.
 
+        /**
+         * @brief Return an owned lazy read, or reject reads outside lazy network request handling.
+         * @return Owned chunk/end/error Task, retaining no borrowed public Request.
+         */
+        auto ReadBody() -> Task<Result<std::optional<std::string>>> {
+            if (reader) { return reader->Read(); }
+            return unavailableBody();
+        }
+
+    private:
+        /**
+         * @brief Report unavailable streaming without borrowing request storage in a coroutine frame.
+         * @return InvalidRequest for standalone or buffered requests.
+         */
+        static auto unavailableBody() -> Task<Result<std::optional<std::string>>> {
+            co_return std::unexpected{ Error::InvalidRequest };
+        }
+
+    public:
         /**
          * @brief Own validated parser metadata and derive independent path and query storage.
          * @param source Owned normalized origin-form request head, or OPTIONS asterisk.
