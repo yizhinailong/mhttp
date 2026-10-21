@@ -53,6 +53,10 @@ auto multipart_escaping_and_boundaries() -> void {
     Check(encoded->body.contains("name=\"name%22%0D%0AX-Injected: yes\""), "field quote and CRLF are encoded inside the parameter");
     Check(encoded->body.contains("filename=\"file%22%0D%0AY-Injected: yes\\\\.bin\""), "filename uses percent escapes plus backslash quoted-pairs");
     Check(!encoded->body.contains("\r\nX-Injected:") && !encoded->body.contains("\r\nY-Injected:"), "metadata cannot introduce additional MIME fields");
+    mhttp::FormData controls;
+    controls.Add({ .name = std::string{ "\0\t\x7f"sv }, .content = "safe" });
+    auto escaped_controls = controls.Encode("b");
+    Check(escaped_controls && escaped_controls->body.contains("name=\"%00%09%7F\""), "NUL, tab, and DEL are encoded as safe metadata text");
     auto parsed = mhttp::FormData::Parse(encoded->body, encoded->content_type);
     Check(parsed && parsed->Parts()[0].name == "name%22%0D%0AX-Injected: yes"
         && *parsed->Parts()[0].filename == "file%22%0D%0AY-Injected: yes\\.bin", "percent escapes remain literal metadata after decoding");

@@ -65,3 +65,8 @@ application/octet-stream，普通字段不推断 Content-Type。构造失败时�
 时返回 InvalidRequest。名称和文件名的双引号、CR/LF 及其他控制字节编码为 %HH，
 反斜杠使用 quoted-pair；现有百分号序列保持原样。接收端不自动反解这些百分号序列。
 每个 MIME 参数声明还最多允许 32 个参数、64 KiB 文本，避免歧义与不受限的参数分配。
+
+`mcpp test multipart --timeout 30` 运行解析、构造和真实 HTTP 验收，包含 20 轮随机二进制表单、
+约 4 MiB 上传、默认/可配置上限及错误映射。`python tools/check_server.py "listener multipart"`
+使用独立原始 TCP 对端逐字节发送 multipart，验证前导内容、重复文件、连接复用、中途 EOF、
+请求超时及 Stop 后的资源清理，不依赖公网。

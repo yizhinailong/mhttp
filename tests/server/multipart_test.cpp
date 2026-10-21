@@ -46,6 +46,17 @@ auto multipart_boundaries() -> void {
         auto boundary = mhttp::FormData::ParseBoundary(type);
         Check(!boundary && boundary.error() == mhttp::Error::InvalidHeaders, "reject ambiguous/invalid MIME parameter syntax");
     }
+    std::string parameters = "multipart/form-data; boundary=b";
+    for (unsigned index{}; index < 31; ++index) { parameters += "; p" + std::to_string(index) + "=x"; }
+    Check(mhttp::FormData::ParseBoundary(parameters).has_value(), "thirty-two bounded MIME parameters are admitted");
+    CheckEq(mhttp::FormData::ParseBoundary(parameters + "; overflow=x").error(), mhttp::Error::InvalidHeaders,
+        "parameter count includes ignored extension parameters");
+    std::string maximum = "multipart/form-data; boundary=b; note=\"";
+    maximum.append(64 * 1024 - maximum.size() - 1, 'x');
+    maximum += '"';
+    Check(mhttp::FormData::ParseBoundary(maximum).has_value(), "MIME declaration exactly at its text limit is accepted");
+    maximum.insert(maximum.size() - 1, 1, 'x');
+    CheckEq(mhttp::FormData::ParseBoundary(maximum).error(), mhttp::Error::InvalidHeaders, "oversized MIME declaration is rejected before parameter allocation");
 }
 
 /**

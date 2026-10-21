@@ -18,6 +18,7 @@ import :test.server_messages;
 import :test.server_framing;
 import :test.server_concurrency;
 import :test.server_deadlines;
+import :test.server_multipart;
 
 namespace mhttp::test {
 
@@ -842,6 +843,7 @@ export namespace mhttp::test {
             { "listener Offload isolation", server_offload_isolation },
             { "listener slow header", server_slow_header },
             { "listener slow reader", server_slow_reader },
+            { "listener multipart intake and cleanup", server_multipart_input },
             { "listener in-flight stop", server_inflight_stop },
             { "listener Offload drain", server_offload_drain },
             { "listener callback isolation", server_callback_isolation },
