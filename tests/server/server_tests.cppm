@@ -16,6 +16,7 @@ import :test.server_routes;
 import :test.server_handlers;
 import :test.server_messages;
 import :test.server_framing;
+import :test.server_concurrency;
 
 namespace mhttp::test {
 
@@ -836,6 +837,8 @@ export namespace mhttp::test {
             { "listener response mutations", server_response_mutations },
             { "listener rejected input", server_rejected_input },
             { "listener keep-alive acceptance", server_keep_alive },
+            { "listener concurrent pipelines", server_concurrent_pipelines },
+            { "listener Offload isolation", server_offload_isolation },
             { "listener in-flight stop", server_inflight_stop },
             { "listener Offload drain", server_offload_drain },
             { "listener callback isolation", server_callback_isolation },
