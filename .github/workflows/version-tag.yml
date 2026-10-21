@@ -1,0 +1,141 @@
+name: Create Version Tag
+
+on:
+  push:
+    branches: [master]
+    paths: [mcpp.toml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tag:
+    name: Tag mcpp package version
+    if: ${{ !github.event.deleted && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: windows-2025
+    timeout-minutes: 10
+    # Serialize retries of one push without dropping other version changes in the queue.
+    concurrency:
+      group: create-version-tag-${{ github.sha }}
+      cancel-in-progress: false
+    permissions:
+      actions: write
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Set up Python for TOML parsing
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Detect package version change
+        id: version
+        shell: python
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          import os
+          from pathlib import Path
+          import subprocess
+          import tomllib
+
+          def git(*args, check=True):
+              return subprocess.run(["git", *args], check=check, capture_output=True, text=True, encoding="utf-8")
+
+          def version_at(commit):
+              version = tomllib.loads(git("show", f"{commit}:mcpp.toml").stdout)["package"]["version"]
+              if not isinstance(version, str) or not version or version != version.strip():
+                  raise ValueError("[package].version must be a nonempty string without surrounding whitespace")
+              return version
+
+          current = os.environ["GITHUB_SHA"]
+          before = os.environ.get("BEFORE_SHA", "")
+          if os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch":
+              parent = git("rev-parse", "--verify", f"{current}^", check=False)
+              before = parent.stdout.strip() if parent.returncode == 0 else ""
+
+          previous_version = None
+          if before and set(before) != {"0"}:
+              if git("cat-file", "-e", f"{before}^{{commit}}", check=False).returncode != 0:
+                  git("fetch", "--no-tags", "origin", before)
+              if git("cat-file", "-e", f"{before}:mcpp.toml", check=False).returncode == 0:
+                  previous_version = version_at(before)
+
+          version = version_at(current)
+          tag = f"v{version}"
+          git("check-ref-format", f"refs/tags/{tag}")
+          changed = os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch" or (
+              previous_version is not None and previous_version != version
+          )
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"version={version}\ntag={tag}\nchanged={str(changed).lower()}\n")
+          print(f"Package version: {previous_version or '(initial baseline)'} -> {version}; changed={changed}")
+
+      - name: Check remote tag
+        id: remote_tag
+        if: steps.version.outputs.changed == 'true'
+        env:
+          VERSION_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          $ref = "refs/tags/$env:VERSION_TAG"
+          $remoteTags = git ls-remote --tags origin $ref "$ref^{}"
+          if ($LASTEXITCODE -ne 0) {
+              throw 'Failed to query remote tags'
+          }
+          $remoteRefs = @{}
+          foreach ($line in $remoteTags) {
+              $parts = $line -split '\s+', 2
+              $remoteRefs[$parts[1]] = $parts[0]
+          }
+          $exists = $remoteRefs.ContainsKey($ref)
+          if ($exists) {
+              $target = if ($remoteRefs.ContainsKey("$ref^{}")) { $remoteRefs["$ref^{}"] } else { $remoteRefs[$ref] }
+              if ($target -ne $env:GITHUB_SHA) {
+                  throw "Tag $env:VERSION_TAG already belongs to another commit; choose a new package version"
+              }
+              Write-Output "Tag $env:VERSION_TAG already points to this commit; retrying CI workflows"
+          }
+          "exists=$($exists.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+      - name: Create and push tag
+        if: steps.version.outputs.changed == 'true' && steps.remote_tag.outputs.exists == 'false'
+        env:
+          PROJECT_VERSION: ${{ steps.version.outputs.version }}
+          VERSION_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git -c 'user.name=github-actions[bot]' `
+              -c 'user.email=41898282+github-actions[bot]@users.noreply.github.com' `
+              tag --annotate --no-sign $env:VERSION_TAG `
+              --message "mhttp $env:PROJECT_VERSION" $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) {
+              throw "Failed to create tag $env:VERSION_TAG"
+          }
+          git push origin "refs/tags/$env:VERSION_TAG"
+          if ($LASTEXITCODE -ne 0) {
+              throw "Failed to push tag $env:VERSION_TAG"
+          }
+
+      - name: Start CI workflows for the version tag
+        if: steps.version.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_TAG: ${{ steps.version.outputs.tag }}
+        # Dispatch explicitly because GITHUB_TOKEN tag pushes do not trigger push workflows.
+        run: |
+          foreach ($workflow in @('windows-ci.yml', 'linux-ci.yml')) {
+              gh workflow run $workflow `
+                  --repo $env:GITHUB_REPOSITORY `
+                  --ref $env:VERSION_TAG
+              if ($LASTEXITCODE -ne 0) {
+                  throw "Failed to start $workflow for $env:VERSION_TAG"
+              }
+          }

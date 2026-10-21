@@ -1,0 +1,76 @@
+name: Documentation
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'src/**'
+      - 'docs/**'
+      - 'README.md'
+      - 'AGENTS.md'
+      - 'Doxyfile'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Doxygen documentation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Doxygen
+        env:
+          DOXYGEN_VERSION: '1.18.0'
+          DOXYGEN_SHA256: '14fa81bdc34171edb5f1f02b1d60e74802f0439b77fa44e592565d517d72df90'
+        run: |
+          doxygen_archive="$RUNNER_TEMP/doxygen-$DOXYGEN_VERSION.linux.bin.tar.gz"
+          curl --fail --location --retry 3 \
+            "https://www.doxygen.nl/files/doxygen-$DOXYGEN_VERSION.linux.bin.tar.gz" \
+            --output "$doxygen_archive"
+          printf '%s  %s\n' "$DOXYGEN_SHA256" "$doxygen_archive" | sha256sum --check
+          tar -xzf "$doxygen_archive" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/doxygen-$DOXYGEN_VERSION/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/doxygen-$DOXYGEN_VERSION/bin/doxygen" --version
+
+      - name: Generate documentation
+        run: |
+          mkdir -p target/doxygen
+          doxygen Doxyfile
+          test -s target/doxygen/html/index.html
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: target/doxygen/html
+
+  deploy:
+    name: Deploy GitHub Pages
+    if: github.ref == 'refs/heads/master'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
