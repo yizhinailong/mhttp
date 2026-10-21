@@ -18,7 +18,7 @@ def main() -> int:
         transport = project / "src/core/impl/transport_tests.cppm"
         shutil.copy2(root / "tests/transport/transport_tests.cppm", transport)
         shutil.copy2(root / "tests/support/test_support.hpp", transport.parent / "test_support.hpp")
-        for name in ("session_tests.cppm", "server_tests.cppm"):
+        for name in ("session_tests.cppm", "server_peer.cppm", "server_tests.cppm"):
             shutil.copy2(root / "tests/server" / name, project / "src/server/impl" / name)
         with (project / "src/mhttp.cppm").open("a", encoding="utf-8") as output:
             output.write("\nexport import :test.transport;\nexport import :test.session;\nexport import :test.server;\n")
