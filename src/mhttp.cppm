@@ -15,6 +15,7 @@ export import :core.message;
 export import :core.parser;
 export import :core.serializer;
 export import :core.task;
+export import :core.runtime;
 
 export import :utils.string;
 export import :utils.percent;
