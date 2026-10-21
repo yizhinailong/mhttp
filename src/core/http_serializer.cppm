@@ -172,4 +172,63 @@ export namespace mhttp::detail {
         return result;
     }
 
+    /**
+     * @brief Encode an HTTP/1.1 chunked body without borrowing any supplied body bytes.
+     * @note Empty Encode calls do not terminate the body. A successful Finish is the only terminal
+     *       operation; later Encode/Finish calls fail. The caller serializes all access per stream.
+     * @internal
+     */
+    class ChunkEncoder {
+    private:
+        Headers m_initial_headers; ///< Owned initial fields used to reject connection-specific trailers.
+        bool m_finished{}; ///< Whether the terminal chunk has already been emitted.
+
+    public:
+        /**
+         * @brief Own initial fields for validating any eventual trailers.
+         * @param initial_headers Initial fields, including Connection nominations, copied or moved.
+         */
+        explicit ChunkEncoder(Headers initial_headers = {}) :
+            m_initial_headers{ std::move(initial_headers) } {}
+
+        /**
+         * @brief Encode one body segment as an owned chunk, or nothing for an empty segment.
+         * @param chunk Borrowed binary body bytes, needed only during this call.
+         * @return Owned wire bytes, or InvalidRequest after successful Finish.
+         */
+        [[nodiscard]] auto Encode(std::string_view chunk) -> Result<std::string> {
+            if (m_finished) { return std::unexpected{ Error::InvalidRequest }; }
+            if (chunk.empty()) { return std::string{}; }
+            auto result = std::format("{:x}\r\n", chunk.size());
+            result += chunk;
+            result += "\r\n";
+            return result;
+        }
+
+        /**
+         * @brief Emit the terminal chunk and validated trailing fields once.
+         * @param trailers Borrowed validated fields; handle errors from their mutations before calling.
+         * @return Owned terminal bytes, InvalidHeaders for forbidden trailers, or InvalidRequest if
+         *         already finished. A rejected Finish leaves the encoder open and emits no bytes.
+         */
+        [[nodiscard]] auto Finish(Headers const& trailers = {}) -> Result<std::string> {
+            if (m_finished) { return std::unexpected{ Error::InvalidRequest }; }
+            for (auto const& [name, value] : trailers) {
+                if (is_forbidden_trailer(name, m_initial_headers)) {
+                    return std::unexpected{ Error::InvalidHeaders };
+                }
+            }
+            std::string result{ "0\r\n" };
+            for (auto const& [name, value] : trailers) {
+                result += name;
+                result += ": ";
+                result += value;
+                result += "\r\n";
+            }
+            result += "\r\n";
+            m_finished = true;
+            return result;
+        }
+    };
+
 } // namespace mhttp::detail
