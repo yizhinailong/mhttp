@@ -23,7 +23,8 @@ def main() -> int:
             "session_tests.cppm", "server_peer.cppm", "server_routes.cppm",
             "server_handlers.cppm", "server_messages.cppm", "server_framing.cppm",
             "server_concurrency.cppm", "server_deadlines.cppm", "server_multipart.cppm",
-            "server_proxies.cppm", "server_streams.cppm", "server_lazy.cppm", "server_static.cppm", "server_tests.cppm",
+            "server_proxies.cppm", "server_streams.cppm", "server_lazy.cppm", "server_static.cppm",
+            "server_graceful.cppm", "server_tests.cppm",
         ):
             shutil.copy2(root / "tests/server" / name, project / "src/server/impl" / name)
         with (project / "src/mhttp.cppm").open("a", encoding="utf-8") as output:

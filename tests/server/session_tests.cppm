@@ -8,6 +8,7 @@ import std;
 import asio;
 import :core.impl.io_error;
 import :server.impl.session;
+import :server.impl.request_input;
 import :test.transport;
 import :core.runtime;
 
@@ -560,6 +561,66 @@ namespace mhttp::test {
     }
 
     /**
+     * @brief Own parser/input storage while beginning one header read on its connection strand.
+     * @param input Owned incremental input.
+     * @param parser Owned parser.
+     * @return First observable header event or admission failure.
+     */
+    auto drain_read_head(
+        std::shared_ptr<impl::RequestInput> input,
+        std::shared_ptr<detail::RequestParser> parser
+    ) -> asio::awaitable<Result<detail::ParseStep>> {
+        input->BeginRequest();
+        co_return co_await input->ReadEvent(*parser, std::chrono::steady_clock::now() + 2s);
+    }
+
+    /**
+     * @brief Read a request's first-feed milestone only on its owning connection strand.
+     * @param input Owned input.
+     * @return Whether at least one request byte was admitted.
+     */
+    auto drain_head_started(std::shared_ptr<impl::RequestInput> input) -> asio::awaitable<bool> {
+        co_return input->Started() != std::chrono::steady_clock::time_point{};
+    }
+
+    /**
+     * @brief Preserve a deterministically admitted partial head while rejecting first bytes after the cutoff.
+     * @param executor Independent peer strand.
+     */
+    auto session_drain_head_scenario(asio::any_io_executor executor) -> asio::awaitable<void> {
+        auto pair = co_await make_loopback(executor);
+        auto gate = std::make_shared<std::atomic<bool>>();
+        auto input = std::make_shared<impl::RequestInput>(pair->connection, gate);
+        auto parser = std::make_shared<detail::RequestParser>();
+        auto head = spawn_transport(executor, asio::co_spawn(pair->connection->Executor(),
+            drain_read_head(input, parser), asio::use_awaitable));
+        std::string const prefix = "GET / HTTP/1.1\r\nHost: loc";
+        co_await asio::async_write(pair->peer, asio::buffer(prefix), asio::use_awaitable);
+        asio::steady_timer timer{ executor };
+        bool started{};
+        auto const until = std::chrono::steady_clock::now() + 1s;
+        while (!(started = co_await asio::co_spawn(pair->connection->Executor(), drain_head_started(input), asio::use_awaitable))
+            && std::chrono::steady_clock::now() < until) {
+            timer.expires_after(1ms);
+            co_await timer.async_wait(asio::use_awaitable);
+        }
+        Check(started, "partial header admitted before closing gate");
+        gate->store(true);
+        std::string const tail = "al\r\n\r\n";
+        co_await asio::async_write(pair->peer, asio::buffer(tail), asio::use_awaitable);
+        auto admitted = co_await head->Wait();
+        Check(admitted && admitted->event == detail::ParseEvent::HeadersComplete, "begun partial header may finish after cutoff");
+        auto next = co_await make_loopback(executor);
+        auto late_input = std::make_shared<impl::RequestInput>(next->connection, gate);
+        auto late = spawn_transport(executor, asio::co_spawn(next->connection->Executor(),
+            drain_read_head(late_input, std::make_shared<detail::RequestParser>()), asio::use_awaitable));
+        auto request = prefix + tail;
+        co_await asio::async_write(next->peer, asio::buffer(request), asio::use_awaitable);
+        auto rejected = co_await late->Wait();
+        Check(!rejected && rejected.error() == Error::Canceled, "first input after cutoff is rejected without parsing a request");
+    }
+
+    /**
      * @brief Run one session scenario with a fresh multithreaded runtime.
      * @param scenario Factory borrowing only the runtime executor.
      */
@@ -594,6 +655,7 @@ export namespace mhttp::test {
             { "session pipeline", [] { run_session_scenario(session_pipeline_scenario); } },
             { "session draining pipeline", [] { run_session_scenario(session_drain_pipeline_scenario); } },
             { "session idle drain", [] { run_session_scenario(session_idle_drain_scenario); } },
+            { "session draining header admission", [] { run_session_scenario(session_drain_head_scenario); } },
             { "session chunked", [] { run_session_scenario(session_chunked_scenario); } },
             { "session parser errors", [] { run_session_scenario(session_errors_scenario); } },
             { "session early rejection", [] { run_session_scenario(session_early_scenario); } },

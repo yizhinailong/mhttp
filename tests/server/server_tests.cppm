@@ -23,6 +23,7 @@ import :test.server_proxies;
 import :test.server_streams;
 import :test.server_lazy;
 import :test.server_static;
+import :test.server_graceful;
 
 namespace mhttp::test {
 
@@ -862,6 +863,10 @@ export namespace mhttp::test {
             { "listener slow reader", server_slow_reader },
             { "listener multipart intake and cleanup", server_multipart_input },
             { "listener in-flight stop", server_inflight_stop },
+            { "listener graceful body intake", server_grace_bodies },
+            { "listener graceful idle peers", server_grace_idle },
+            { "listener graceful committed streams", server_grace_streams },
+            { "listener graceful stream failures", server_grace_stream_failures },
             { "listener Offload drain", server_offload_drain },
             { "listener callback isolation", server_callback_isolation },
             { "listener Listen execution", server_listen_execution },
