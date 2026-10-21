@@ -21,6 +21,9 @@ auto registered = router.Get("/users/:id", [](auto& request, auto& response) {
 ```
 
 处理器与可选 aspect 被复制或移动到稳定存储，支持只可移动的对象。
+成员函数可以用 `std::bind_front(&Service::Handle, service)` 作为处理器，同步和 Task 版本均可。
+绑定 shared_ptr 会共同持有对象，保证异步成员函数挂起期间 this 仍有效；
+使用 `std::ref` 或裸指针绑定时，调用方必须保留对象直到所有请求及其清理完成。
 同一模式与方法再次注册会覆盖旧处理器并及时释放其资源，不改变匹配优先级，
 也不影响相同路径的其他方法。非法模式或方法返回 InvalidRequest，保留已有注册。
 构造参数 RouterOptions 可以限制正则表达式源码与被匹配段的字节数；

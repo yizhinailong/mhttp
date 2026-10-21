@@ -337,6 +337,61 @@ auto router_failure_cleanup() -> void {
 }
 
 /**
+ * @brief Own state used by synchronous and suspended member-function handlers.
+ */
+struct MemberEndpoint {
+    std::string prefix{ "member-" }; ///< Shared state retained by both registered bindings.
+
+    /**
+     * @brief Read one captured path parameter through a const member function.
+     * @param request Borrowed current request.
+     * @param response Borrowed current response.
+     */
+    auto Read(mhttp::server::Request& request, mhttp::server::Response& response) const -> void {
+        Check(response.SetContent(prefix + std::string{ request.PathParam("name") }, "text/plain").has_value(),
+            "synchronous member writes response");
+    }
+
+    /**
+     * @brief Keep the bound object's this pointer valid across asynchronous suspension.
+     * @param request Borrowed request retained by the dispatch frame.
+     * @param response Borrowed response retained by the dispatch frame.
+     */
+    auto ReadAsync(
+        mhttp::server::Request& request,
+        mhttp::server::Response& response
+    ) -> mhttp::Task<void> {
+        co_await mhttp::Sleep(1ms);
+        Read(request, response);
+    }
+};
+
+/**
+ * @brief Bind member functions through the public callable API and retain/release their object ownership.
+ */
+auto router_member_handlers() -> void {
+    mhttp::Runtime runtime;
+    Check(runtime.Start(2).has_value(), "start member handler runtime");
+    std::weak_ptr<MemberEndpoint> lifetime;
+    {
+        mhttp::server::Router router;
+        auto endpoint = std::make_shared<MemberEndpoint>();
+        lifetime = endpoint;
+        Check(router.Get("/member/:name", std::bind_front(&MemberEndpoint::Read, endpoint)).has_value(),
+            "register bound const member function");
+        Check(router.Get("/async/:name", std::bind_front(&MemberEndpoint::ReadAsync, endpoint)).has_value(),
+            "register bound asynchronous member function");
+        endpoint.reset();
+        Check(!lifetime.expired(), "owned bindings retain their target after the caller releases it");
+        CheckEq(dispatch(runtime, router, "GET", "/member/test").Body(), "member-test"sv,
+            "const member receives captured path parameter");
+        CheckEq(dispatch(runtime, router, "GET", "/async/a%2Fb").Body(), "member-a/b"sv,
+            "asynchronous member preserves this and decoded captures across suspension");
+    }
+    Check(lifetime.expired(), "destroying route bindings releases the member target");
+}
+
+/**
  * @brief Run bounded public router scenarios.
  * @param argc Argument count.
  * @param argv Borrowed arguments.
@@ -353,5 +408,6 @@ auto main(int argc, char** argv) -> int {
         { "router callback ownership", router_ownership },
         { "router concurrent dispatch", router_concurrency },
         { "router failure cleanup", router_failure_cleanup },
+        { "router member function handlers", router_member_handlers },
     });
 }
