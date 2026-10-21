@@ -120,6 +120,43 @@ auto response_framing() -> void {
 }
 
 /**
+ * @brief Validate deferred move-only producers and release them on every representation replacement.
+ */
+auto response_provider_configuration() -> void {
+    for (unsigned replacement{}; replacement != 4; ++replacement) {
+        mhttp::server::Response response;
+        Check(response.SetContent("old", "text/plain").has_value(), "initial buffered representation");
+        Check(response.SetStatus(mhttp::Status::Created).has_value(), "provider preserves status");
+        auto owner = std::make_shared<int>(42);
+        std::weak_ptr<int> weak = owner;
+        auto source = [state = std::move(owner), unique = std::make_unique<int>(7)](
+            mhttp::server::StreamWriter&
+        ) -> mhttp::Task<mhttp::Result<void>> {
+            Check(false, "configuration and serialization must not invoke a deferred provider");
+            co_return mhttp::Result<void>{};
+        };
+        Check(response.SetChunkedContentProvider(std::move(source), "application/octet-stream").has_value(),
+            "own a move-only deferred producer");
+        Check(response.IsStreaming() && response.Body().empty() && !weak.expired(), "stream owns producer without aggregate body");
+        CheckEq(response.Status(), mhttp::Status::Created, "stream preserves application status");
+        CheckEq(response.SetChunkedContentProvider({}).error(), mhttp::Error::InvalidRequest, "empty callback rejected");
+        CheckEq(response.SetChunkedContentProvider([](auto&) -> mhttp::Task<mhttp::Result<void>> {
+            co_return mhttp::Result<void>{};
+        }, "bad\r\nvalue").error(), mhttp::Error::InvalidHeaders, "unsafe media type rejected");
+        Check(response.IsStreaming() && !weak.expired() && response.Body().empty(), "rejected replacement preserves producer");
+        CheckEq(response.Header("Content-Type"), "application/octet-stream"sv, "rejected replacement preserves fields");
+        auto moved = std::move(response);
+        if (replacement == 0) { Check(moved.SetContent("new", "text/plain").has_value(), "replace with bytes"); }
+        else if (replacement == 1) { Check(moved.SetEmpty(mhttp::Status::NoContent).has_value(), "replace with empty"); }
+        else if (replacement == 2) { Check(moved.SetError(mhttp::Status::BadRequest).has_value(), "replace with error"); }
+        else { Check(moved.SetRedirect("/elsewhere").has_value(), "replace with redirect"); }
+        Check(!moved.IsStreaming() && weak.expired(), "replacement releases producer and selects buffered mode");
+    }
+    static_assert(!std::is_copy_constructible_v<mhttp::server::StreamWriter>);
+    static_assert(!std::is_move_constructible_v<mhttp::server::StreamWriter>);
+}
+
+/**
  * @brief Run bounded response scenarios.
  * @param argc Argument count.
  * @param argv Borrowed arguments.
@@ -131,5 +168,6 @@ auto main(int argc, char** argv) -> int {
         { "response rejected mutations", rejected_mutations },
         { "response errors and redirects", errors_and_redirects },
         { "response protocol framing", response_framing },
+        { "response provider configuration", response_provider_configuration },
     });
 }

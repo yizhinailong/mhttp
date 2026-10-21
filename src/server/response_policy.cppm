@@ -23,12 +23,15 @@ export namespace mhttp::detail {
     };
 
     /**
-     * @brief Own a complete bounded wire response independently of application response and parser storage.
+     * @brief Own bounded buffered output or a finalized streaming head independently of application storage.
      * @internal
      */
     struct SerializedServerResponse {
-        std::string bytes; ///< Head plus permitted body bytes, ready for one owned asynchronous write.
+        std::string bytes; ///< Complete buffered response or streaming head for one owned asynchronous write.
         bool keep_alive{}; ///< True only when every request, response, and session policy permits reuse.
+        bool streaming{}; ///< Invoke the owned provider only when wire body semantics allow it.
+        BodyKind body_kind{ BodyKind::None }; ///< Chunked or EOF mode for active streams.
+        Headers stream_headers; ///< Final initial fields for validating trailers, empty for buffered output.
     };
 
     /**
@@ -39,7 +42,7 @@ export namespace mhttp::detail {
      * @param routing Routing policy; failed post-routing forbids preparing any response.
      * @param session Completion count, body consumption, and stop state.
      * @param now Instant used for an automatically supplied Date; ignored when Date is already present.
-     * @return Owned bounded wire response, InvalidRequest, or BodyTooLarge before a write can start.
+     * @return Owned bounded response/head, InvalidRequest, or BodyTooLarge before a write can start.
      * @note Defaults preserve repeated fields and never replace explicit fields. Status 1xx cannot be
      *       a final buffered response. HEAD/204/304 suppress body bytes before applying the wire bound.
      * @internal
@@ -68,15 +71,20 @@ export namespace mhttp::detail {
             && !has_header_token(head.headers, "Connection", "keep-alive")) {
             static_cast<void>(head.headers.Add("Connection", "keep-alive"));
         }
+        bool const streaming = response.IsStreaming();
         auto serialized = serialize_response_head(head, request.Method().value_or(Method::Get),
-            { .body_bytes = response.Body().size(), .keep_alive = keep_alive });
+            { .body_bytes = response.Body().size(), .chunked = streaming && request.Version() == Version::Http11,
+                .keep_alive = keep_alive, .close_delimited = streaming && request.Version() == Version::Http10 });
         if (!serialized) { return std::unexpected{ serialized.error() }; }
         if (serialized->bytes.size() > options.max_response_bytes
             || (serialized->send_body && response.Body().size() > options.max_response_bytes - serialized->bytes.size())) {
             return std::unexpected{ Error::BodyTooLarge };
         }
-        if (serialized->send_body) { serialized->bytes.append(response.Body()); }
-        return SerializedServerResponse{ std::move(serialized->bytes), serialized->keep_alive };
+        if (serialized->send_body && !streaming) { serialized->bytes.append(response.Body()); }
+        bool const send_stream = streaming && serialized->send_body;
+        return SerializedServerResponse{ .bytes = std::move(serialized->bytes), .keep_alive = serialized->keep_alive,
+            .streaming = send_stream, .body_kind = serialized->body_kind,
+            .stream_headers = send_stream ? std::move(head.headers) : Headers{} };
     }
 
 } // namespace mhttp::detail

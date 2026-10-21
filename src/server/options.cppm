@@ -25,13 +25,14 @@ export namespace mhttp::server {
         std::size_t header_bytes{ 64 * 1024 }; ///< Request fields and trailers together, including delimiters.
         std::size_t header_fields{ 100 }; ///< Request fields and trailers together, including discarded fields.
         std::uint64_t body_bytes{ 8 * 1024 * 1024 }; ///< Maximum decoded buffered request body.
-        std::size_t max_response_bytes{ 16 * 1024 * 1024 }; ///< Maximum complete buffered wire response.
+        std::size_t max_response_bytes{ 16 * 1024 * 1024 }; ///< Maximum buffered response, stream head, or single framed stream write.
         std::size_t max_connections{ 1024 }; ///< Maximum registered sessions, including idle/closing sessions.
         bool reuse_address{ true }; ///< Reuse closed POSIX bindings; Windows always reserves exclusively.
         bool tcp_no_delay{ true }; ///< Disable Nagle on each accepted socket before session startup.
         bool ipv6_only{}; ///< Restrict IPv6 listeners to IPv6; false enables IPv4-mapped dual stack.
         Headers default_headers; ///< Fallback response fields; explicit application fields take precedence.
         TrustedProxies trusted_proxies; ///< Immutable client-IP policy; default ignores forwarded addresses.
+        std::size_t stream_chunk_bytes{ 64 * 1024 }; ///< Maximum decoded bytes per awaited stream Write; positive.
     };
 
 } // namespace mhttp::server
@@ -55,7 +56,7 @@ export namespace mhttp::detail {
         if (!valid_timeout(options.read_timeout) || !valid_timeout(options.write_timeout)
             || !valid_timeout(options.keep_alive_timeout) || options.keep_alive_max_requests == 0
             || options.uri_bytes == 0 || options.header_bytes == 0 || options.header_fields == 0
-            || options.max_response_bytes == 0 || options.max_connections == 0
+            || options.max_response_bytes == 0 || options.max_connections == 0 || options.stream_chunk_bytes == 0
             || options.body_bytes > std::numeric_limits<std::size_t>::max()) {
             return std::unexpected{ Error::InvalidRequest };
         }

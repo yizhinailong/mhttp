@@ -193,6 +193,46 @@ auto server_parser_configuration() -> void {
 }
 
 /**
+ * @brief Prepare deferred streams without invoking producers or inventing buffered body lengths.
+ */
+auto response_stream_framing() -> void {
+    mhttp::server::Response response;
+    Check(response.SetChunkedContentProvider([](auto&) -> mhttp::Task<mhttp::Result<void>> {
+        Check(false, "head preparation never invokes producer code");
+        co_return mhttp::Result<void>{};
+    }).has_value(), "configure deferred stream");
+    Check(response.Headers().Add("Content-Length", "999").has_value(), "stale stream length");
+    Check(response.Headers().Add("Transfer-Encoding", "gzip").has_value(), "stale stream coding");
+    for (auto version : { mhttp::Version::Http10, mhttp::Version::Http11 }) {
+        for (auto method : { "GET", "HEAD" }) {
+            auto request = ServerRequestAccess::Create({ .method = method, .version = version });
+            auto wire = serialize_server_response(request, response, {});
+            if (!Check(wire.has_value(), "stream head serializes")) { continue; }
+            CheckEq(wire->streaming, std::string_view{ method } == "GET", "HEAD skips the producer");
+            Check(wire->bytes.ends_with("\r\n\r\n") && !wire->bytes.contains("Content-Length:"), "no aggregate body length invented");
+            CheckEq(wire->body_kind, version == mhttp::Version::Http11
+                ? mhttp::detail::BodyKind::Chunked : mhttp::detail::BodyKind::UntilEof, "wire-version streaming mode");
+            CheckEq(wire->keep_alive, version == mhttp::Version::Http11, "only chunked streams may persist");
+            CheckEq(wire->bytes.contains("Transfer-Encoding: chunked\r\n"), version == mhttp::Version::Http11,
+                "chunked coding is exclusive to HTTP/1.1");
+            mhttp::server::ServerOptions exact{ .max_response_bytes = wire->bytes.size() };
+            Check(serialize_server_response(request, response, exact).has_value(), "stream head fits exact bound");
+            --exact.max_response_bytes;
+            CheckEq(serialize_server_response(request, response, exact).error(), mhttp::Error::BodyTooLarge,
+                "stream head bound applies before commitment");
+        }
+    }
+    for (auto status : { mhttp::Status::NoContent, mhttp::Status::NotModified }) {
+        Check(response.SetStatus(status).has_value(), "bodyless streaming status");
+        auto request = ServerRequestAccess::Create({});
+        auto wire = serialize_server_response(request, response, {});
+        Check(wire && !wire->streaming && wire->body_kind == mhttp::detail::BodyKind::None
+            && !wire->bytes.contains("Transfer-Encoding:"), "bodyless status skips provider and terminal framing");
+    }
+    Check(!mhttp::detail::validate_server_options({ .stream_chunk_bytes = 0 }), "zero chunk bound rejected before bind");
+}
+
+/**
  * @brief Run bounded response preparation scenarios.
  * @param argc Argument count.
  * @param argv Borrowed arguments.
@@ -203,6 +243,7 @@ auto main(int argc, char** argv) -> int {
         { "response automatic fields", response_automatic_fields },
         { "response session persistence policy", response_persistence_policy },
         { "response complete wire bounds", response_wire_bounds },
+        { "response streaming wire policy", response_stream_framing },
         { "response rejected configuration", response_rejected_configuration },
         { "server configured parser admission", server_parser_configuration },
     });

@@ -6,6 +6,7 @@ module mhttp:server.impl.response;
 
 import std;
 import :core.message;
+import :server.stream_writer;
 
 namespace mhttp::impl {
 
@@ -16,6 +17,8 @@ namespace mhttp::impl {
         mhttp::Status status{ mhttp::Status::Ok }; ///< Current three-digit status.
         mhttp::Headers headers; ///< Validated ordered response fields.
         std::string body; ///< Owned binary representation, independent of wire body suppression.
+        server::ContentProvider provider; ///< Owned deferred producer, consumed only after final hooks.
+        bool streaming{}; ///< Streaming representation, retained for observation after producer consumption.
 
         /**
          * @brief Set a three-digit response status without changing content.
@@ -42,6 +45,30 @@ namespace mhttp::impl {
                 if (!assigned) { return assigned; }
             }
             body = std::move(bytes);
+            provider = {};
+            streaming = false;
+            return {};
+        }
+
+        /**
+         * @brief Replace buffered content with an owned deferred stream after validating all inputs.
+         * @param source Nonempty producer, not invoked until final response hooks and head transmission.
+         * @param content_type Borrowed validated field value, or empty to remove Content-Type.
+         * @return Success, InvalidRequest for an empty callback, or InvalidHeaders without state changes.
+         */
+        auto SetChunkedContentProvider(
+            server::ContentProvider source,
+            std::string_view content_type
+        ) -> Result<void> {
+            if (!source) { return std::unexpected{ Error::InvalidRequest }; }
+            if (content_type.empty()) { headers.Erase("Content-Type"); }
+            else {
+                auto assigned = headers.Set("Content-Type", content_type);
+                if (!assigned) { return assigned; }
+            }
+            body.clear();
+            provider = std::move(source);
+            streaming = true;
             return {};
         }
 
@@ -55,6 +82,8 @@ namespace mhttp::impl {
             if (!assigned) { return assigned; }
             headers.Erase("Content-Type");
             body.clear();
+            provider = {};
+            streaming = false;
             return {};
         }
 
@@ -69,6 +98,8 @@ namespace mhttp::impl {
             static_cast<void>(headers.Set("Content-Type", "text/plain; charset=utf-8"));
             body = std::move(bytes);
             status = value;
+            provider = {};
+            streaming = false;
             return {};
         }
 
@@ -89,6 +120,8 @@ namespace mhttp::impl {
             headers.Erase("Content-Type");
             body.clear();
             status = value;
+            provider = {};
+            streaming = false;
             return {};
         }
     };

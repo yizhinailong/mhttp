@@ -242,12 +242,58 @@ namespace mhttp::impl {
                 if (!wire) { co_return false; }
             }
             bool const keep_alive = wire->keep_alive;
-            auto written = co_await m_connection->WriteAll(std::move(wire->bytes), m_options.write_timeout);
+            auto const deadline = Clock::now() + m_options.write_timeout;
+            auto written = co_await m_connection->WriteAll(std::move(wire->bytes), deadline - Clock::now());
             if (!written) { result.error = written.error(); co_return false; }
+            if (wire->streaming && !co_await writeStream(response, *wire, deadline, result)) { co_return false; }
             ++result.responses;
             m_observers.Access(request, response, Clock::now() - m_request_started);
             if (!keep_alive) { static_cast<void>(co_await m_connection->Shutdown()); }
             co_return keep_alive;
+        }
+
+        /**
+         * @brief Await the stable owned provider and terminal framing under one cancelable response deadline.
+         * @param response Borrowed finalized response; its callback moves into this frame before invocation.
+         * @param wire Owned head result, including final fields and selected stream mode.
+         * @param deadline Absolute deadline also used for head transmission.
+         * @param result Root-owned error/exception metadata; no response count is added on failure.
+         * @return Whether the complete provider and terminal write succeeded before retirement.
+         */
+        auto writeStream(
+            server::Response& response,
+            detail::SerializedServerResponse& wire,
+            Clock::time_point deadline,
+            SessionResult& result
+        ) -> asio::awaitable<bool> {
+            auto state = StreamWriterImpl::Create(m_connection, wire.body_kind,
+                std::move(wire.stream_headers), m_options.stream_chunk_bytes, deadline);
+            StreamRetirement retirement{ state };
+            std::stop_callback stopped{ m_stop_source.get_token(), [weak = std::weak_ptr{ state }] {
+                if (auto owner = weak.lock()) { owner->Cancel(); }
+            } };
+            auto writer = detail::StreamWriterAccess::Create(state);
+            auto provider = detail::ServerResponseAccess::TakeProvider(response);
+            try {
+                if (!provider) { state->Fail(Error::InvalidRequest); }
+                else {
+                    auto provided = co_await AwaitTask(provider(writer), m_connection->Executor(),
+                        state->StopToken(), m_runtime);
+                    if (!provided) { state->Fail(provided.error()); }
+                    if (!state->ErrorValue() && !state->Finished()) {
+                        auto finished = co_await state->Finish();
+                        if (!finished) { state->Fail(finished.error()); }
+                    }
+                }
+            } catch (std::system_error const& error) {
+                result.failure = std::current_exception();
+                state->Fail(error.code() == Error::Canceled ? Error::Canceled : Error::Unknown);
+            } catch (...) {
+                result.failure = std::current_exception();
+                state->Fail(Error::Unknown);
+            }
+            if (auto error = state->ErrorValue()) { result.error = *error; co_return false; }
+            co_return true;
         }
 
         /**

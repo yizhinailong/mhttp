@@ -8,6 +8,7 @@ import std;
 import :server.impl.response;
 export import :core.message;
 export import :core.json_support;
+export import :server.stream_writer;
 
 export namespace mhttp::detail {
 
@@ -18,7 +19,7 @@ export namespace mhttp::detail {
 export namespace mhttp::server {
 
     /**
-     * @brief Own a move-only buffered response for one serialized request handler chain.
+     * @brief Own a move-only buffered or streamed response for one serialized request handler chain.
      * @note Views and references borrow this response's state and expire on relevant mutation or
      *       destruction. Concurrent mutation requires external synchronization. A moved-from response
      *       may only be destroyed or assigned. Wire framing is recomputed from Body by the serializer.
@@ -104,6 +105,27 @@ export namespace mhttp::server {
         [[nodiscard]] auto Body() const noexcept -> std::string const& { return m_impl->body; }
 
         /**
+         * @brief Inspect whether this response uses a deferred streaming representation.
+         * @return True after provider registration, including after that provider has been consumed.
+         * @note Body remains empty for streams; no complete aggregate representation is retained.
+         */
+        [[nodiscard]] auto IsStreaming() const noexcept -> bool { return m_impl->streaming; }
+
+        /**
+         * @brief Own a deferred content producer while preserving status and unrelated fields.
+         * @param provider Nonempty owned callback, invoked once after final hooks and head transmission.
+         * @param content_type Borrowed validated media type, or empty to remove Content-Type.
+         * @return Success, InvalidRequest, or InvalidHeaders without changing the prior representation.
+         * @note HTTP/1.1 uses chunks; HTTP/1.0 sends raw bytes and closes. HEAD/204/304 skip the
+         *       provider entirely. The provider and every awaited write share write_timeout. Errors
+         *       after commitment close the connection; error/post-routing hooks are not run again.
+         */
+        [[nodiscard]] auto SetChunkedContentProvider(
+            ContentProvider provider,
+            std::string_view content_type = "application/octet-stream"
+        ) -> Result<void> { return m_impl->SetChunkedContentProvider(std::move(provider), content_type); }
+
+        /**
          * @brief Set owned binary content and its field value, preserving the current status.
          * @param body Representation moved into this response after validation.
          * @param content_type Validated Content-Type value, or empty to remove that field.
@@ -166,6 +188,17 @@ export namespace mhttp::detail {
      * @internal
      */
     struct ServerResponseAccess {
+        /**
+         * @brief Move the deferred producer into a stable session frame before invoking it.
+         * @param response Serialized response; the streaming representation flag is preserved.
+         * @return Owned provider or an empty function for a buffered/already-consumed response.
+         */
+        [[nodiscard]] static auto TakeProvider(
+            server::Response& response
+        ) -> server::ContentProvider {
+            return std::move(response.m_impl->provider);
+        }
+
         /**
          * @brief Snapshot status and headers for authoritative framing and wire body suppression.
          * @param response Borrowed buffered response, serialized against mutation.

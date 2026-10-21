@@ -104,6 +104,53 @@ IPv4。IPv4 与 IPv6 分别匹配，IPv4 CIDR 不信任 IPv4-mapped IPv6；双�
 请求头或声明的 body 大小在接收阶段被拒绝时，错误请求保留真实对端 IP，不采信部分解析的转发字段。
 完整请求头被接受后发生的 body 中断仍使用已经计算的客户端 IP。
 
+## 流式响应
+
+`Response::SetChunkedContentProvider(provider, content_type)` 取代缓冲 body，拥有一个
+`Task<Result<void>>(StreamWriter&)` 回调，支持只可移动的捕获。注册不发送数据：处理器、aspect、
+错误处理和 post-routing 先完成，服务器按最终状态和头部决定分帧，写完响应头后才调用 provider。
+`IsStreaming()` 标识这种表示，`Body()` 为空，不聚合整个响应。
+
+```cpp
+server.Get("/stream", [](auto&, auto& response) {
+    response.SetChunkedContentProvider([](mhttp::server::StreamWriter& writer)
+        -> mhttp::Task<mhttp::Result<void>> {
+        for (unsigned index{}; index != 10; ++index) {
+            auto written = co_await writer.Write(std::format("item {}\n", index));
+            if (!written) { co_return written; }
+        }
+        co_return mhttp::Result<void>{};
+    }, "text/plain").value();
+}).value();
+```
+
+`Write(std::string)` 在发出操作时取得字节所有权，Task 被等待时才执行；空写入不会结束流。
+逐次 `co_await` 使下一块在上一块完成后才生成，服务器不建立待发送数据队列。
+每块原始数据不超过 `ServerOptions::stream_chunk_bytes`，默认 64 KiB；响应头、单块编码后的
+字节及终止块分别不超过 `max_response_bytes`。总流长度可以超过该缓冲响应上限。
+provider 和所有输出，包括响应头，共用原有 `write_timeout` 的整条响应期限，进度不重置期限；
+即使 provider 正在 `Sleep` 而没有待发送数据，超时也会取消它并关闭连接。
+不要在 provider 中阻塞 I/O 线程；`Offload` 的取消仍需等已经开始的业务函数返回。
+
+HTTP/1.1 使用 chunked。provider 成功返回后，服务器自动发送唯一终止块；也可显式等待
+`Finish(Headers trailers)`，发送安全的有界 trailer。framing、认证、路由及 Connection 指定的字段
+不能作为 trailer。显式完成后不能再次 Write 或 Finish。HTTP/1.0 使用原始字节与连接关闭分帧，
+不能发送 trailer、不能复用；这种旧版本分帧无法区分正常结束与传输中断。
+HEAD、204、304 不调用 provider，也不发送任何 chunk 或终止块。
+
+provider 借用的 writer 和请求元数据只在整个回调 Task 完成前有效。捕获处理器局部数据时必须取得
+所有权；处理器的局部变量在 provider 开始前已经销毁。请求对象由会话保留，允许在 provider 中
+只读访问。响应头已发送，provider 不应再修改 Response。发出的写入和 Finish 必须逐个等待，
+重叠操作返回 Busy。遗留的惰性写入 Task 保留内部状态，但在 provider 结束后执行会失败，
+不会向后续响应注入字节；Runtime 仍须比所有发出的 Task 活得久。
+
+空 provider 和非法 content type 在注册时返回错误，保留原表示。SetContent、SetEmpty、SetError、
+SetRedirect 会释放已有 provider，切回缓冲表示。写入、trailer、provider 返回错误或抛异常后，
+已提交的响应只能关闭连接，不重跑错误处理和 post-routing，不执行流水线后续请求。
+即使 provider 忽略一个传输错误，也不会得到成功终止块。诊断日志保留错误及异常，
+访问日志只在完整流和终止分帧都成功后调用，仍可看到 IsStreaming 而不持有完整 body。
+HttpServer.Stop 和 Runtime.Stop 会取消 provider 的异步等待，并在协程帧排空后完成停机。
+
 ## 认证中间件
 
 `server::BasicAuth::Create(username, password, realm)` 与

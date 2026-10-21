@@ -32,6 +32,7 @@ export import :server.route_tree;
 export import :server.request_data;
 export import :server.trusted_proxies;
 export import :server.response;
+export import :server.stream_writer;
 export import :server.request;
 export import :server.handler;
 export import :server.auth;
