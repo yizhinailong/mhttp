@@ -104,6 +104,9 @@ jobs:
       - name: Test private HTTP sessions
         run: python tools/check_session.py
 
+      - name: Test public HTTP listeners
+        run: python tools/check_server.py
+
       - name: Test
         run: mcpp test --timeout 30
 

@@ -26,6 +26,7 @@ export import :server.handler;
 export import :server.router;
 export import :server.options;
 export import :server.response_policy;
+export import :server.http_server;
 
 export import :utils.string;
 export import :utils.percent;

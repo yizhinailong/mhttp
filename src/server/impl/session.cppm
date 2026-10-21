@@ -85,7 +85,26 @@ namespace mhttp::impl {
             std::shared_ptr<RuntimeImpl> runtime = {},
             std::stop_token runtime_stop = {}
         ) -> Result<std::shared_ptr<Session>> {
-            if (!connection || !detail::validate_server_options(options)
+            return Create(std::move(connection), router.m_impl, std::move(options), std::move(runtime), runtime_stop);
+        }
+
+        /**
+         * @brief Create a session from server-owned frozen routing without borrowing a public wrapper.
+         * @param connection Initialized connection, not concurrently accessed during this call.
+         * @param router Owned configuration frozen through the session lifetime.
+         * @param options Owned validated configuration snapshot.
+         * @param runtime Optional owned runtime for Offload.
+         * @param runtime_stop Runtime generation cancellation.
+         * @return Owned session or a configuration/endpoint failure.
+         */
+        static auto Create(
+            std::shared_ptr<Connection> connection,
+            std::shared_ptr<RouterImpl> router,
+            server::ServerOptions options,
+            std::shared_ptr<RuntimeImpl> runtime,
+            std::stop_token runtime_stop
+        ) -> Result<std::shared_ptr<Session>> {
+            if (!connection || !router || !detail::validate_server_options(options)
                 || connection->MaxWriteSize() < options.max_response_bytes) {
                 return std::unexpected{ Error::InvalidRequest };
             }
@@ -95,7 +114,7 @@ namespace mhttp::impl {
             if (error) { return std::unexpected{ Error::Connection }; }
             auto local = socket.local_endpoint(error);
             if (error) { return std::unexpected{ Error::Connection }; }
-            return std::shared_ptr<Session>{ new Session{ std::move(connection), router.m_impl,
+            return std::shared_ptr<Session>{ new Session{ std::move(connection), std::move(router),
                 std::move(options), std::move(runtime), runtime_stop,
                 { remote.address().to_string(), remote.port() }, { local.address().to_string(), local.port() } } };
         }

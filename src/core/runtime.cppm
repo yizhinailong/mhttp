@@ -10,6 +10,12 @@ import :core.impl.bridge;
 export import :core.error;
 export import :core.task;
 
+namespace mhttp::impl {
+
+    class ServerImpl;
+
+} // namespace mhttp::impl
+
 export namespace mhttp::detail {
 
     struct RuntimeAccess;
@@ -28,6 +34,7 @@ export namespace mhttp {
     private:
         std::shared_ptr<impl::RuntimeImpl> m_impl; ///< Owned context and thread lifecycle.
         friend struct detail::RuntimeAccess;
+        friend class impl::ServerImpl;
 
     public:
         /**

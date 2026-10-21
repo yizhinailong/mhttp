@@ -11,6 +11,7 @@ export import :server.routing;
 namespace mhttp::impl {
 
     class Session;
+    class ServerImpl;
 
 } // namespace mhttp::impl
 
@@ -39,6 +40,7 @@ export namespace mhttp::server {
         std::shared_ptr<impl::RouterImpl> m_impl; ///< Owned tree, handlers, and configuration guards.
         friend struct detail::RouterAccess;
         friend class impl::Session;
+        friend class impl::ServerImpl;
 
     public:
         /**

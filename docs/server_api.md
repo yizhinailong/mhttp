@@ -192,7 +192,40 @@ HTTP/1.1 的 `Expect: 100-continue` 在 pre-routing 与匹配通过、声明长�
 先发送无 body 的 100，再读取完整 body。临时响应不调用响应钩子、不计入最大请求数。
 未匹配或被 pre-routing 提前处理时直接发送最终响应并关闭，不等待读取 body；
 不支持的期望值由解析器返回 417，超限返回 413。HTTP/1.0 忽略 Expect。
-监听器与公共 HttpServer 生命周期尚待接入。
+
+## 监听器生命周期
+
+`HttpServer(runtime, options, router_options)` 继承 Router。Runtime 必须活过服务端和它创建的所有 Task。
+构造不启动线程；Bind 与 BindToAnyPort 解析地址、绑定并监听，Start 在已启动的 Runtime 上提交 accept 循环。
+Bind 返回实际端口，LocalEndpoint 返回拥有地址数据的 optional；停止完成后返回空值。
+Start 立即冻结路由并返回，重复启动和运行期修改路由返回 AlreadyRunning。
+WaitUntilReady 默认最多等待五秒，未启动或已停止时立即返回 NotRunning。
+启动失败会撤销冻结，可修正配置状态后重试。
+
+```cpp
+mhttp::Runtime runtime;
+if (!runtime.Start(4)) { return 1; }
+mhttp::server::HttpServer server{ runtime };
+if (!server.Get("/hello", [](auto&, auto& response) {
+    static_cast<void>(response.SetContent("hello", "text/plain"));
+})) { return 1; }
+auto port = server.BindToAnyPort("127.0.0.1");
+if (!port || !server.Start() || !server.WaitUntilReady()) { return 1; }
+// 在应用自己的非 I/O 控制线程中等待退出事件。
+if (!server.Stop()) { return 1; }
+```
+
+Stop 关闭监听器并取消全部会话，阻塞到 accept、用户 Task、已开始的 Offload 和会话完成回调全部排空。
+AsyncStop 在独立的控制 Task 中等待相同的排空条件；不要在该服务端自己的 handler 中等待它，
+因为当前 handler 也是排空的一部分。Bind、Stop 和 WaitUntilReady 在 I/O 线程返回 Busy。
+析构也会停止并等待，因此必须在非 I/O 线程销毁服务端。
+Runtime::Stop 同样会取消监听器和会话，Join 会等待相关操作排空。
+停止保留路由，重新 Bind/Start 无需再次注册；Runtime 停止后须先 Join，再 Start 一个新执行代。
+
+全局 strand 独占 acceptor 与会话表；会话先登记，再启动连接 strand 上的协程。
+停止只向连接 strand 投递取消，所有会话根完成后才解冻路由并通知等待方。
+只 Bind 而未 Start 的套接字也能在 Runtime 启动前直接 Stop。
+当前尚未提供阻塞 Listen、最大连接数和日志钩子。
 
 对应独立测试为 `tests/server/request_test.cpp`、`response_test.cpp`、
 `request_data_test.cpp`、`handler_test.cpp`、`middleware_test.cpp`、`router_test.cpp`、
