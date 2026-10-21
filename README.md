@@ -112,6 +112,31 @@ mcpp run rest_client -- http://127.0.0.1:8080
 JSON 的 feature、独立 `import mhttp.json;` 与读写接口见 [JSON 适配](docs/json.md)；
 文件和普通字段的构造、解析与大小限制见 [multipart](docs/multipart.md)。
 
+## 压测示例
+
+启动上述 rest_server 后，可以对其健康检查接口发起固定总量或固定时长的请求：
+
+```text
+mcpp run stress_test -- http://127.0.0.1:8080/health --requests 1000 --connections 16 --threads 2
+mcpp run stress_test -- http://127.0.0.1:8080/health --duration 10 --connections 16
+mcpp run stress_test -- --help
+```
+
+[stress_test](examples/stress_test/main.cpp) 使用独立的 keep-alive 客户端共享 Runtime，
+支持 GET、HEAD、POST、PUT、PATCH、DELETE、OPTIONS，以及 `--body`、`--content-type`
+和可重复的 `--header "Name: value"`。URL 支持路径与查询参数，只接受明文 HTTP。
+`--requests` 为全局 Send 尝试数，与 `--duration` 互斥；时长模式到期停止提交，等待最后的请求完成。
+`--timeout-ms` 为一次完整请求的整体预算，默认三秒；重定向保持默认不跟随。
+连接数限制为 1–256，每个连接使用一个非 I/O 协调线程等待公共 SyncWait；
+`--threads` 单独控制共享 Runtime 的 I/O 线程数，网络收发始终异步执行。
+
+报告区分完整 HTTP 响应、非 2xx 响应和传输失败，统计解码后的正文总字节数、
+每秒尝试数、状态码、错误类型，以及所有已完成尝试（含失败）的平均、最小和最大延迟。
+p50/p95/p99 使用固定大小直方图的桶上界，每个客户端的延迟统计约占 16 KiB，
+统计内存不随请求总数增长。耗时和吞吐量包含连接建立与最终请求排空。
+全部请求为 2xx 时退出码为 0，出现 HTTP 或传输失败为 2，参数或执行异常为 1。
+`python tools/check_stress.py` 使用动态回环端口验证计数、复用、并发、正文和超时，不对吞吐量设断言。
+
 ## 测试
 
 每个 `tests/**/*.cpp` 是独立测试程序。用例在本地运行，不依赖公网服务：
@@ -134,6 +159,7 @@ python tools/check_server.py
 python tools/check_client.py
 python tools/check_json.py
 python tools/check_examples.py
+python tools/check_stress.py
 python tools/check_test_support.py
 ```
 
