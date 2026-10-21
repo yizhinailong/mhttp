@@ -1,7 +1,7 @@
 # 服务端接口基础
 
 `server::Request`、`server::Response`、`server::RequestData` 和 `server::Router`
-通过 `import mhttp;` 使用。当前支持内存中的路由配置与分派；监听器和 HTTP 会话仍待接入。
+通过 `import mhttp;` 使用。HttpServer 在借用的 Runtime 上提供异步监听器与 HTTP 会话。
 
 ## 路由注册
 
@@ -56,6 +56,16 @@ Request 独立拥有请求头、target、查询、端点、路径参数、body �
 `Body()` 返回拥有数据的二进制字符串；`Trailers()` 单独提供解析器已过滤的 trailer，
 不会把它们合并进普通头部。`RemoteEndpoint()`、`LocalEndpoint()` 返回拥有地址与端口的值。
 `Version()` 和 `KeepAlive()` 描述原始请求语义；服务器停止、响应头及最大请求次数还会影响实际复用。
+
+`Form() -> Result<QueryParams>` 按需解析 application/x-www-form-urlencoded body，
+媒体类型大小写无关并允许 charset 等参数；参数不会触发字符转码。
+每次调用返回独立拥有的字段集合，可以在 Request 销毁后继续使用，不改变 Body 或 URL 的 Query。
+缺少或不匹配 Content-Type 返回 InvalidRequest，重复 Content-Type 返回 InvalidHeaders，
+应用可以选择返回 400 或 415。空的合法表单返回空集合。
+表单沿用 QueryParams 的重复字段、空值、二进制 percent 解码和宽容转义规则，但开头的 `?`
+作为字段名保留。独立解析表单可用 QueryParams::ParseForm；QueryParams::Parse 继续接受查询的 `?` 前缀。
+QueryParams::Encode 可生成客户端上传的表单字符串，空格编码为 `+`，字面量 `+` 编码为 `%2B`。
+网络会话先执行原有 body 大小限制，再向 handler 提供表单访问器。
 
 `PathParam(name, fallback)` 借用解码后的捕获，空串与 NUL 都能保留。
 `PathParam<T>(name)` 支持数字、bool、string 和 string_view，返回 optional；

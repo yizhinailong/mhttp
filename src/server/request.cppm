@@ -120,6 +120,15 @@ export namespace mhttp::server {
         [[nodiscard]] auto Body() const noexcept -> std::string const& { return m_impl->body; }
 
         /**
+         * @brief Decode application/x-www-form-urlencoded content on demand into independent owned parameters.
+         * @return Ordered form fields, InvalidRequest for missing/other media types, or InvalidHeaders for duplicates.
+         * @note Media types are case-insensitive and may have parameters. Decoding preserves binary bytes,
+         *       repeated fields, and an initial ? in a field name. Each call returns fresh owned data;
+         *       changing it does not affect Body or Query, and it may outlive this request.
+         */
+        [[nodiscard]] auto Form() const -> Result<QueryParams> { return m_impl->Form(); }
+
+        /**
          * @brief Borrow the complete Content-Type field value, including parameters.
          * @return Field value, or an empty view when absent.
          */

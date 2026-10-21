@@ -32,8 +32,19 @@ export namespace mhttp {
             if (query.starts_with('?')) {
                 query.remove_prefix(1);
             }
+            return ParseForm(query);
+        }
+
+        /**
+         * @brief Decode an owned URL-encoded form collection without treating an initial ? as a delimiter.
+         * @param body Borrowed encoded form bytes; + decodes to SP, including in parameter names.
+         * @return Independent ordered parameters; duplicate/empty names and binary values are preserved.
+         * @note Empty segments and raw whitespace-only names are ignored. Malformed escapes remain literal,
+         *       as in Parse; the input is split at & and the first = before percent decoding.
+         */
+        [[nodiscard]] static auto ParseForm(std::string_view body) -> QueryParams {
             QueryParams result;
-            for (auto part : utils::split(query, '&')) {
+            for (auto part : utils::split(body, '&')) {
                 if (part.empty()) {
                     continue;
                 }

@@ -9,6 +9,7 @@ import :core.message;
 import :core.query;
 import :core.endpoint;
 import :utils.percent;
+import :utils.string;
 import :server.request_data;
 
 namespace mhttp::impl {
@@ -46,6 +47,22 @@ namespace mhttp::impl {
             if (separator != std::string::npos) {
                 query = QueryParams::Parse(std::string_view{ head.target }.substr(separator + 1));
             }
+        }
+
+        /**
+         * @brief Decode a complete URL-encoded body only when the declared media type matches.
+         * @return Owned parameters, InvalidHeaders for duplicate Content-Type, or InvalidRequest for another type.
+         * @note Parsing does not cache mutable state or alter the original body/query; network body bounds
+         *       have already been applied. Parameters such as charset do not transcode the decoded bytes.
+         */
+        [[nodiscard]] auto Form() const -> Result<QueryParams> {
+            if (head.headers.Count("Content-Type") > 1) { return std::unexpected{ Error::InvalidHeaders }; }
+            auto type = head.headers.Get("Content-Type");
+            type = utils::trim_ows(type.substr(0, type.find(';')));
+            if (!utils::iequals(type, "application/x-www-form-urlencoded")) {
+                return std::unexpected{ Error::InvalidRequest };
+            }
+            return QueryParams::ParseForm(body);
         }
 
         /**
