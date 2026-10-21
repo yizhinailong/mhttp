@@ -12,6 +12,7 @@ import :core.runtime;
 import :core.parser;
 import :client.request_policy;
 import :client.response;
+import :utils.base64;
 
 namespace mhttp::impl {
 
@@ -83,6 +84,8 @@ namespace mhttp::impl {
         std::optional<Url> m_origin; ///< Immutable validated constructor origin and default target.
         std::optional<Error> m_initialization_error; ///< Immutable constructor validation failure.
         client::ClientOptions m_options; ///< Owned configuration snapshot.
+        std::mutex m_headers_mutex; ///< Protects configuration accessed outside the client strand.
+        Headers m_default_headers; ///< Fallback fields copied synchronously when a Task is issued.
         std::shared_ptr<Connection> m_connection; ///< Current connecting or connected transport.
         std::shared_ptr<IdleWatch> m_idle_watch; ///< Idle peer-close detection, retired before another Send.
         std::shared_ptr<ConnectDeadline> m_connect_deadline; ///< Active connection phase only.
@@ -105,6 +108,7 @@ namespace mhttp::impl {
         ClientImpl(Runtime& runtime, Result<Url> origin, client::ClientOptions options) :
             m_runtime{ runtime.m_impl }, m_executor{ asio::make_strand(m_runtime->Context()) },
             m_resolver{ m_executor }, m_options{ std::move(options) } {
+            m_default_headers = std::move(m_options.default_headers);
             if (origin) { m_origin.emplace(std::move(*origin)); }
             else { m_initialization_error = origin.error(); }
             auto valid = detail::validate_client_options(m_options);
@@ -149,7 +153,55 @@ namespace mhttp::impl {
          * @return Complete response or a recoverable validation, transport, timeout, Busy, or cancellation error.
          */
         [[nodiscard]] auto Send(client::Request request) -> Task<Result<client::Response>> {
-            return sendTask(shared_from_this(), std::move(request), m_stop_epoch.load());
+            std::lock_guard lock{ m_headers_mutex };
+            return sendTask(shared_from_this(), std::move(request), m_default_headers, m_stop_epoch.load());
+        }
+
+        /**
+         * @brief Replace fallback fields for subsequently issued Tasks from any thread.
+         * @param headers Owned validated fields; explicit request fields still take precedence.
+         * @return Success or InvalidHeaders without changing the previous configuration.
+         */
+        [[nodiscard]] auto SetDefaultHeaders(Headers headers) -> Result<void> {
+            auto valid = detail::validate_outgoing_host(headers, Version::Http10);
+            if (!valid) { return std::unexpected{ valid.error() }; }
+            std::lock_guard lock{ m_headers_mutex };
+            m_default_headers = std::move(headers);
+            return {};
+        }
+
+        /**
+         * @brief Set a Basic Authorization fallback without retaining borrowed credential views.
+         * @param username User identifier; a colon is invalid because it separates the password.
+         * @param password Password, which may contain colons and is copied into the encoded value.
+         * @return Success or InvalidRequest for a colon in username; failure preserves prior fields.
+         */
+        [[nodiscard]] auto SetBasicAuth(
+            std::string_view username,
+            std::string_view password
+        ) -> Result<void> {
+            if (username.contains(':')) { return std::unexpected{ Error::InvalidRequest }; }
+            auto value = std::string{ "Basic " } + Base64Encode(std::string{ username } + ":" + std::string{ password });
+            std::lock_guard lock{ m_headers_mutex };
+            return m_default_headers.Set("Authorization", value);
+        }
+
+        /**
+         * @brief Set a Bearer Authorization fallback for subsequently issued Tasks.
+         * @param token Nonempty token using the RFC 6750 b64token alphabet and optional trailing padding.
+         * @return Success or InvalidHeaders; invalid tokens preserve the preceding authorization.
+         */
+        [[nodiscard]] auto SetBearerToken(std::string_view token) -> Result<void> {
+            bool padding{};
+            if (token.empty() || token.front() == '=') { return std::unexpected{ Error::InvalidHeaders }; }
+            for (unsigned char value : token) {
+                if (value == '=') { padding = true; continue; }
+                bool const allowed = (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z')
+                    || (value >= '0' && value <= '9') || std::string_view{ "-._~+/" }.contains(static_cast<char>(value));
+                if (padding || !allowed) { return std::unexpected{ Error::InvalidHeaders }; }
+            }
+            std::lock_guard lock{ m_headers_mutex };
+            return m_default_headers.Set("Authorization", std::string{ "Bearer " } + std::string{ token });
         }
 
         /**
@@ -261,12 +313,14 @@ namespace mhttp::impl {
          * @brief Bridge client I/O back to the caller's original Task scheduler and normalize pre-start cancellation.
          * @param self Owned client retained before initial suspension.
          * @param request Owned outgoing data.
+         * @param headers Issue-time fallback field snapshot.
          * @param epoch Issue-time cancellation epoch.
          * @return Owned response or a recoverable failure.
          */
         static auto sendTask(
             std::shared_ptr<ClientImpl> self,
             client::Request request,
+            Headers headers,
             std::uint64_t epoch
         ) -> Task<Result<client::Response>> {
             if (self->m_initialization_error) { co_return std::unexpected{ *self->m_initialization_error }; }
@@ -274,7 +328,7 @@ namespace mhttp::impl {
             auto token = self->m_runtime->StopToken();
             if (!token) { co_return std::unexpected{ token.error() }; }
             try {
-                co_return co_await ToTask(self->m_executor, send(self, std::move(request), epoch, *token));
+                co_return co_await ToTask(self->m_executor, send(self, std::move(request), std::move(headers), epoch, *token));
             } catch (std::system_error const& error) {
                 if (error.code() == Error::Canceled) { co_return std::unexpected{ Error::Canceled }; }
                 throw;
@@ -407,6 +461,7 @@ namespace mhttp::impl {
          * @brief Run exactly one exchange on the client strand, rejecting overlap without disturbing its owner.
          * @param self Owned implementation for the entire operation.
          * @param request Owned outgoing data.
+         * @param headers Issue-time fallback fields, isolated from later configuration changes.
          * @param epoch Issue-time Stop epoch.
          * @param token Client runtime generation cancellation.
          * @return Complete response or recoverable validation/I/O/lifecycle failure.
@@ -414,13 +469,16 @@ namespace mhttp::impl {
         static auto send(
             std::shared_ptr<ClientImpl> self,
             client::Request request,
+            Headers headers,
             std::uint64_t epoch,
             std::stop_token token
         ) -> asio::awaitable<Result<client::Response>> {
             co_await asio::this_coro::throw_if_cancelled(false);
             if (self->m_busy) { co_return std::unexpected{ Error::Busy }; }
             if (self->m_stop_epoch.load() != epoch || token.stop_requested()) { co_return std::unexpected{ Error::Canceled }; }
-            auto prepared = detail::prepare_client_request(std::move(request), *self->m_origin, self->m_options);
+            auto options = self->m_options;
+            options.default_headers = std::move(headers);
+            auto prepared = detail::prepare_client_request(std::move(request), *self->m_origin, options);
             if (!prepared) { co_return std::unexpected{ prepared.error() }; }
             self->m_busy = true;
             SendScope scope{ *self };

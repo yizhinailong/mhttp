@@ -66,6 +66,11 @@ OPTIONS 允许 `*`。请求 body 保留在原 Request 的存储中，准备头�
 
 字段优先级为显式请求字段、default_headers、内置 Host/User-Agent。
 同名显式字段会覆盖该名称的所有默认值，未覆盖的重复默认字段按原顺序保留。
+SetDefaultHeaders 替换完整默认字段集合，传空集合可同时清除已配置的认证。
+SetBasicAuth 设置 Basic Authorization，用户名不能含冒号，密码可以含冒号；
+SetBearerToken 设置 Bearer Authorization，拒绝空值、空白、控制字节和不合法的 token 字符。
+这三个配置接口可从任意线程调用，在失败时保留原配置。Send 和快捷方法在签发 Task 时
+复制默认字段快照，后续配置更新只影响之后签发的 Task；显式 Authorization 仍优先。
 Host 在需要时为 IPv6 加方括号，仅非默认端口附带端口号；显式 Host 允许虚拟主机，但必须是单一合法 authority。
 内置 User-Agent 使用 `mhttp/<VERSION>`，VERSION 与构建清单中的库版本一致。
 空 user_agent 禁用内置值；显式空 User-Agent 也会保留。默认不发送 Accept-Encoding，不推断 Content-Type。
@@ -88,6 +93,7 @@ Content-Length 或 chunked 尚未完成就断开时返回 ConnectionClosed。
 
 `tests/client/message_test.cpp` 覆盖所有权、二进制与重复字段、修改拒绝、移动和响应只读访问器。
 `tests/client/request_policy_test.cpp` 覆盖配置校验、构造 host、查询拼接、默认头优先级、分帧和发送边界。
+`tests/client/auth_test.cpp` 通过真实回环通信验证认证格式、默认字段替换、显式覆盖、非法输入拒绝和跨线程快照。
 `tests/client/client_basic_test.cpp` 通过真实服务端验证常用方法、默认字段、端点、4 MiB 二进制往返、
 Busy、四个客户端的跨线程 Stop、读超时、空闲/在途 Runtime 取消与重启，以及消息在网络状态销毁后的所有权。
 `python tools/check_client.py` 使用隔离工程中的原始 TCP 对端验证 CL / chunked / EOF、trailer、

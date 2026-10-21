@@ -92,6 +92,36 @@ export namespace mhttp::client {
         [[nodiscard]] auto IsOpen() const noexcept -> bool { return m_impl->IsOpen(); }
 
         /**
+         * @brief Replace default fields for Tasks issued after this call, safely from any thread.
+         * @param headers Owned fallback fields; an empty collection also clears configured authorization.
+         * @return Success or InvalidHeaders for an invalid Host; failure preserves prior configuration.
+         * @note Explicit request fields override defaults; issued Tasks retain their original snapshot.
+         */
+        [[nodiscard]] auto SetDefaultHeaders(Headers headers) -> Result<void> {
+            return m_impl->SetDefaultHeaders(std::move(headers));
+        }
+
+        /**
+         * @brief Set the Basic Authorization default for future Tasks from any thread.
+         * @param username Borrowed identifier copied during this call; colons are rejected.
+         * @param password Borrowed password copied into the encoded authorization value.
+         * @return Success or InvalidRequest; explicit request Authorization still takes precedence.
+         */
+        [[nodiscard]] auto SetBasicAuth(
+            std::string_view username,
+            std::string_view password
+        ) -> Result<void> {
+            return m_impl->SetBasicAuth(username, password);
+        }
+
+        /**
+         * @brief Set the Bearer Authorization default for future Tasks from any thread.
+         * @param token Nonempty RFC 6750 token copied during this call; whitespace/control bytes are rejected.
+         * @return Success or InvalidHeaders; failure preserves the previous authorization value.
+         */
+        [[nodiscard]] auto SetBearerToken(std::string_view token) -> Result<void> { return m_impl->SetBearerToken(token); }
+
+        /**
          * @brief Transfer one complete request into a lazy asynchronous exchange.
          * @param request Owned data; retained views must not be used after transfer.
          * @return Task yielding a complete owned response or recoverable error, including Busy for overlap.
