@@ -268,6 +268,81 @@ namespace mhttp::test {
     }
 
     /**
+     * @brief Reset a raw peer after observing enough bytes to ensure a composed write completed a prefix.
+     * @param pair Owned pair retained until the peer has received and reset its socket.
+     * @return Success after receiving the expected prefix.
+     */
+    auto reset_after_prefix(std::shared_ptr<LoopbackPair> pair) -> asio::awaitable<Result<void>> {
+        std::string prefix(128 * 1024, '\0');
+        co_await asio::async_read(pair->peer, asio::buffer(prefix), asio::use_awaitable);
+        Check(std::ranges::all_of(prefix, [](char byte) { return byte == 'p'; }), "peer observes only the expected payload prefix");
+        pair->peer.set_option(asio::socket_base::linger{ true, 0 });
+        pair->peer.close();
+        co_return Result<void>{};
+    }
+
+    /**
+     * @brief Preserve complete, rejected, and failed-prefix counts without changing legacy write behavior.
+     * @param executor Independent fixture strand.
+     * @param weak Observe canceled write ownership after the runtime drains.
+     */
+    auto write_progress_scenario(
+        asio::any_io_executor executor,
+        std::weak_ptr<impl::Connection>& weak
+    ) -> asio::awaitable<void> {
+        auto pair = co_await make_loopback(executor, { 16, 64 });
+        auto reader = spawn_transport(executor, receive_peer(pair));
+        auto empty = co_await pair->connection->WriteAllWithProgress("", 1s);
+        Check(!empty.error && empty.bytes_transferred == 0, "empty successful write reports no transferred bytes");
+        auto rejected = co_await pair->connection->WriteAllWithProgress(std::string(65, 'x'), 1s);
+        Check(rejected.error == Error::BodyTooLarge && rejected.bytes_transferred == 0, "admission rejection reports no prefix and keeps socket usable");
+        std::string payload{ "first\0second", 12 };
+        auto complete = co_await pair->connection->WriteAllWithProgress(payload, 1s);
+        Check(!complete.error && complete.bytes_transferred == payload.size(), "successful progress counts every binary payload byte");
+        Check((co_await pair->connection->Shutdown()).has_value(), "shutdown after detailed write succeeds");
+        CheckEq(co_await reader->Wait(), payload, "rejected writes contribute no wire bytes");
+        auto closed = co_await pair->connection->WriteAllWithProgress("later", 1s);
+        Check(closed.error == Error::ConnectionClosed && closed.bytes_transferred == 0, "closed direction reports no prefix");
+        pair->connection->Close();
+
+        auto reset_pair = co_await make_loopback(executor, { 16, 4 * 1024 * 1024 });
+        reset_pair->connection->SocketForInitialization().set_option(asio::socket_base::send_buffer_size{ 4096 });
+        auto resetting = spawn_transport(executor, reset_after_prefix(reset_pair));
+        auto partial = co_await reset_pair->connection->WriteAllWithProgress(std::string(4 * 1024 * 1024, 'p'), 2s);
+        Check(partial.error == Error::ConnectionClosed, "reset after payload prefix retains contextual write failure");
+        Check(partial.bytes_transferred > 0 && partial.bytes_transferred < 4 * 1024 * 1024,
+            "failed write reports its completed prefix instead of pretending nothing was sent");
+        Check((co_await resetting->Wait()).has_value(), "join resetting peer before releasing sockets");
+        auto after_failure = co_await reset_pair->connection->WriteAll("later", 1s);
+        Check(!after_failure && after_failure.error() == Error::ConnectionClosed, "detailed write failure closes the shared legacy write path");
+
+        auto cancel_pair = co_await make_loopback(executor, { 16, 4 * 1024 * 1024 });
+        cancel_pair->connection->SocketForInitialization().set_option(asio::socket_base::send_buffer_size{ 1024 });
+        cancel_pair->peer.set_option(asio::socket_base::receive_buffer_size{ 1024 });
+        weak = cancel_pair->connection;
+        asio::steady_timer closer{ executor };
+        closer.expires_after(50ms);
+        closer.async_wait([connection = cancel_pair->connection](asio::error_code error) {
+            if (!error) { connection->Close(); }
+        });
+        auto canceled = co_await cancel_pair->connection->WriteAllWithProgress(std::string(4 * 1024 * 1024, 'x'), 2s);
+        Check(canceled.error == Error::Canceled && canceled.bytes_transferred < 4 * 1024 * 1024,
+            "closing a pending detailed write preserves cancellation and its incomplete count");
+    }
+
+    /**
+     * @brief Verify detailed byte counts on a multithreaded loopback runtime.
+     */
+    auto connection_write_progress() -> void {
+        std::weak_ptr<impl::Connection> weak;
+        {
+            TransportRuntime runtime;
+            runtime.Run(write_progress_scenario(runtime.Executor(), weak));
+        }
+        Check(weak.expired(), "canceled detailed write releases connection and timer ownership after drain");
+    }
+
+    /**
      * @brief Delay a peer write beyond an earlier read's retired deadline.
      * @param pair Owned connected pair.
      * @param delay Relative send delay.
@@ -351,10 +426,10 @@ namespace mhttp::test {
     auto announced_write(
         std::shared_ptr<LoopbackPair> pair,
         asio::experimental::channel<void(asio::error_code)>& entered
-    ) -> asio::awaitable<Result<void>> {
+    ) -> asio::awaitable<impl::WriteOutcome> {
         std::string bytes(4 * 1024 * 1024, 'x');
         static_cast<void>(entered.try_send(asio::error_code{}));
-        co_return co_await pair->connection->WriteAll(std::move(bytes), 200ms);
+        co_return co_await pair->connection->WriteAllWithProgress(std::move(bytes), 200ms);
     }
 
     /**
@@ -374,16 +449,20 @@ namespace mhttp::test {
         co_await write_entered.async_receive(asio::use_awaitable);
         auto duplicate = co_await pair->connection->WriteAll("duplicate", 1s);
         Check(!duplicate && duplicate.error() == Error::Busy, "overlapping writes are rejected before sending");
+        auto detailed_duplicate = co_await pair->connection->WriteAllWithProgress("duplicate", 1s);
+        Check(detailed_duplicate.error == Error::Busy && detailed_duplicate.bytes_transferred == 0,
+            "detailed and legacy writes share the in-flight guard without sending another prefix");
         auto premature_shutdown = co_await pair->connection->Shutdown();
         Check(!premature_shutdown && premature_shutdown.error() == Error::Busy, "shutdown cannot truncate a pending write");
         auto written = co_await writer->Wait();
-        Check(!written && written.error() == Error::WriteTimeout, "nonreading peer hits whole-write deadline");
+        Check(written.error == Error::WriteTimeout, "nonreading peer hits whole-write deadline");
+        Check(written.bytes_transferred < 4 * 1024 * 1024, "write timeout preserves the incomplete transfer count");
         Check(std::chrono::steady_clock::now() - started < 1s, "blocked write completes within timeout tolerance");
         auto read = co_await reader->Wait();
         Check(!read && read.error() == Error::Canceled, "write timeout cancels the other pending direction");
         auto expired = co_await make_loopback(executor);
-        auto immediate = co_await expired->connection->WriteAll("expired", -1ms);
-        Check(!immediate && immediate.error() == Error::WriteTimeout, "negative write deadline expires before sending");
+        auto immediate = co_await expired->connection->WriteAllWithProgress("expired", -1ms);
+        Check(immediate.error == Error::WriteTimeout && immediate.bytes_transferred == 0, "negative write deadline expires before sending");
         std::array<char, 32> unexpected{};
         auto const [error, count] = co_await expired->peer.async_read_some(
             asio::buffer(unexpected), asio::as_tuple(asio::use_awaitable));
@@ -727,6 +806,7 @@ export namespace mhttp::test {
             { "I/O error mapping", io_error_mapping },
             { "connection limits", connection_limits },
             { "connection transfers", connection_transfers },
+            { "connection write progress", connection_write_progress },
             { "connection read deadlines", connection_read_deadlines },
             { "connection write deadlines", connection_write_deadlines },
             { "connection close", connection_close },

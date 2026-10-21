@@ -21,6 +21,16 @@ namespace mhttp::impl {
     };
 
     /**
+     * @brief Preserve the transport-reported completed prefix even when a whole write fails.
+     * @note A successful result counts the entire payload. The count describes local operation
+     *       completion, not peer acknowledgment; it cannot prove remote application consumption.
+     */
+    struct WriteOutcome {
+        std::size_t bytes_transferred{}; ///< Completed bytes reported by the composed write operation.
+        std::optional<Error> error; ///< Absent only when the complete owned payload was written.
+    };
+
+    /**
      * @brief Own a TCP socket and serialize every transfer, deadline, and close on one strand.
      * @note Create through Create and retain shared ownership. At most one read and one write may
      *       be pending; overlapping operations in the same direction return Busy. Successful reads
@@ -160,6 +170,21 @@ namespace mhttp::impl {
         }
 
         /**
+         * @brief Send an owned payload and retain completed-prefix information on every exit path.
+         * @param bytes Owned payload, kept alive through partial writes and cancellation.
+         * @param timeout One relative deadline for the whole write; nullopt disables it.
+         * @return Complete byte count and optional failure; admission/closed/immediate failures count zero.
+         * @note Shares WriteAll's in-flight guard and close policy. A positive count always forbids
+         *       transparent request replay; a zero count alone does not make cancellation/timeout retryable.
+         */
+        [[nodiscard]] auto WriteAllWithProgress(
+            std::string bytes,
+            std::optional<Duration> timeout = std::chrono::seconds{ 30 }
+        ) -> asio::awaitable<WriteOutcome> {
+            return asio::co_spawn(m_executor, writeWithProgress(shared_from_this(), std::move(bytes), timeout), asio::use_awaitable);
+        }
+
+        /**
          * @brief Half-close sending after completed writes, while allowing remaining peer bytes to be read.
          * @return Success if already shut down/closed, Busy during a write, or a shutdown error.
          */
@@ -259,32 +284,50 @@ namespace mhttp::impl {
             std::optional<Duration> timeout
         ) -> asio::awaitable<Result<void>> {
             co_await asio::this_coro::throw_if_cancelled(false);
-            if (self->m_closed || self->m_send_shutdown) { co_return std::unexpected{ Error::ConnectionClosed }; }
-            if (self->m_writing) { co_return std::unexpected{ Error::Busy }; }
-            if (bytes.size() > self->m_max_write_size) { co_return std::unexpected{ Error::BodyTooLarge }; }
+            auto written = co_await writeWithProgress(std::move(self), std::move(bytes), timeout);
+            if (written.error) { co_return std::unexpected{ *written.error }; }
+            co_return Result<void>{};
+        }
+
+        /**
+         * @brief Preserve the completed prefix through every deadline, close, and write failure.
+         * @param self Owned connection for the complete coroutine lifetime.
+         * @param bytes Owned send storage.
+         * @param timeout Optional whole-transfer deadline.
+         * @return The composed operation's byte count and classified failure, if any.
+         */
+        static auto writeWithProgress(
+            std::shared_ptr<Connection> self,
+            std::string bytes,
+            std::optional<Duration> timeout
+        ) -> asio::awaitable<WriteOutcome> {
+            co_await asio::this_coro::throw_if_cancelled(false);
+            if (self->m_closed || self->m_send_shutdown) { co_return WriteOutcome{ 0, Error::ConnectionClosed }; }
+            if (self->m_writing) { co_return WriteOutcome{ 0, Error::Busy }; }
+            if (bytes.size() > self->m_max_write_size) { co_return WriteOutcome{ 0, Error::BodyTooLarge }; }
             auto cancellation = co_await asio::this_coro::cancellation_state;
             if (cancellation.cancelled() != asio::cancellation_type::none) {
                 self->close();
-                co_return std::unexpected{ Error::Canceled };
+                co_return WriteOutcome{ 0, Error::Canceled };
             }
-            if (bytes.empty()) { co_return Result<void>{}; }
+            if (bytes.empty()) { co_return WriteOutcome{}; }
             auto deadline = std::make_shared<Deadline>(self->m_executor);
             ActiveOperation active{ self->m_writing, deadline };
             self->armDeadline(deadline, timeout);
-            if (deadline->expired) { co_return std::unexpected{ Error::WriteTimeout }; }
+            if (deadline->expired) { co_return WriteOutcome{ 0, Error::WriteTimeout }; }
             auto const [error, count] = co_await asio::async_write(self->m_socket,
                 asio::buffer(bytes), asio::as_tuple(asio::use_awaitable));
-            if (deadline->expired) { co_return std::unexpected{ Error::WriteTimeout }; }
-            if (self->m_closed) { co_return std::unexpected{ Error::Canceled }; }
+            if (deadline->expired) { co_return WriteOutcome{ count, Error::WriteTimeout }; }
+            if (self->m_closed) { co_return WriteOutcome{ count, Error::Canceled }; }
             if (auto failure = map_io_error(error, IoOperation::Write)) {
                 self->close();
-                co_return std::unexpected{ *failure };
+                co_return WriteOutcome{ count, *failure };
             }
             if (count != bytes.size()) {
                 self->close();
-                co_return std::unexpected{ Error::Write };
+                co_return WriteOutcome{ count, Error::Write };
             }
-            co_return Result<void>{};
+            co_return WriteOutcome{ count };
         }
 
         /**
