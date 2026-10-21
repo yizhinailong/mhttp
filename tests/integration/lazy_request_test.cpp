@@ -176,6 +176,36 @@ auto lazy_response_and_reuse() -> void {
 }
 
 /**
+ * @brief Recognize an already consumed fixed body after application work exceeds the intake deadline.
+ */
+auto lazy_completed_body_deadline() -> void {
+    mhttp::Runtime runtime;
+    Check(runtime.Start(4).has_value(), "start completed-intake runtime");
+    mhttp::server::HttpServer server{ runtime, { .read_timeout = 100ms, .request_chunk_bytes = 3 } };
+    Check(server.RouteLazy(mhttp::Method::Post, "/read", [](auto& request, auto& response) -> mhttp::Task<void> {
+        std::string body;
+        while (body.size() != 5) {
+            auto chunk = co_await request.ReadBody();
+            Check(chunk && *chunk, "consume the complete declared body before its deadline");
+            body += **chunk;
+        }
+        co_await mhttp::Sleep(200ms);
+        auto end = co_await request.ReadBody();
+        Check(end && !*end, "end of an already consumed body requires no timed read");
+        Check(response.SetContent(std::move(body), "text/plain").has_value(), "reply after application work");
+    }).has_value(), "register completed-body reader");
+    Check(server.Get("/next", [](auto&, auto& response) {
+        Check(response.SetContent("next", "text/plain").has_value(), "reply on reused connection");
+    }).has_value(), "register completed-body successor");
+    mhttp::client::HttpClient client{ runtime, "127.0.0.1", start_lazy_server(server) };
+    auto reply = mhttp::SyncWait(runtime, client.Post("/read", "ready"));
+    Check(reply && reply->Status() == mhttp::Status::Ok && reply->Body() == "ready", "application work after intake cannot cause 408");
+    auto next = mhttp::SyncWait(runtime, client.Get("/next"));
+    Check(next && next->LocalEndpoint() == reply->LocalEndpoint(), "completed body remains reusable after intake deadline");
+    Check(server.Stop().has_value(), "drain completed-intake requests");
+}
+
+/**
  * @brief Run bounded public lazy-body scenarios.
  * @param argc Argument count.
  * @param argv Optional case filters.
@@ -187,5 +217,6 @@ auto main(int argc, char** argv) -> int {
         { "lazy failure and retirement", lazy_failure_and_retirement },
         { "lazy registration policy", lazy_registration },
         { "lazy response and reused input", lazy_response_and_reuse },
+        { "lazy completed body deadline", lazy_completed_body_deadline },
     });
 }

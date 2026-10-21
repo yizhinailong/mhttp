@@ -41,6 +41,14 @@ namespace mhttp::impl {
         }
 
         /**
+         * @brief Publish body completion and owned trailers on the connection strand.
+         */
+        auto complete() -> void {
+            m_complete = true;
+            if (m_on_complete) { m_on_complete(m_parser.Trailers()); }
+        }
+
+        /**
          * @brief Decode one owned chunk or end marker without exposing retained transport storage.
          * @param self State retained before initial suspension; accessed only on its connection strand.
          * @return Nonempty chunk, nullopt after completion, or a sticky failure.
@@ -55,6 +63,10 @@ namespace mhttp::impl {
                 co_return std::unexpected{ Error::Busy };
             }
             if (self->m_complete) { co_return std::optional<std::string>{}; }
+            if (self->m_parser.Feed({}).event == detail::ParseEvent::Complete) {
+                self->complete();
+                co_return std::optional<std::string>{};
+            }
             if (Clock::now() >= self->m_deadline) {
                 self->fail({ Error::ReadTimeout, Status::RequestTimeout });
                 co_return std::unexpected{ Error::ReadTimeout };
@@ -96,8 +108,7 @@ namespace mhttp::impl {
             if (event->event == detail::ParseEvent::Body) {
                 co_return std::optional<std::string>{ std::string{ event->data.data(), event->data.size() } };
             }
-            self->m_complete = true;
-            if (self->m_on_complete) { self->m_on_complete(self->m_parser.Trailers()); }
+            self->complete();
             co_return std::optional<std::string>{};
         }
 
