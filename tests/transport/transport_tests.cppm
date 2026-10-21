@@ -19,6 +19,15 @@ namespace mhttp::test {
     using namespace std::chrono_literals;
 
     /**
+     * @brief Recover the known fixture io_context executor so new strands remain independent.
+     * @param executor Executor created by TransportRuntime, possibly already wrapped in a strand.
+     * @return The underlying io_context executor.
+     */
+    auto context_executor(asio::any_io_executor executor) -> asio::any_io_executor {
+        return static_cast<asio::io_context&>(executor.context()).get_executor();
+    }
+
+    /**
      * @brief Own a multithreaded runtime for one bounded transport scenario.
      */
     class TransportRuntime {
@@ -151,7 +160,7 @@ namespace mhttp::test {
         impl::ConnectionLimits limits = {}
     ) -> asio::awaitable<std::shared_ptr<LoopbackPair>> {
         asio::ip::tcp::acceptor acceptor{ executor, { asio::ip::address_v4::loopback(), 0 } };
-        auto connection = impl::Connection::Create(executor, limits);
+        auto connection = impl::Connection::Create(context_executor(executor), limits);
         if (!connection) { throw std::invalid_argument{ "invalid fixture connection limits" }; }
         auto pair = std::make_shared<LoopbackPair>(executor, std::move(*connection));
         auto connected = spawn_transport(executor, connect_peer(pair, acceptor.local_endpoint()));
@@ -440,6 +449,225 @@ namespace mhttp::test {
     }
 
     /**
+     * @brief Test bridge storage without default construction, copying, or assignment.
+     */
+    struct BridgeValue {
+        std::unique_ptr<int> value; ///< Owned transferred value.
+
+        /**
+         * @brief Construct one owned result.
+         * @param input Scalar to own.
+         */
+        explicit BridgeValue(int input) : value{ std::make_unique<int>(input) } {}
+
+        /**
+         * @brief Move into the next bridge owner.
+         * @param other Previous owner.
+         */
+        BridgeValue(BridgeValue&& other) noexcept = default;
+
+        /**
+         * @brief Require result construction instead of assignment.
+         * @param other Unused source.
+         * @return Not callable.
+         */
+        auto operator=(BridgeValue&& other) -> BridgeValue& = delete;
+    };
+
+    /**
+     * @brief Produce a nondefault result after an asynchronous yield on a foreign strand.
+     * @param on_foreign Predicate checking the actual target strand is executing.
+     * @return Owned move-only result.
+     */
+    auto foreign_value(std::function<bool()> on_foreign) -> asio::awaitable<BridgeValue> {
+        co_await asio::post(asio::use_awaitable);
+        Check(on_foreign(), "Asio value operation executes on its target strand");
+        co_return BridgeValue{ 42 };
+    }
+
+    /**
+     * @brief Throw after a foreign asynchronous yield.
+     * @return Never returns successfully.
+     */
+    auto foreign_failure() -> asio::awaitable<int> {
+        co_await asio::post(asio::use_awaitable);
+        throw std::range_error{ "foreign bridge failure" };
+        co_return 0;
+    }
+
+    /**
+     * @brief Cross into a foreign Asio operation and resume on the Task's original root strand.
+     * @param foreign Executor independent of the Task root and its Asio caller.
+     * @param on_root Predicate checking actual root execution.
+     * @param on_foreign Predicate checking actual target execution.
+     * @return Move-only result transferred in both bridge directions.
+     */
+    auto bridge_value_task(
+        asio::any_io_executor foreign,
+        std::function<bool()> on_root,
+        std::function<bool()> on_foreign
+    ) -> Task<BridgeValue> {
+        Check(on_root(), "Task begins on its assigned strand");
+        auto value = co_await impl::ToTask(foreign, foreign_value(std::move(on_foreign)));
+        Check(on_root(), "foreign value resumes Task on the original strand");
+        bool caught{};
+        try { static_cast<void>(co_await impl::ToTask(foreign, foreign_failure())); }
+        catch (std::range_error const& error) {
+            caught = std::string_view{ error.what() } == "foreign bridge failure";
+        }
+        Check(caught && on_root(), "foreign exception retains its type and resumes the original strand");
+        co_return value;
+    }
+
+    /**
+     * @brief Preserve a foreign exception through the Task root back into an Asio caller.
+     * @param foreign Foreign operation executor.
+     * @return Never returns normally.
+     */
+    auto bridge_failure_task(asio::any_io_executor foreign) -> Task<int> {
+        co_return co_await impl::ToTask(foreign, foreign_failure());
+    }
+
+    /**
+     * @brief Repeatedly cross caller/root/operation strands and verify both result and exception routes.
+     * @param caller Fixture executor.
+     * @param on_caller Predicate checking the waiting Asio caller resumes on its own strand.
+     */
+    auto bridge_scenario(
+        asio::any_io_executor caller,
+        std::function<bool()> on_caller
+    ) -> asio::awaitable<void> {
+        auto root = asio::make_strand(context_executor(caller));
+        auto foreign = asio::make_strand(context_executor(caller));
+        for (unsigned i{}; i < 100; ++i) {
+            auto value = co_await impl::AwaitTask(bridge_value_task(foreign,
+                [root] { return root.running_in_this_thread(); },
+                [foreign] { return foreign.running_in_this_thread(); }), root);
+            CheckEq(*value.value, 42, "nondefault result survives both bridges");
+            Check(on_caller(), "AwaitTask value returns to the original Asio caller");
+            bool caught{};
+            try { static_cast<void>(co_await impl::AwaitTask(bridge_failure_task(foreign), root)); }
+            catch (std::range_error const& error) {
+                caught = std::string_view{ error.what() } == "foreign bridge failure";
+            }
+            Check(caught && on_caller(), "root exception returns to the original Asio caller");
+        }
+    }
+
+    /**
+     * @brief Verify bridges when all three strands can run on different runtime threads.
+     */
+    auto bridge_executors() -> void {
+        TransportRuntime runtime;
+        auto caller = asio::make_strand(context_executor(runtime.Executor()));
+        runtime.Run(asio::co_spawn(caller,
+            bridge_scenario(caller, [caller] { return caller.running_in_this_thread(); }), asio::use_awaitable));
+    }
+
+    /**
+     * @brief Suspend a Task in socket I/O after allowing a foreign thread to request root cancellation.
+     * @param connection Owned connection retained across bridge suspension.
+     * @param entered Readiness notification borrowed until the root finishes.
+     * @return Socket result; pre-initiation cancellation may propagate as a standard exception.
+     */
+    auto canceled_connection_task(
+        std::shared_ptr<impl::Connection> connection,
+        std::latch& entered
+    ) -> Task<Result<std::string>> {
+        entered.count_down();
+        co_return co_await impl::ToTask(connection->Executor(), connection->ReadSome(5s));
+    }
+
+    /**
+     * @brief Cancel socket I/O through a Task root token, including operation initiation races.
+     * @param executor Fixture executor.
+     * @param stop Token whose source is requested from a foreign thread.
+     * @param entered Root entry notification for that thread.
+     * @param weak Connection lifetime observation after completion drain.
+     */
+    auto cancellation_scenario(
+        asio::any_io_executor executor,
+        std::stop_token stop,
+        std::latch& entered,
+        std::weak_ptr<impl::Connection>& weak
+    ) -> asio::awaitable<void> {
+        auto pair = co_await make_loopback(executor);
+        weak = pair->connection;
+        auto root = asio::make_strand(context_executor(executor));
+        Error observed{ Error::Unknown };
+        auto const started = std::chrono::steady_clock::now();
+        try {
+            auto read = co_await impl::AwaitTask(canceled_connection_task(pair->connection, entered), root, stop);
+            Check(!read, "cancellation cannot report successful quiet socket I/O");
+            if (!read) { observed = read.error(); }
+        } catch (std::system_error const& error) {
+            CheckEq(error.code(), make_error_code(Error::Canceled), "pre-initiation cancellation keeps mhttp category");
+            if (error.code() == Error::Canceled) { observed = Error::Canceled; }
+        }
+        CheckEq(observed, Error::Canceled, "root cancellation reaches the nested connection operation");
+        Check(std::chrono::steady_clock::now() - started < 1s, "root cancellation does not wait for the read deadline");
+        pair->connection->Close();
+    }
+
+    /**
+     * @brief Repeatedly cancel roots from outside I/O execution and check socket/timer owners drain.
+     */
+    auto connection_cancellation() -> void {
+        std::array<std::weak_ptr<impl::Connection>, 20> observations;
+        {
+            TransportRuntime runtime;
+            for (auto& weak : observations) {
+                std::stop_source stop;
+                std::latch entered{ 1 };
+                std::jthread stopper{ [&stop, &entered] {
+                    entered.wait();
+                    stop.request_stop();
+                } };
+                runtime.Run(cancellation_scenario(runtime.Executor(), stop.get_token(), entered, weak));
+                stopper.join();
+            }
+        }
+        for (auto const& weak : observations) { Check(weak.expired(), "canceled root releases connection state"); }
+    }
+
+    /**
+     * @brief Verify returned lazy Asio operations retain the connection before initial suspension.
+     * @param executor Fixture executor.
+     * @param weak Lifetime observation surviving fixture drain.
+     */
+    auto ownership_scenario(
+        asio::any_io_executor executor,
+        std::weak_ptr<impl::Connection>& weak
+    ) -> asio::awaitable<void> {
+        auto pair = co_await make_loopback(executor);
+        weak = pair->connection;
+        auto pending = pair->connection->ReadSome(1s);
+        pair->connection.reset();
+        Check(!weak.expired(), "unstarted read operation retains connection ownership");
+        co_await asio::async_write(pair->peer, asio::buffer("a", 1), asio::use_awaitable);
+        auto read = co_await std::move(pending);
+        Check(read && *read == "a", "read completes after every external connection owner was dropped");
+        CheckEq(co_await receive_peer(pair), std::string{}, "last operation owner closes its socket on destruction");
+        auto reset = co_await make_loopback(executor);
+        reset->peer.set_option(asio::socket_base::linger{ true, 0 });
+        reset->peer.close();
+        auto disconnected = co_await reset->connection->ReadSome(1s);
+        Check(!disconnected && disconnected.error() == Error::ConnectionClosed, "peer reset is a stable closure error");
+    }
+
+    /**
+     * @brief Check ownership through lazy start, completion, and peer disconnect.
+     */
+    auto connection_ownership() -> void {
+        std::weak_ptr<impl::Connection> weak;
+        {
+            TransportRuntime runtime;
+            runtime.Run(ownership_scenario(runtime.Executor(), weak));
+        }
+        Check(weak.expired(), "last operation releases socket and retired timer owners");
+    }
+
+    /**
      * @brief Verify success, cancellation, deadline precedence, peer closure, and operation fallbacks.
      */
     auto io_error_mapping() -> void {
@@ -502,6 +730,9 @@ export namespace mhttp::test {
             { "connection read deadlines", connection_read_deadlines },
             { "connection write deadlines", connection_write_deadlines },
             { "connection close", connection_close },
+            { "bridge independent executors", bridge_executors },
+            { "connection root cancellation", connection_cancellation },
+            { "connection operation ownership", connection_ownership },
         });
     }
 

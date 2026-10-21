@@ -102,7 +102,7 @@ namespace mhttp::impl {
         std::optional<Stored> value; ///< Result stored before root final suspension.
         std::exception_ptr failure; ///< Original Task exception.
         std::shared_ptr<TaskRoot> root; ///< Root owner until its completion notification is received.
-        asio::experimental::channel<void(asio::error_code)> done; ///< Buffered, single completion.
+        asio::experimental::concurrent_channel<void(asio::error_code)> done; ///< Publish across caller/root strands.
         asio::cancellation_signal neutral; ///< Never emitted; cancellation must drain the Task first.
         decltype(asio::make_work_guard(std::declval<asio::any_io_executor>())) work; ///< Keep root callbacks runnable.
 
