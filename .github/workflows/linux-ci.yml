@@ -89,6 +89,15 @@ jobs:
       - name: Test public HTTP listeners
         run: python3 tools/check_server.py
 
+      - name: Test private HTTP clients
+        run: python3 tools/check_client.py
+
+      - name: Test optional JSON consumers
+        run: python3 tools/check_json.py
+
+      - name: Test REST examples
+        run: python3 tools/check_examples.py
+
       - name: Test
         run: mcpp test --timeout 30
 
