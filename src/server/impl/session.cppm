@@ -13,6 +13,7 @@ import :core.parser;
 import :server.router;
 import :server.response_policy;
 import :server.impl.observers;
+import :server.impl.request_input;
 
 namespace mhttp::impl {
 
@@ -43,8 +44,7 @@ namespace mhttp::impl {
         std::stop_source m_stop_source; ///< Session cancellation for awaited user Tasks.
         Endpoint m_remote; ///< Owned initialized peer address and port.
         Endpoint m_local; ///< Owned initialized local address and port.
-        std::string m_input; ///< One owned read chunk, retaining any pipelined successor bytes.
-        std::size_t m_offset{}; ///< Consumed prefix of m_input.
+        std::shared_ptr<RequestInput> m_input; ///< Shared retained input for sequential request parsers.
         Clock::time_point m_request_started{}; ///< First nonempty feed time, reset before each request head.
         bool m_started{}; ///< Run is one-shot; accessed only on the connection strand.
         bool m_stopping{}; ///< Stop prevents further requests and response persistence.
@@ -72,7 +72,8 @@ namespace mhttp::impl {
         ) : m_connection{ std::move(connection) }, m_router{ std::move(router) },
             m_options{ std::move(options) }, m_observers{ std::move(observers) },
             m_runtime{ std::move(runtime) }, m_runtime_stop{ runtime_stop },
-            m_remote{ std::move(remote) }, m_local{ std::move(local) } {}
+            m_remote{ std::move(remote) }, m_local{ std::move(local) },
+            m_input{ std::make_shared<RequestInput>(m_connection) } {}
 
     public:
         /**
@@ -194,18 +195,10 @@ namespace mhttp::impl {
             Clock::time_point deadline,
             bool& saw_input
         ) -> asio::awaitable<Result<detail::ParseStep>> {
-            for (;;) {
-                auto input = std::span<char const>{ m_input.data(), m_input.size() }.subspan(m_offset);
-                if (!saw_input && !input.empty()) { m_request_started = Clock::now(); }
-                saw_input = saw_input || !input.empty();
-                auto step = parser.Feed(input);
-                m_offset += step.consumed;
-                if (step.event != detail::ParseEvent::NeedMore) { co_return step; }
-                auto bytes = co_await m_connection->ReadSome(deadline - Clock::now(), false);
-                if (!bytes) { co_return std::unexpected{ bytes.error() }; }
-                m_input = std::move(*bytes);
-                m_offset = 0;
-            }
+            auto event = co_await m_input->ReadEvent(parser, deadline);
+            m_request_started = m_input->Started();
+            saw_input = m_request_started != Clock::time_point{};
+            co_return event;
         }
 
         /**
@@ -322,8 +315,9 @@ namespace mhttp::impl {
          * @param result Root-owned final-response counter and terminal diagnostics.
          */
         auto loop(SessionResult& result) -> asio::awaitable<void> {
-            detail::RequestParser parser{ detail::server_parser_limits(m_options) };
             while (!m_stopping) {
+                detail::RequestParser parser{ detail::server_parser_limits(m_options) };
+                m_input->BeginRequest();
                 m_request_started = {};
                 bool saw_input{};
                 auto const timeout = result.responses == 0 ? m_options.read_timeout : m_options.keep_alive_timeout;
@@ -392,7 +386,6 @@ namespace mhttp::impl {
                 }
                 if (!co_await writeFinal(request, response, route, body_complete,
                     unmatched_unsafe || !body_complete || rejected_expectation, result)) { co_return; }
-                parser.Reset();
             }
         }
     };
