@@ -2,7 +2,7 @@
 
 消费者通过 `import mhttp;` 使用 `Task<T>`、`Runtime`、`Sleep`、`Offload` 和
 `SyncWait`。公共接口使用标准库类型；Asio 执行器和桥接函数位于实现分区。
-内部 TCP 连接已经实现；监听器和 HTTP 会话将在后续阶段接入。
+监听器、HTTP 会话和客户端通过内部桥接运行用户 Task，保持公共接口中的 Asio 名字不可见。
 
 ## Task 的所有权
 
@@ -28,7 +28,7 @@ Task 拥有协程帧。未开始等待就析构时会释放帧和按值传入的
 
 停止后须先完成 `Join()` 才能再次启动；在此之前启动返回 `AlreadyRunning`。
 重复 `Join()` 安全。析构会停止并等待，因此不要在 I/O 线程析构 Runtime。
-Runtime 必须活过使用它的 Task 和后续服务器、客户端对象。
+Runtime 必须活过使用它的 Task、服务端和客户端对象。
 `Join()`、`Run()` 在任意 Runtime 的 I/O 线程调用都会返回 `Busy`。
 
 每个独立提交的根 Task 使用自己的 strand；其嵌套 Task、定时器完成和工作线程结果
@@ -96,7 +96,7 @@ auto main() -> int {
 
 读写默认超时 30 秒，可传 `nullopt` 禁用；非正时长立即超时。
 一次 `WriteAll` 的所有部分写入共享截止时间；`ReadSome` 的截止时间针对这一次读取，
-后续 HTTP 会话还需维护整个头部读取的截止时间。
+HTTP 会话在多次读取之上维护整个请求头或正文阶段的绝对截止时间，分段到达不会延长预算。
 超时会关闭连接，触发超时的操作返回 `ReadTimeout` 或 `WriteTimeout`，
 其他在途操作返回 `Canceled`。失败发送可能已发出前缀，连接不能继续复用。
 已完成操作的定时器即使排队等待回调，也不会关闭后续操作。
@@ -106,7 +106,7 @@ auto main() -> int {
 `Close` 可从任意线程请求，实际关闭投递到连接 strand，重复调用安全。
 关闭后的新操作返回 `ConnectionClosed`。取消在途 I/O 返回 `Canceled`；
 桥接尚未启动的操作时，取消也可能以代码为 `Canceled` 的 `std::system_error` 传播。
-上层公共请求接口需要统一这一边界。
+HttpClient 的公共请求接口将这一边界统一为返回 `Result` 中的 `Error::Canceled`。
 
 Runtime 必须活过连接和异步操作，并持续执行到关闭、取消回调及定时器清理完成。
 `core.impl.io_error` 按连接、解析地址、绑定、读取和发送的上下文集中映射传输错误，

@@ -163,6 +163,7 @@ python tools/check_stress.py
 python tools/check_test_support.py
 ```
 
+辅助头、原始对端 fixture、看门狗与环境相关用例见 [测试设施](docs/testing.md)。
 边界规则与检查方法见 [模块边界](docs/module_boundaries.md)。
 协议层的输入、借用生命周期和分帧契约见 [HTTP 协议核心](docs/protocol_core.md)。
 协程所有权、运行时生命周期和阻塞任务约束见 [异步基础](docs/async_core.md)。
