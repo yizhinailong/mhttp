@@ -16,7 +16,7 @@ HTTP 协议核心支持有大小限制的增量请求/响应解析、分块与 t
 内部 HTTP 会话已接入完整请求体、顺序流水线、keep-alive、协议错误响应和停止取消。
 公共 HttpServer 提供监听、就绪等待、同步/异步停止、会话排空和保留路由的重启。
 Listen 支持在调用线程运行空闲 Runtime，并提供连接数上限、安全的监听复用、IPv6 双栈配置，
-以及拥有回调的诊断日志与访问日志。客户端请求接口待后续阶段实现。
+以及拥有回调的诊断日志与访问日志。客户端已提供拥有数据的 Request / Response，连接与 Send 待接入。
 
 ## 构建
 
@@ -57,6 +57,7 @@ python tools/check_test_support.py
 协程所有权、运行时生命周期和阻塞任务约束见 [异步基础](docs/async_core.md)。
 路径解码、匹配优先级与正则限制见 [路由匹配核心](docs/routing_core.md)。
 请求、响应、上下文和 handler 生命周期见 [服务端接口基础](docs/server_api.md)。
+客户端消息所有权与访问器见 [客户端接口](docs/client_api.md)。
 依赖 Asio 的库代码限定在 `src/**/impl/` 的实现分区内。
 当前检查已在 Windows 本地通过；Linux 由 CI 验证。
 

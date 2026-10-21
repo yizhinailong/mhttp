@@ -17,6 +17,9 @@ export import :core.serializer;
 export import :core.task;
 export import :core.runtime;
 
+export import :client.request;
+export import :client.response;
+
 export import :server.route_pattern;
 export import :server.route_tree;
 export import :server.request_data;
