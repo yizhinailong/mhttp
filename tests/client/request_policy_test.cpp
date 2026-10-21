@@ -22,13 +22,17 @@ auto bounded_configuration() -> void {
     Check(validate_client_options(options).has_value(), "defaults are valid");
     CheckEq(options.user_agent, "mhttp/" + std::string{ mhttp::VERSION }, "agent identifies the library release");
     for (auto member : { &mhttp::client::ClientOptions::connect_timeout,
-                        &mhttp::client::ClientOptions::read_timeout, &mhttp::client::ClientOptions::write_timeout }) {
+                        &mhttp::client::ClientOptions::read_timeout, &mhttp::client::ClientOptions::write_timeout,
+                        &mhttp::client::ClientOptions::timeout }) {
         for (auto duration : { 0ms, -1ms, std::chrono::milliseconds::max() }) {
             auto changed = options;
             changed.*member = duration;
             CheckEq(validate_client_options(changed).error(), mhttp::Error::InvalidRequest, "reject unsafe deadline");
         }
     }
+    auto invalid_policy = options;
+    invalid_policy.timeout_policy = static_cast<mhttp::client::TimeoutPolicy>(99);
+    CheckEq(validate_client_options(invalid_policy).error(), mhttp::Error::InvalidRequest, "reject unknown timeout policy");
     for (auto member : { &mhttp::client::ClientOptions::header_bytes, &mhttp::client::ClientOptions::header_fields,
                         &mhttp::client::ClientOptions::max_request_bytes }) {
         auto changed = options;

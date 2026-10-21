@@ -12,6 +12,7 @@ import :core.runtime;
 import :core.parser;
 import :client.request_policy;
 import :client.redirect_policy;
+import :client.impl.deadlines;
 import :client.response;
 import :utils.base64;
 
@@ -342,18 +343,26 @@ namespace mhttp::impl {
          * @brief Resolve and connect lazily under one deadline, retaining the transport through initialization.
          * @param epoch Current Send cancellation epoch.
          * @param origin Effective destination for this hop, retained by the awaiting Send frame.
+         * @param timeout Remaining establishment budget, absent to disable automatic timing.
          * @return Success or classified DNS/connect/deadline/cancellation failure.
          */
-        auto connect(std::uint64_t epoch, Url const& origin) -> asio::awaitable<Result<void>> {
+        auto connect(
+            std::uint64_t epoch,
+            Url const& origin,
+            std::optional<Duration> timeout
+        ) -> asio::awaitable<Result<void>> {
             auto deadline = std::make_shared<ConnectDeadline>(m_executor);
             m_connect_deadline = deadline;
-            deadline->timer.expires_after(m_options.connect_timeout);
-            deadline->timer.async_wait([weak = weak_from_this(), deadline](asio::error_code error) {
-                if (!error && !deadline->finished) {
-                    deadline->expired = true;
-                    if (auto self = weak.lock()) { self->cancelNetwork(); }
-                }
-            });
+            if (timeout) {
+                if (*timeout <= Duration::zero()) { co_return std::unexpected{ Error::ConnectionTimeout }; }
+                deadline->timer.expires_after(*timeout);
+                deadline->timer.async_wait([weak = weak_from_this(), deadline](asio::error_code error) {
+                    if (!error && !deadline->finished) {
+                        deadline->expired = true;
+                        if (auto self = weak.lock()) { self->cancelNetwork(); }
+                    }
+                });
+            }
             auto const [resolve_error, endpoints] = co_await m_resolver.async_resolve(
                 std::string{ origin.Host() }, std::to_string(origin.Port()), asio::as_tuple(asio::use_awaitable));
             if (isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
@@ -410,17 +419,19 @@ namespace mhttp::impl {
         }
 
         /**
-         * @brief Read one bounded final response with one deadline through headers, interim messages, and body.
+         * @brief Read one bounded final response using the Send's phase, overall, step, or untimed policy.
          * @param request Prepared outgoing metadata used for HEAD and persistence decisions.
          * @param epoch Current request cancellation epoch.
+         * @param deadlines Borrowed Send-owned budget, retained through every asynchronous read.
          * @return Immutable complete response or classified read/framing/content-encoding failure.
          */
         auto readResponse(
             detail::PreparedClientRequest const& request,
-            std::uint64_t epoch
+            std::uint64_t epoch,
+            ClientDeadlines const& deadlines
         ) -> asio::awaitable<Result<client::Response>> {
             detail::ResponseParser parser{ request.request.Method().value_or(Method::Get), detail::client_parser_limits(m_options) };
-            auto const until = Clock::now() + m_options.read_timeout;
+            auto const until = deadlines.Until(m_options.read_timeout);
             auto connection = m_connection;
             std::string input, body;
             std::size_t offset{};
@@ -446,8 +457,8 @@ namespace mhttp::impl {
                         keep_alive, m_remote, m_local);
                 }
                 case detail::ParseEvent::NeedMore: {
-                    auto const remaining = until - Clock::now();
-                    if (remaining <= Duration::zero()) { co_return std::unexpected{ Error::ReadTimeout }; }
+                    auto const remaining = deadlines.Remaining(until);
+                    if (remaining && *remaining <= Duration::zero()) { co_return std::unexpected{ Error::ReadTimeout }; }
                     auto read = co_await connection->ReadSome(remaining);
                     if (isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
                     if (!read) {
@@ -489,6 +500,7 @@ namespace mhttp::impl {
             if (!current) { co_return std::unexpected{ current.error() }; }
             self->m_busy = true;
             SendScope scope{ *self };
+            ClientDeadlines deadlines{ options };
             if (self->m_active_epoch != epoch) { self->closeConnection(); }
             self->m_active_epoch = epoch;
             self->linkRuntime(token);
@@ -501,30 +513,32 @@ namespace mhttp::impl {
                 }
                 bool const reused = static_cast<bool>(self->m_connection);
                 if (!self->m_connection) {
-                    auto connected = co_await self->connect(epoch, *current);
+                    auto connected = co_await self->connect(epoch, *current,
+                        deadlines.Remaining(deadlines.Until(options.connect_timeout)));
                     self->retireConnectDeadline();
                     if (!connected) { co_return std::unexpected{ connected.error() }; }
                 }
-                auto const until = Clock::now() + self->m_options.write_timeout;
+                auto const until = deadlines.Until(options.write_timeout);
                 auto connection = self->m_connection;
-                auto written = co_await connection->WriteAllWithProgress(prepared->head.bytes, until - Clock::now());
+                auto written = co_await connection->WriteAllWithProgress(prepared->head.bytes, deadlines.Remaining(until));
                 if (self->isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
                 if (reused && written.error == Error::ConnectionClosed && written.bytes_transferred == 0) {
                     self->closeConnection();
-                    auto connected = co_await self->connect(epoch, *current);
+                    auto connected = co_await self->connect(epoch, *current,
+                        deadlines.Remaining(deadlines.Until(options.connect_timeout)));
                     self->retireConnectDeadline();
                     if (!connected) { co_return std::unexpected{ connected.error() }; }
                     connection = self->m_connection;
-                    written = co_await connection->WriteAllWithProgress(prepared->head.bytes, until - Clock::now());
+                    written = co_await connection->WriteAllWithProgress(prepared->head.bytes, deadlines.Remaining(until));
                 }
                 if (self->isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
                 if (written.error) { co_return std::unexpected{ *written.error }; }
                 auto wire_body = options.max_redirects == 0 ? std::move(prepared->request.m_impl->body)
                     : std::string{ prepared->request.Body() };
-                auto body = co_await connection->WriteAll(std::move(wire_body), until - Clock::now());
+                auto body = co_await connection->WriteAll(std::move(wire_body), deadlines.Remaining(until));
                 if (self->isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
                 if (!body) { co_return std::unexpected{ body.error() }; }
-                auto response = co_await self->readResponse(*prepared, epoch);
+                auto response = co_await self->readResponse(*prepared, epoch, deadlines);
                 if (!response) { co_return response; }
                 if (self->isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
                 if (!response->KeepAlive()) { self->closeConnection(); }

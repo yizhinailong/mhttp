@@ -12,6 +12,16 @@ export import :core.version;
 export namespace mhttp::client {
 
     /**
+     * @brief Choose independent phase budgets, one Send budget, per-operation budgets, or cancellation only.
+     */
+    enum class TimeoutPolicy {
+        Phase, ///< Use connect_timeout, write_timeout, and read_timeout for each complete hop phase.
+        Overall, ///< Use timeout once for the entire Send, including connection attempts and redirects.
+        Step, ///< Use timeout for connection establishment, each head/body write, and each read operation.
+        Never, ///< Disable all automatic client deadlines; explicit/runtime cancellation remains effective.
+    };
+
+    /**
      * @brief Configure connection/read/write deadlines, buffered input/output limits, and fallback fields.
      * @note A client owns a configuration snapshot. All timeouts and limits must be positive except
      *       body_bytes, where zero accepts only empty responses. An empty user_agent disables the
@@ -29,6 +39,8 @@ export namespace mhttp::client {
         std::string user_agent{ std::string{ "mhttp/" } + std::string{ VERSION } }; ///< Validated optional fallback.
         Headers default_headers; ///< Ordered fallback fields; every explicit request name takes precedence.
         std::size_t max_redirects{}; ///< Maximum followed redirects; zero returns 3xx responses unchanged.
+        TimeoutPolicy timeout_policy{ TimeoutPolicy::Phase }; ///< Preserve separately configured phase deadlines by default.
+        std::chrono::milliseconds timeout{ 30'000 }; ///< Positive budget used by Overall and Step.
     };
 
 } // namespace mhttp::client
@@ -48,10 +60,15 @@ export namespace mhttp::detail {
             return value.count() > 0 && value <= max_timeout;
         };
         if (!valid_timeout(options.connect_timeout) || !valid_timeout(options.read_timeout)
-            || !valid_timeout(options.write_timeout) || options.header_bytes == 0
+            || !valid_timeout(options.write_timeout) || !valid_timeout(options.timeout) || options.header_bytes == 0
             || options.header_fields == 0 || options.max_request_bytes == 0
             || options.body_bytes > std::numeric_limits<std::size_t>::max()) {
             return std::unexpected{ Error::InvalidRequest };
+        }
+        switch (options.timeout_policy) {
+        case client::TimeoutPolicy::Phase: case client::TimeoutPolicy::Overall:
+        case client::TimeoutPolicy::Step: case client::TimeoutPolicy::Never: break;
+        default: return std::unexpected{ Error::InvalidRequest };
         }
         if (!utils::is_field_value(options.user_agent)) { return std::unexpected{ Error::InvalidHeaders }; }
         return {};

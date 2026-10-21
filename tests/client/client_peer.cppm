@@ -15,13 +15,14 @@ namespace mhttp::test {
     using namespace std::chrono_literals;
 
     /**
-     * @brief Script a raw response and one optional pause without sharing any parser with the client.
+     * @brief Script raw response bytes and timed fragments without sharing a parser with the client.
      */
     struct ClientPeerPlan {
         std::string first; ///< Prefix sent after consuming the complete outgoing request head.
         std::string last; ///< Optional suffix sent after pause.
         std::chrono::milliseconds pause{}; ///< Deliberate asynchronous gap, bounded by each test.
         bool read_body{ true }; ///< False leaves a large upload blocked for write deadline tests.
+        std::vector<std::pair<std::chrono::milliseconds, std::string>> steps; ///< Delay/payload fragments after last.
     };
 
     /**
@@ -81,7 +82,15 @@ namespace mhttp::test {
             co_await timer.async_wait(asio::use_awaitable);
         }
         if (!plan.last.empty()) {
-            static_cast<void>(co_await asio::async_write(socket, asio::buffer(plan.last), asio::as_tuple(asio::use_awaitable)));
+            auto [error, count] = co_await asio::async_write(socket, asio::buffer(plan.last), asio::as_tuple(asio::use_awaitable));
+            if (error) { co_return; }
+        }
+        for (auto const& [delay, bytes] : plan.steps) {
+            asio::steady_timer timer{ executor };
+            timer.expires_after(delay);
+            co_await timer.async_wait(asio::use_awaitable);
+            auto [error, count] = co_await asio::async_write(socket, asio::buffer(bytes), asio::as_tuple(asio::use_awaitable));
+            if (error) { co_return; }
         }
         asio::error_code ignored;
         socket.shutdown(asio::socket_base::shutdown_send, ignored);

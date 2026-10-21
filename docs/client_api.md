@@ -2,7 +2,7 @@
 
 客户端的请求与响应类型通过 `import mhttp;` 使用，公共接口只包含标准库和 mhttp 类型。
 `client::HttpClient` 提供惰性连接和 `Send(Request) -> Task<Result<Response>>`。
-构造时不进行 DNS 或 socket I/O；连接、发送与读取均异步进行。可选整体超时策略待后续接入。
+构造时不进行 DNS 或 socket I/O；连接、发送与读取均异步进行。
 
 ```cpp
 import std;
@@ -57,7 +57,14 @@ HEAD 可以发送请求 body，但仍不读取响应 body。
 所有超时和上限必须为正；响应 body 上限可以为零，表示只接受空 body。
 连接超时覆盖 DNS 和 IPv4 / IPv6 端点的顺序尝试；读超时覆盖整个最终响应，含中间响应、头部和 body；
 写超时覆盖请求头和完整 body 的所有部分写入。超时或失败会关闭连接，下一次请求重新连接。
-目前尚未提供可选的 overall / step / never 超时策略。
+timeout_policy 默认为 TimeoutPolicy::Phase，使用上述三个独立预算。
+TimeoutPolicy::Overall 使用 timeout，为一次 Send 的连接、写入、读取、透明重试和全部重定向
+共用一个单调时钟截止时间；新数据到达或切换连接均不重置预算。
+TimeoutPolicy::Step 为连接建立（DNS 和所有端点尝试合计）、每次完整请求头写入、完整 body 写入、
+每次底层读取分别重新设置 timeout，因此持续收到数据可以超过单次预算。
+TimeoutPolicy::Never 关闭所有自动计时，Stop、Runtime 停止和 Task 取消仍有效。
+Overall / Step 忽略独立阶段超时，Phase 忽略 timeout；所有配置的时长仍必须为正且可安全表示。
+超时按发生阶段返回 ConnectionTimeout、WriteTimeout 或 ReadTimeout，并关闭当前连接。
 
 发送准备保留已有 percent escape 和原始查询的顺序，将 QueryParams 中的键和值分别编码后追加，
 移除 fragment；空目标或仅有 fragment 时采用构造 URL 的路径和查询。
@@ -110,10 +117,13 @@ Content-Length 或 chunked 尚未完成就断开时返回 ConnectionClosed。
 `tests/client/auth_test.cpp` 通过真实回环通信验证认证格式、默认字段替换、显式覆盖、非法输入拒绝和跨线程快照。
 `tests/client/redirect_test.cpp` 覆盖方法/body 改写、关闭跟随、次数上限、相对和绝对 Location、
 编码查询、同源 Cookie、跨端口凭据移除、返回原源、跨源 body 上限和读超时。
+`tests/client/timeout_test.cpp` 验证跨源重定向共用整体预算，以及禁用计时后的显式/运行时取消和清理。
 `tests/client/client_basic_test.cpp` 通过真实服务端验证常用方法、默认字段、端点、4 MiB 二进制往返、
 Busy、四个客户端的跨线程 Stop、读超时、空闲/在途 Runtime 取消与重启，以及消息在网络状态销毁后的所有权。
 `python tools/check_client.py` 使用隔离工程中的原始 TCP 对端验证 CL / chunked / EOF、trailer、
 HEAD / 204 / 304 / 404、截断、字段和 body 上限、编码错误、连接拒绝、真实 body 读超时和上传写超时。
 它还在 POST 请求头部分写入后主动 reset，并确认没有额外连接或请求重发。
+持续慢速 CL、EOF 和 chunked 响应验证两秒整体截止时间，另覆盖 Step 进度续时、停顿超时、
+Never 延迟响应和整体上传超时。
 `tests/client/keep_alive_test.cpp` 验证空闲关闭后的透明重连、200 次同连接复用、服务端每连接请求上限、
 禁用复用、Stop 世代竞争及销毁客户端时的空闲等待排空。

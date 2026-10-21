@@ -119,6 +119,47 @@ namespace mhttp::test {
     }
 
     /**
+     * @brief Enforce a two-second overall deadline despite body fragments arriving every 150 ms.
+     * @param framing One of cl, eof, or chunked, selecting independent raw wire framing.
+     */
+    auto client_overall_deadline(std::string_view framing) -> void {
+        bool const chunked = framing == "chunked";
+        ClientPeerPlan plan{ "HTTP/1.1 200 OK\r\n" };
+        if (framing == "cl") { plan.first += "Content-Length: 20\r\n"; }
+        if (chunked) { plan.first += "Transfer-Encoding: chunked\r\n"; }
+        plan.first += chunked ? "\r\n1\r\nx\r\n" : "\r\nx";
+        for (unsigned i{}; i < 19; ++i) { plan.steps.emplace_back(150ms, chunked ? "1\r\nx\r\n" : "x"); }
+        if (chunked) { plan.steps.emplace_back(150ms, "0\r\n\r\n"); }
+        auto result = run_client_peer(std::move(plan), { .timeout_policy = client::TimeoutPolicy::Overall, .timeout = 2s });
+        Check(!result.response && result.response.error() == Error::ReadTimeout && !result.open, "overall deadline closes incomplete response despite continuing progress");
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(result.elapsed);
+        Check(elapsed >= 2000ms && elapsed < 2200ms, std::format("{} overall duration {} ms is within [2000, 2200)", framing, elapsed.count()));
+    }
+
+    /**
+     * @brief Renew Step timers on progress, disable Never timers, and retain real write deadline classification.
+     */
+    auto client_timeout_policies() -> void {
+        ClientPeerPlan drip{ "HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nx" };
+        for (unsigned i{}; i < 6; ++i) { drip.steps.emplace_back(40ms, "x"); }
+        auto stepped = run_client_peer(std::move(drip),
+            { .read_timeout = 1ms, .timeout_policy = client::TimeoutPolicy::Step, .timeout = 100ms });
+        Check(stepped.response && stepped.response->Body() == "xxxxxxx" && stepped.elapsed >= 200ms, "Step renews after each read and overrides independent phase timeout");
+        auto stalled = run_client_peer({ "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nx", "x", 250ms },
+            { .timeout_policy = client::TimeoutPolicy::Step, .timeout = 100ms });
+        Check(!stalled.response && stalled.response.error() == Error::ReadTimeout && stalled.elapsed < 220ms, "Step expires when one read stops making progress");
+        auto untimed = run_client_peer({ "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nx", "y", 200ms },
+            { .connect_timeout = 1ms, .read_timeout = 1ms, .write_timeout = 1ms,
+                .timeout_policy = client::TimeoutPolicy::Never, .timeout = 1ms });
+        Check(untimed.response && untimed.response->Body() == "xy" && untimed.elapsed >= 200ms, "Never disables all automatic phase and per-operation deadlines");
+        client::Request upload{ Method::Post, "/upload" };
+        Check(upload.SetContent(std::string(8 * 1024 * 1024, 'x')).has_value(), "large overall-budget upload");
+        auto blocked = run_client_peer({ {}, {}, 350ms, false },
+            { .timeout_policy = client::TimeoutPolicy::Overall, .timeout = 100ms }, std::move(upload));
+        Check(!blocked.response && blocked.response.error() == Error::WriteTimeout && blocked.elapsed < 300ms, "overall budget also expires during blocked request writes");
+    }
+
+    /**
      * @brief Reject connection establishment to an authoritative closed dynamic loopback port.
      */
     auto client_connection_refused() -> void {
@@ -178,6 +219,10 @@ export namespace mhttp::test {
             { "client response limits", client_response_limits },
             { "client content encoding", client_content_encoding },
             { "client phase deadlines", client_phase_deadlines },
+            { "client overall CL deadline", [] { client_overall_deadline("cl"); } },
+            { "client overall EOF deadline", [] { client_overall_deadline("eof"); } },
+            { "client overall chunked deadline", [] { client_overall_deadline("chunked"); } },
+            { "client timeout policies", client_timeout_policies },
             { "client connection refused", client_connection_refused },
             { "client partial head no retry", client_partial_head_no_retry },
         });
