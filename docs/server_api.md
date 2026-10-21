@@ -225,7 +225,10 @@ Runtime::Stop 同样会取消监听器和会话，Join 会等待相关操作排�
 全局 strand 独占 acceptor 与会话表；会话先登记，再启动连接 strand 上的协程。
 停止只向连接 strand 投递取消，所有会话根完成后才解冻路由并通知等待方。
 只 Bind 而未 Start 的套接字也能在 Runtime 启动前直接 Stop。
-当前尚未提供阻塞 Listen、最大连接数和日志钩子。
+Listen(host, port) 组合 Bind、Start 与阻塞等待。Runtime 空闲时，它在当前线程调用 Run，
+服务端排空后停止并 Join 这一次执行代；Runtime 已启动时沿用现有执行线程，返回时不停止 Runtime。
+其他非 I/O 控制线程可调用 Stop 来唤醒 Listen；也可从独立控制 Task 等待 AsyncStop。
+当前尚未提供最大连接数和日志钩子。
 
 对应独立测试为 `tests/server/request_test.cpp`、`response_test.cpp`、
 `request_data_test.cpp`、`handler_test.cpp`、`middleware_test.cpp`、`router_test.cpp`、

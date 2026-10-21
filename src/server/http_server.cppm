@@ -67,7 +67,24 @@ export namespace mhttp::server {
          * @brief Freeze routing and submit acceptance on an already running Runtime without blocking.
          * @return Success, AlreadyRunning, NotRunning, or Busy if standalone routing still owns configuration.
          */
-        [[nodiscard]] auto Start() -> Result<void> { return m_impl->Start(); }
+        [[nodiscard]] auto Start() -> Result<void> {
+            auto started = m_impl->Start();
+            return started ? Result<void>{} : Result<void>{ std::unexpected{ started.error() } };
+        }
+
+        /**
+         * @brief Bind/start and block until stop; run an idle Runtime on this calling thread.
+         * @param host Numeric IP address or hostname.
+         * @param port Desired listening port, or zero for dynamic allocation.
+         * @return Startup/accept/runtime failure, Busy on an I/O thread, or success after drain.
+         * @note With an idle Runtime, Listen owns Run/Join and stops that generation after server drain.
+         *       An already started Runtime keeps running after Listen returns. Use another control
+         *       thread to call Stop, or submit AsyncStop outside this server's own request handlers.
+         */
+        [[nodiscard]] auto Listen(std::string const& host, std::uint16_t port) -> Result<void> {
+            auto implementation = m_impl;
+            return implementation->Listen(host, port);
+        }
 
         /**
          * @brief Observe whether acceptance has been submitted without a stop request.
@@ -88,13 +105,19 @@ export namespace mhttp::server {
          */
         [[nodiscard]] auto WaitUntilReady(
             std::chrono::milliseconds timeout = std::chrono::seconds{ 5 }
-        ) -> Result<void> { return m_impl->WaitUntilReady(timeout); }
+        ) -> Result<void> {
+            auto implementation = m_impl;
+            return implementation->WaitUntilReady(timeout);
+        }
 
         /**
          * @brief Stop from any non-I/O thread and wait until all accept/session callbacks drain.
          * @return Success, or Busy on an I/O thread; repeated calls are safe.
          */
-        [[nodiscard]] auto Stop() -> Result<void> { return m_impl->Stop(); }
+        [[nodiscard]] auto Stop() -> Result<void> {
+            auto implementation = m_impl;
+            return implementation->Stop();
+        }
 
         /**
          * @brief Own a lazy asynchronous stop-and-drain operation before initial suspension.

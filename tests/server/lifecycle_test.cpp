@@ -87,6 +87,7 @@ auto stop_server_task(mhttp::server::HttpServer& server) -> mhttp::Task<void> {
     CheckEq(server.Stop().error(), mhttp::Error::Busy, "blocking Stop rejects I/O threads");
     CheckEq(server.WaitUntilReady().error(), mhttp::Error::Busy, "blocking readiness rejects I/O threads");
     CheckEq(server.BindToAnyPort("127.0.0.1").error(), mhttp::Error::Busy, "blocking Bind rejects I/O threads");
+    CheckEq(server.Listen("127.0.0.1", 0).error(), mhttp::Error::Busy, "blocking Listen rejects I/O threads");
     co_await server.AsyncStop();
     Check(!server.IsRunning() && !server.LocalEndpoint(), "AsyncStop returns only after listener drain");
     Check(server.Get("/after-async-stop", [](auto&, auto&) {}).has_value(), "AsyncStop thaws routing before return");
@@ -132,6 +133,29 @@ auto server_configuration_and_destruction() -> void {
 }
 
 /**
+ * @brief Verify Listen can own inline execution or wait on an already running shared Runtime.
+ */
+auto server_blocking_listen() -> void {
+    for (bool started_runtime : { false, true }) {
+        mhttp::Runtime runtime;
+        if (started_runtime) { Check(runtime.Start(4).has_value(), "start shared Listen runtime"); }
+        mhttp::server::HttpServer server{ runtime };
+        for (unsigned iteration{}; iteration < 10; ++iteration) {
+            std::optional<mhttp::Result<void>> result;
+            std::jthread listener{ [&] { result = server.Listen("127.0.0.1", 0); } };
+            while (!server.IsRunning()) { std::this_thread::sleep_for(1ms); }
+            Check(server.WaitUntilReady().has_value(), "blocking Listen publishes ready state");
+            Check(server.LocalEndpoint() && server.LocalEndpoint()->port != 0, "Listen dynamic endpoint visible");
+            Check(server.Stop().has_value(), "external Stop releases Listen");
+            listener.join();
+            Check(result && result->has_value(), "Listen returns success after drain");
+            CheckEq(runtime.IsRunning(), started_runtime, "Listen stops only its own inline execution generation");
+            Check(server.Get("/after-listen", [](auto&, auto&) {}).has_value(), "Listen permits reuse after drain");
+        }
+    }
+}
+
+/**
  * @brief Run public server lifecycle scenarios with bounded per-case watchdogs.
  * @param argc Argument count.
  * @param argv Optional case filters.
@@ -144,5 +168,6 @@ auto main(int argc, char* argv[]) -> int {
         { "server concurrent Stop", server_concurrent_stop },
         { "server asynchronous and runtime Stop", server_async_and_runtime_stop },
         { "server configuration and destruction", server_configuration_and_destruction },
+        { "server blocking Listen", server_blocking_listen },
     });
 }

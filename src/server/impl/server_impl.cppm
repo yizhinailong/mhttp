@@ -34,6 +34,7 @@ namespace mhttp::impl {
             std::vector<std::shared_ptr<asio::steady_timer>> waiters; ///< AsyncStop drain notifications.
             std::unique_ptr<std::stop_callback<std::function<void()>>> runtime_stop; ///< Owned cancellation link.
             std::stop_token token; ///< Runtime generation cancellation for each accepted session.
+            bool stop_runtime{}; ///< Immutable: Listen owns this inline runtime generation.
             std::size_t next_id{}; ///< Server-strand session identity.
             bool stopping{}; ///< Server-strand stop guard.
             bool accept_done{}; ///< Accept root and its frame have drained.
@@ -104,9 +105,10 @@ namespace mhttp::impl {
 
         /**
          * @brief Freeze routing and submit an owned accept generation without waiting.
-         * @return Success, AlreadyRunning, NotRunning for an idle runtime/unbound socket, or Busy routing.
+         * @param stop_runtime Whether this generation's drain also stops a Listen-owned inline Runtime.
+         * @return Owned submitted generation, AlreadyRunning, NotRunning, or Busy routing.
          */
-        auto Start() -> Result<void> {
+        auto Start(bool stop_runtime = false) -> Result<std::shared_ptr<Generation>> {
             std::lock_guard lock{ m_mutex };
             if (m_state == State::Running || m_state == State::Stopping) {
                 return std::unexpected{ Error::AlreadyRunning };
@@ -114,6 +116,7 @@ namespace mhttp::impl {
             if (m_state != State::Bound) { return std::unexpected{ Error::NotRunning }; }
             auto generation = std::make_shared<Generation>();
             generation->acceptor = m_bound;
+            generation->stop_runtime = stop_runtime;
             auto operation = [self = shared_from_this(), generation](std::stop_token token) {
                 asio::post(self->m_executor, [self, generation, token] {
                     try { self->startGeneration(generation, token); }
@@ -127,7 +130,7 @@ namespace mhttp::impl {
                     }
                 });
             };
-            if (auto frozen = m_router->Freeze(); !frozen) { return frozen; }
+            if (auto frozen = m_router->Freeze(); !frozen) { return std::unexpected{ frozen.error() }; }
             Result<void> submitted;
             try { submitted = m_runtime->Submit(std::move(operation)); }
             catch (...) {
@@ -136,12 +139,52 @@ namespace mhttp::impl {
             }
             if (!submitted) {
                 static_cast<void>(m_router->Thaw());
-                return submitted;
+                return std::unexpected{ submitted.error() };
             }
-            m_active = std::move(generation);
+            m_active = generation;
             m_bound.reset();
             m_state = State::Running;
-            return {};
+            return generation;
+        }
+
+        /**
+         * @brief Bind/start and block this caller, running an idle Runtime inline until server drain.
+         * @param host Owned numeric address or hostname.
+         * @param port Zero requests a dynamic port, observable through LocalEndpoint after startup.
+         * @return Startup/accept/runtime failure, or success after complete listener drain.
+         * @note An already running Runtime keeps its execution mode and continues after this server stops.
+         */
+        auto Listen(std::string const& host, std::uint16_t port) -> Result<void> {
+            if (auto bound = Bind(host, port); !bound) { return std::unexpected{ bound.error() }; }
+            if (m_runtime->IsRunning()) {
+                auto started = Start();
+                if (!started) { static_cast<void>(Stop()); return std::unexpected{ started.error() }; }
+                std::unique_lock lock{ m_mutex };
+                m_changed.wait(lock, [&] { return (*started)->completed; });
+                return (*started)->error ? Result<void>{ std::unexpected{ *(*started)->error } } : Result<void>{};
+            }
+            Result<std::shared_ptr<Generation>> started{ std::unexpected{ Error::NotRunning } };
+            auto run = m_runtime->Run([self = shared_from_this(), &started](std::stop_token) {
+                try { started = self->Start(true); }
+                catch (...) {
+                    self->requestStop();
+                    self->m_runtime->Stop();
+                    throw;
+                }
+                if (!started) {
+                    self->requestStop();
+                    self->m_runtime->Stop();
+                }
+            });
+            if (!run) {
+                static_cast<void>(Stop());
+                if (run.error() == Error::Unknown) { static_cast<void>(m_runtime->Join()); }
+                return run;
+            }
+            if (auto joined = m_runtime->Join(); !joined) { return joined; }
+            if (!started) { return std::unexpected{ started.error() }; }
+            std::lock_guard lock{ m_mutex };
+            return (*started)->error ? Result<void>{ std::unexpected{ *(*started)->error } } : Result<void>{};
         }
 
         /**
@@ -327,6 +370,7 @@ namespace mhttp::impl {
             generation->finished = true;
             generation->runtime_stop.reset();
             static_cast<void>(m_router->Thaw());
+            if (generation->stop_runtime) { m_runtime->Stop(); }
             {
                 std::lock_guard lock{ m_mutex };
                 generation->completed = true;

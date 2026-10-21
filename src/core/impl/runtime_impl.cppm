@@ -68,14 +68,26 @@ namespace mhttp::impl {
 
         /**
          * @brief Execute a fresh generation on the calling non-I/O thread until Stop and drain.
+         * @param initial Optional owned initialization posted after publishing this fresh generation.
          * @return Success, AlreadyRunning, Busy on an I/O thread, or Unknown for a callback failure.
          */
-        auto Run() -> Result<void> {
+        auto Run(std::function<void(std::stop_token)> initial = {}) -> Result<void> {
             if (IsIoThread()) { return std::unexpected{ Error::Busy }; }
             {
                 std::lock_guard lock{ m_mutex };
                 if (m_state != State::Idle) { return std::unexpected{ Error::AlreadyRunning }; }
                 prepare();
+                try {
+                    if (initial) {
+                        asio::post(m_context, [initial = std::move(initial), token = m_stop_source.get_token()] {
+                            initial(token);
+                        });
+                    }
+                } catch (...) {
+                    m_work.reset();
+                    m_state = State::Idle;
+                    throw;
+                }
                 ++m_runners;
             }
             return runLoop();

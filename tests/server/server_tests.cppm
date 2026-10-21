@@ -358,6 +358,50 @@ namespace mhttp::test {
         Check(server.Stop().has_value(), "drain exception isolation listener");
     }
 
+    /**
+     * @brief Verify a real request served by Listen, with Runtime execution on the caller when idle.
+     * @param executor Fixture strand.
+     * @param endpoint Owned dynamic endpoint.
+     */
+    auto server_listen_scenario(asio::any_io_executor executor, Endpoint endpoint) -> asio::awaitable<void> {
+        auto wire = co_await server_exchange(executor, std::move(endpoint),
+            "GET / HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n");
+        std::size_t offset{};
+        CheckEq(parse_session_reply(wire, offset).body, "inline", "Listen handles a complete HTTP exchange");
+    }
+
+    /**
+     * @brief Verify idle and started Runtime modes and the actual execution thread selected by Listen.
+     */
+    auto server_listen_execution() -> void {
+        for (bool started_runtime : { false, true }) {
+            Runtime runtime;
+            if (started_runtime) { Check(runtime.Start(4).has_value(), "start shared Listen request runtime"); }
+            server::HttpServer server{ runtime };
+            std::thread::id listening_thread;
+            Check(server.Get("/", [&](auto&, auto& response) -> Task<void> {
+                Check(Runtime::IsIoThread(), "Listen handler runs in Runtime execution");
+                if (!started_runtime) { CheckEq(std::this_thread::get_id(), listening_thread, "Listen runs on caller"); }
+                co_await Sleep(1ms);
+                if (!started_runtime) { CheckEq(std::this_thread::get_id(), listening_thread, "Task resumes on inline caller"); }
+                Check(response.SetContent("inline", "text/plain").has_value(), "inline Listen response");
+            }).has_value(), "register Listen request");
+            std::optional<Result<void>> result;
+            std::jthread listener{ [&] {
+                listening_thread = std::this_thread::get_id();
+                result = server.Listen("127.0.0.1", 0);
+            } };
+            while (!server.IsRunning()) { std::this_thread::sleep_for(1ms); }
+            Check(server.WaitUntilReady().has_value(), "Listen request ready");
+            TransportRuntime peers;
+            peers.Run(server_listen_scenario(peers.Executor(), *server.LocalEndpoint()));
+            Check(server.Stop().has_value(), "stop blocking Listen after request");
+            listener.join();
+            Check(result && result->has_value(), "Listen request loop finishes successfully");
+            CheckEq(runtime.IsRunning(), started_runtime, "Listen preserves shared runtime ownership");
+        }
+    }
+
 } // namespace mhttp::test
 
 export namespace mhttp::test {
@@ -375,6 +419,7 @@ export namespace mhttp::test {
             { "listener in-flight stop", server_inflight_stop },
             { "listener Offload drain", server_offload_drain },
             { "listener callback isolation", server_callback_isolation },
+            { "listener Listen execution", server_listen_execution },
         });
     }
 
