@@ -10,6 +10,7 @@ import :client.http_client;
 import :server.http_server;
 import :test.transport;
 import :test.client_peer;
+import :test.client_write_fault;
 
 namespace mhttp::test {
 
@@ -217,6 +218,71 @@ namespace mhttp::test {
     }
 
     /**
+     * @brief Exercise the actual Send state machine with deterministic head completions and real HTTP peers.
+     */
+    auto client_head_retry_budget() -> void {
+        using namespace std::string_literals;
+
+        /**
+         * @brief Describe one retry precondition and the complete expected attempt budget.
+         */
+        struct Case {
+            bool reused; ///< Establish a real persistent connection first.
+            std::vector<ClientWriteFailure> failures; ///< Scripted head failures, retaining real subsequent I/O.
+            std::size_t attempts; ///< Required total attempts for the upload head.
+            std::optional<Error> error; ///< Expected terminal failure, absent for a complete upload.
+        };
+        std::vector<Case> const cases{
+            { true, { {} }, 2, {} },
+            { true, { {}, {}, {} }, 2, Error::ConnectionClosed },
+            { false, { {} }, 1, Error::ConnectionClosed },
+            { true, { { Error::ConnectionClosed, 1 } }, 1, Error::ConnectionClosed },
+            { true, { { Error::WriteTimeout } }, 1, Error::WriteTimeout },
+            { true, { { Error::Canceled } }, 1, Error::Canceled },
+            { true, { { Error::Write } }, 1, Error::Write },
+        };
+        for (auto const& test : cases) {
+            Runtime runtime;
+            Check(runtime.Start(4).has_value(), "start scripted retry runtime");
+            server::HttpServer server{ runtime };
+            std::atomic<unsigned> uploads{};
+            std::mutex body_mutex;
+            std::string observed;
+            Check(server.Get("/warmup", [](auto&, auto&) {}).has_value(), "register persistent warmup");
+            Check(server.Post("/retry", [&](auto& request, auto& response) {
+                ++uploads;
+                std::scoped_lock lock{ body_mutex };
+                observed = request.Body();
+                Check(response.SetContent("stored", "text/plain").has_value(), "acknowledge one full upload");
+            }).has_value(), "register real upload peer");
+            auto port = server.BindToAnyPort("127.0.0.1");
+            if (!port || !server.Start() || !server.WaitUntilReady()) {
+                throw std::runtime_error{ "cannot start scripted retry peer" };
+            }
+            client::HttpClient client{ runtime, "127.0.0.1", *port };
+            if (test.reused) {
+                auto warmup = SyncWait(runtime, client.Get("/warmup"));
+                Check(warmup && warmup->KeepAlive() && client.IsOpen(), "fault starts on a known persistent socket");
+            }
+            ClientWriteFault::Configure(test.failures);
+            client::Request request{ Method::Post, "/retry" };
+            auto const payload = "owned\0upload"s;
+            Check(request.SetContent(payload).has_value(), "retain a binary non-idempotent upload");
+            auto result = SyncWait(runtime, client.Send(std::move(request)));
+            CheckEq(ClientWriteFault::Calls(), test.attempts, "head retry budget and transfer classification");
+            if (test.error) {
+                Check(!result && result.error() == *test.error && !client.IsOpen(), "terminal failure closes the transport");
+            } else {
+                Check(result && result->Body() == "stored", "zero-byte stale write reconnects and completes the upload");
+            }
+            Check(server.Stop().has_value(), "drain every failed or successful retry connection");
+            CheckEq(uploads.load(), test.error ? 0U : 1U, "upload dispatch occurs exactly once only after head success");
+            std::scoped_lock lock{ body_mutex };
+            CheckEq(observed, test.error ? std::string{} : payload, "retry preserves every owned body byte");
+        }
+    }
+
+    /**
      * @brief Never transparently replay a non-idempotent request whose head has already completed a prefix write.
      */
     auto client_partial_head_no_retry() -> void {
@@ -268,6 +334,7 @@ export namespace mhttp::test {
             { "client connection refused", client_connection_refused },
             { "client IPv6 loopback", client_ipv6_loopback },
             { "client partial head no retry", client_partial_head_no_retry },
+            { "client head retry budget", client_head_retry_budget },
         });
     }
 
