@@ -201,7 +201,7 @@ namespace mhttp::impl {
                 auto step = parser.Feed(input);
                 m_offset += step.consumed;
                 if (step.event != detail::ParseEvent::NeedMore) { co_return step; }
-                auto bytes = co_await m_connection->ReadSome(deadline - Clock::now());
+                auto bytes = co_await m_connection->ReadSome(deadline - Clock::now(), false);
                 if (!bytes) { co_return std::unexpected{ bytes.error() }; }
                 m_input = std::move(*bytes);
                 m_offset = 0;
@@ -285,6 +285,8 @@ namespace mhttp::impl {
                     result.error = event.error();
                     if (event.error() == Error::ConnectionClosed && saw_input) {
                         co_await rejectHead(parser, parser.Finish().failure->status, result);
+                    } else if (event.error() == Error::ReadTimeout && saw_input) {
+                        co_await rejectHead(parser, Status::RequestTimeout, result);
                     }
                     co_return;
                 }
@@ -315,6 +317,12 @@ namespace mhttp::impl {
                         event = co_await readEvent(parser, deadline, saw_input);
                         if (!event) {
                             result.error = event.error();
+                            if (event.error() == Error::ReadTimeout) {
+                                route.handled = true;
+                                route.failure = {};
+                                static_cast<void>(response.SetError(Status::RequestTimeout));
+                                break;
+                            }
                             if (event.error() != Error::ConnectionClosed) { co_return; }
                             event = parser.Finish();
                         }

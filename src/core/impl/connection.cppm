@@ -39,20 +39,25 @@ namespace mhttp::impl {
     class Connection : public std::enable_shared_from_this<Connection> {
     private:
         using Duration = std::chrono::steady_clock::duration; ///< Relative deadline type.
+        using CancellationSlot = decltype(std::declval<asio::cancellation_signal&>().slot()); ///< Slot type reachable through Asio's exported signal API.
 
         /**
          * @brief Keep a canceled timer callback from acting on a later operation.
          */
         struct Deadline {
             asio::steady_timer timer; ///< Timer owned through its completion callback.
+            asio::cancellation_signal read_cancellation; ///< Target only a read when its timeout must permit a final response.
             bool finished{}; ///< Transfer already finished; a queued timer callback is harmless.
-            bool expired{}; ///< Timer won and closed this connection.
+            bool expired{}; ///< Timer won before transfer completion.
+            bool close_on_timeout{ true }; ///< Close by default; a response-producing server read opts out.
 
             /**
              * @brief Bind timer state to the connection strand.
              * @param executor Connection's serialized executor.
+             * @param close Whether expiry closes the socket instead of canceling only the current read.
              */
-            explicit Deadline(asio::any_io_executor executor) : timer{ executor } {}
+            explicit Deadline(asio::any_io_executor executor, bool close = true) :
+                timer{ executor }, close_on_timeout{ close } {}
         };
 
         /**
@@ -61,6 +66,7 @@ namespace mhttp::impl {
         struct ActiveOperation {
             bool& busy; ///< Direction state borrowed from the coroutine-owned connection.
             std::shared_ptr<Deadline> deadline; ///< State retained by any queued timer completion.
+            CancellationSlot forwarded_cancellation; ///< Parent slot forwarded while a read uses its own deadline signal.
 
             /**
              * @brief Mark a direction active after its deadline allocation succeeds.
@@ -80,6 +86,7 @@ namespace mhttp::impl {
              * @brief Retire callbacks before another transfer can reuse this direction.
              */
             ~ActiveOperation() {
+                if (forwarded_cancellation.is_connected()) { forwarded_cancellation.clear(); }
                 busy = false;
                 deadline->finished = true;
                 static_cast<void>(deadline->timer.cancel());
@@ -146,13 +153,16 @@ namespace mhttp::impl {
         /**
          * @brief Receive one bounded owned chunk on the connection strand.
          * @param timeout Relative deadline; nullopt disables it, nonpositive durations expire immediately.
+         * @param close_on_timeout Close on expiry by default; false cancels only this read so HTTP can send a final error.
          * @return Owned bytes, Busy, ConnectionClosed, Canceled, ReadTimeout, or a read failure.
-         * @note The coroutine owns this connection before initial suspension.
+         * @note The coroutine owns this connection before initial suspension. A preserved timeout must be followed
+         *       by a final response and closure; received bytes are discarded and must never be retried as a request.
          */
         [[nodiscard]] auto ReadSome(
-            std::optional<Duration> timeout = std::chrono::seconds{ 30 }
+            std::optional<Duration> timeout = std::chrono::seconds{ 30 },
+            bool close_on_timeout = true
         ) -> asio::awaitable<Result<std::string>> {
-            return asio::co_spawn(m_executor, readSome(shared_from_this(), timeout), asio::use_awaitable);
+            return asio::co_spawn(m_executor, readSome(shared_from_this(), timeout, close_on_timeout), asio::use_awaitable);
         }
 
         /**
@@ -246,14 +256,16 @@ namespace mhttp::impl {
             if (!timeout) { return; }
             if (*timeout <= Duration::zero()) {
                 deadline->expired = true;
-                close();
+                if (deadline->close_on_timeout) { close(); }
+                else { deadline->read_cancellation.emit(asio::cancellation_type::terminal); }
                 return;
             }
             deadline->timer.expires_after(*timeout);
             deadline->timer.async_wait([self = shared_from_this(), deadline](asio::error_code error) {
                 if (!error && !deadline->finished) {
                     deadline->expired = true;
-                    self->close();
+                    if (deadline->close_on_timeout) { self->close(); }
+                    else { deadline->read_cancellation.emit(asio::cancellation_type::terminal); }
                 }
             });
         }
@@ -273,11 +285,13 @@ namespace mhttp::impl {
          * @brief Receive while retaining the connection independently of the caller's owner.
          * @param self Owned connection for the complete coroutine lifetime.
          * @param timeout Optional operation deadline.
+         * @param close_on_timeout Whether deadline expiry closes the socket or cancels only this read.
          * @return One owned chunk or a contextual failure.
          */
         static auto readSome(
             std::shared_ptr<Connection> self,
-            std::optional<Duration> timeout
+            std::optional<Duration> timeout,
+            bool close_on_timeout
         ) -> asio::awaitable<Result<std::string>> {
             co_await asio::this_coro::throw_if_cancelled(false);
             if (self->m_closed || self->m_read_eof) { co_return std::unexpected{ Error::ConnectionClosed }; }
@@ -287,12 +301,27 @@ namespace mhttp::impl {
                 self->close();
                 co_return std::unexpected{ Error::Canceled };
             }
-            auto deadline = std::make_shared<Deadline>(self->m_executor);
+            auto deadline = std::make_shared<Deadline>(self->m_executor, close_on_timeout);
             ActiveOperation active{ self->m_reading, deadline };
+            if (!close_on_timeout) {
+                active.forwarded_cancellation = cancellation.slot();
+                if (active.forwarded_cancellation.is_connected()) {
+                    active.forwarded_cancellation.assign([deadline](asio::cancellation_type type) {
+                        deadline->read_cancellation.emit(type);
+                    });
+                }
+            }
             self->armDeadline(deadline, timeout);
             if (deadline->expired) { co_return std::unexpected{ Error::ReadTimeout }; }
-            auto const [error, count] = co_await self->m_socket.async_read_some(
-                asio::buffer(self->m_read_buffer), asio::as_tuple(asio::use_awaitable));
+            std::tuple<asio::error_code, std::size_t> completion;
+            if (close_on_timeout) {
+                completion = co_await self->m_socket.async_read_some(
+                    asio::buffer(self->m_read_buffer), asio::as_tuple(asio::use_awaitable));
+            } else {
+                completion = co_await self->m_socket.async_read_some(asio::buffer(self->m_read_buffer),
+                    asio::bind_cancellation_slot(deadline->read_cancellation.slot(), asio::as_tuple(asio::use_awaitable)));
+            }
+            auto const [error, count] = completion;
             if (deadline->expired) { co_return std::unexpected{ Error::ReadTimeout }; }
             if (self->m_closed) { co_return std::unexpected{ Error::Canceled }; }
             if (auto failure = map_io_error(error, IoOperation::Read)) {

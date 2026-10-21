@@ -44,7 +44,10 @@ namespace mhttp::test {
         auto peer = co_await server_peer(executor, std::move(endpoint));
         auto const started = std::chrono::steady_clock::now();
         auto sender = spawn_transport(executor, trickle_server_peer(peer, "GET / HTTP/1.1\r\nHost: local\r\n\r\n"));
-        Check((co_await receive_server(peer)).empty(), "header timeout closes without an HTTP response");
+        auto wire = co_await receive_server(peer);
+        Check(wire.starts_with("HTTP/1.1 408 Request Timeout\r\n"), "incomplete request head receives 408");
+        Check(wire.contains("Connection: close\r\n") && wire.ends_with("408 Request Timeout\n"),
+            "default timeout error format is framed before connection closure");
         auto const elapsed = std::chrono::steady_clock::now() - started;
         Check(elapsed >= 750ms && elapsed < 2s, "one-second deadline covers the whole head despite arriving bytes");
         peer->close();
@@ -53,7 +56,7 @@ namespace mhttp::test {
     }
 
     /**
-     * @brief Observe a real read timeout and verify no handler or access callback runs for the incomplete request.
+     * @brief Observe a real read timeout, one final error response, and no request handler execution.
      */
     auto server_slow_header() -> void {
         Runtime runtime;
@@ -72,7 +75,7 @@ namespace mhttp::test {
         TransportRuntime peers;
         peers.Run(server_slow_header_scenario(peers.Executor(), *server.LocalEndpoint()));
         Check(server.Stop().has_value(), "drain timed-out header session and logger");
-        Check(calls == 0 && accesses == 0 && timeouts == 1, "one timeout, no request dispatch, and no completed response");
+        Check(calls == 0 && accesses == 1 && timeouts == 1, "one timeout, no request dispatch, and one completed 408 response");
     }
 
     /**

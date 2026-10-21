@@ -440,6 +440,33 @@ namespace mhttp::test {
         auto expired = co_await make_loopback(executor);
         auto immediate = co_await expired->connection->ReadSome(0ms);
         Check(!immediate && immediate.error() == Error::ReadTimeout, "nonpositive read deadline expires immediately");
+        for (auto timeout : { 0ms, 25ms }) {
+            auto preserved = co_await make_loopback(executor);
+            auto result = co_await preserved->connection->ReadSome(timeout, false);
+            Check(!result && result.error() == Error::ReadTimeout, "response-producing read reports immediate and elapsed timeouts");
+            Check((co_await preserved->connection->WriteAll("408", 1s)).has_value(), "read-only cancellation permits a final write");
+            std::array<char, 3> bytes{};
+            co_await asio::async_read(preserved->peer, asio::buffer(bytes), asio::use_awaitable);
+            CheckEq(std::string_view{ bytes.data(), bytes.size() }, "408", "peer receives final bytes after read timeout");
+            preserved->connection->Close();
+        }
+        auto canceled_pair = co_await make_loopback(executor);
+        asio::cancellation_signal cancel;
+        auto waited = std::make_shared<TransportResult<Result<std::string>>>(executor);
+        asio::co_spawn(executor, canceled_pair->connection->ReadSome(5s, false), asio::bind_cancellation_slot(cancel.slot(),
+            [waited](std::exception_ptr failure, Result<std::string> result) {
+                waited->failure = failure;
+                if (!failure) { waited->value.emplace(std::move(result)); }
+                static_cast<void>(waited->done.try_send(asio::error_code{}));
+            }));
+        asio::steady_timer ready{ executor };
+        ready.expires_after(10ms);
+        co_await ready.async_wait(asio::use_awaitable);
+        cancel.emit(asio::cancellation_type::all);
+        auto canceled = co_await waited->Wait();
+        Check(!canceled && canceled.error() == Error::Canceled, "parent cancellation reaches a read with its own timeout signal");
+        CheckEq((co_await canceled_pair->connection->WriteAll("no", 1s)).error(), Error::ConnectionClosed,
+            "external cancellation still closes a response-producing read");
     }
 
     /**

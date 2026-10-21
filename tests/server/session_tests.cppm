@@ -156,11 +156,13 @@ namespace mhttp::test {
     auto session_errors_scenario(asio::any_io_executor executor) -> asio::awaitable<void> {
         struct Case { std::string wire; Status status; bool half_close{}; };
         std::vector<Case> const cases{
+            { "BREW / HTTP/1.1\r\nHost: local\r\n\r\n", Status::NotImplemented },
             { "GET / HTTP/1.2\r\nHost: local\r\n\r\n", Status::HttpVersionNotSupported },
             { "GET /xxxxxxxxxxxxxxxxxxxxxxxxx HTTP/1.1\r\nHost: local\r\n\r\n", Status::UriTooLong },
             { "GET / HTTP/1.1\r\nHost: local\r\nX-Big: " + std::string(150, 'x') + "\r\n\r\n",
                 Status::RequestHeaderFieldsTooLarge },
             { "POST / HTTP/1.1\r\nHost: local\r\nContent-Length: 4\r\n\r\n", Status::ContentTooLarge },
+            { "POST / HTTP/1.1\r\nHost: local\r\nExpect: magic\r\nContent-Length: 1\r\n\r\n", Status::ExpectationFailed },
             { "POST / HTTP/1.1\r\nHost: local\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nabcd\r\n0\r\n\r\n",
                 Status::ContentTooLarge },
             { "POST / HTTP/1.1\r\nHost: local\r\nContent-Length: 3\r\n\r\na", Status::BadRequest, true },
@@ -180,6 +182,9 @@ namespace mhttp::test {
             std::size_t offset{};
             auto response = parse_session_reply(wire, offset);
             CheckEq(response.head.status, test.status, "parser status reaches peer");
+            CheckEq(response.body, std::format("{} {}\n", static_cast<unsigned>(test.status), ReasonPhrase(test.status)),
+                "all protocol errors share the safe default code/reason format");
+            CheckEq(response.head.headers.Get("Content-Type"), "text/plain; charset=utf-8", "default error media type is consistent");
             CheckEq(response.head.headers.Get("Connection"), "close", "fatal parse errors close");
             CheckEq(result.responses, std::size_t{ 1 }, "one final parser error response");
             CheckEq(calls, 0, "handler never observes malformed input");
@@ -295,8 +300,17 @@ namespace mhttp::test {
     auto session_deadlines_scenario(asio::any_io_executor executor) -> asio::awaitable<void> {
         for (bool body_phase : { false, true }) {
             server::Router router;
+            unsigned errors{}, posts{};
             Check(router.Post("/", [](auto&, auto&) { Check(false, "timed-out input cannot dispatch"); }).has_value(),
                 "register timeout sentinel");
+            Check(router.SetErrorHandler([&errors](auto& request, auto& response) -> Task<void> {
+                ++errors;
+                CheckEq(response.Status(), Status::RequestTimeout, "timeout enters the ordinary error transformer");
+                Check(request.Body().empty(), "partial body is never exposed to response hooks");
+                co_await Sleep(1ms);
+                Check(response.SetContent("request timed out", "text/plain").has_value(), "rewrite timeout format asynchronously");
+            }).has_value(), "customize both timeout phases");
+            Check(router.SetPostRoutingHandler([&posts](auto&, auto&) { ++posts; }).has_value(), "observe final timeout response once");
             auto pair = co_await make_loopback(executor);
             server::ServerOptions options;
             options.read_timeout = 100ms;
@@ -308,11 +322,18 @@ namespace mhttp::test {
             if (body_phase) { co_await asio::async_write(pair->peer, asio::buffer(head), asio::use_awaitable); }
             auto sender = spawn_transport(executor, trickle_session_input(pair,
                 body_phase ? std::string(50, 'x') : head));
-            Check((co_await receive_peer(pair)).empty(), "read timeout closes without partial output");
+            auto wire = co_await receive_peer(pair);
+            std::size_t offset{};
+            auto reply = parse_session_reply(wire, offset);
+            CheckEq(reply.head.status, Status::RequestTimeout, "timed-out request returns 408");
+            CheckEq(reply.body, "request timed out", "custom error format reaches the peer after timeout");
+            CheckEq(reply.head.headers.Get("Connection"), "close", "timeout response always closes");
+            CheckEq(offset, wire.size(), "timeout writes exactly one framed response");
             auto result = co_await complete->Wait();
             auto const elapsed = std::chrono::steady_clock::now() - started;
             Check(elapsed >= 70ms && elapsed < 600ms, "phase deadline is not renewed by individual bytes");
             CheckEq(result.error, std::optional{ Error::ReadTimeout }, "whole phase reports read timeout");
+            Check(result.responses == 1 && errors == 1 && posts == 1, "timeout finalizes one error and one post hook");
             pair->peer.close();
             static_cast<void>(co_await sender->Wait());
             Check(detail::RouterAccess::Thaw(router).has_value(), "timeout drains route configuration");
