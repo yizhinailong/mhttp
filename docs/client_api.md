@@ -258,3 +258,51 @@ auto response = co_await client.Send(std::move(request));
 `python tools/check_client.py provider` 校验请求头失败前不调用来源、单次透明重试预算，
 慢接收端的传输背压、不发送 100 的对端触发有界回退，以及正文首块后真实 reset 时停止来源并清理协程。
 启用自动 Expect 时，未知长度来源始终进行协商；声明长度零不会自动协商，也不允许显式 Expect。
+
+## 客户端连接池
+
+`client::ClientPool` 按 HTTP scheme、主机和端口复用单次发送客户端，构造和 Acquire 均不建立连接。
+主机大小写、默认端口及等价数字 IPv6 地址统一归一化，URL 路径、查询和 fragment 不参与身份。
+Acquire 返回的客户端默认目标始终为 `/`；请求路径通过 Get/Send 指定。
+
+```cpp
+mhttp::client::ClientPool pool{ runtime, { .max_per_origin = 4, .max_total = 32 } };
+auto borrowed = co_await pool.Acquire("http://127.0.0.1:8080/", std::chrono::seconds{ 1 });
+if (borrowed) {
+    auto response = co_await (*borrowed)->Get("/items");
+    borrowed->Release();
+}
+```
+
+ClientHandle 只能移动，默认和移动后的源句柄为空；Get、`->`、`*` 借用客户端，使用时须保持句柄有效。
+Release 可重复调用，析构自动归还。每个已签发的 Send、快捷方法和 IsAlive Task 独立持有名额，
+包括尚未开始的 Task 及正在等待的流式回调；最后一个句柄或 Task 退出后才允许下一位借用者使用。
+不得保存已归还句柄的客户端指针。归还保留该客户端的默认 Headers 和认证设置。
+
+ClientPoolOptions 的 max_per_origin（默认 16）与 max_total（默认 100）均包含活跃和空闲名额，
+max_waiters（默认 1024）限制等待队列，三个容量均须为正。
+Acquire 的默认容量等待为三秒；非正等待值仅尝试一次，无名额返回 AcquireTimeout。
+队列已满返回 Busy，超长时间返回 InvalidRequest。相同目标按等待顺序分配，不同目标可独立推进。
+每个客户端仍是 single-flight；同一个句柄上并发发送返回 Busy，多个句柄可并行通信。
+
+idle_timeout 默认六十秒，零禁用空闲回收；正值 idle_check_interval 独立控制检查间隔，默认六十秒。
+只有周期检查才回收达到空闲期限的客户端，并唤醒因此获得全局容量的其他目标。
+其他目标占用的空闲名额在回收前也计入全局上限。
+validate_on_borrow 开启时异步探测已建立的借出连接；关闭或异常的连接被丢弃，后续发送重新连接。
+它使用 IsAlive 的短探测，不能保证对端在探测后仍保持连接；容量等待期限不包含这次探测。
+client_options 是新客户端的配置快照。
+
+Stats() 返回一致的 active、idle、waiting 快照，Total() 为 active + idle。
+Stats(host, port) 和 Stats(url) 返回 Result，目标归一化与 Acquire 相同；不存在的目标返回零。
+Acquire 的输入在签发时复制，Task 可跨越公开池对象的析构安全收尾；移动池保留现有名额和 Task。
+移动赋值先停止目标原有的池；移动后的源对象视为已停止。
+
+Stop 幂等、非阻塞且永久生效：清除空闲客户端、取消借出的客户端和所有排队获取。
+已借出句柄及其 Task 仍拥有自己的名额直到退出，之后 active 降为零；停止后句柄也不能重新发送。
+Runtime 停止使已附着的池永久停止，重启 Runtime 后需新建池。
+Runtime 必须活过池、句柄和全部 Task。获取、归还、统计和 Stop 可跨线程调用；同一句柄的访问与
+Release、池的移动与析构由调用方同步。
+
+`tests/client/pool_test.cpp` 覆盖容量、等待上限、FIFO、公平调度、归一化、空闲检查、移动、并发借还
+及 Runtime 停止；`tests/integration/client_pool_test.cpp` 使用动态回环端口验证 TCP 复用、对端关闭、
+流式回调持有名额、停止清理和调用方取消等待。
