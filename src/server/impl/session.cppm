@@ -262,12 +262,13 @@ namespace mhttp::impl {
                 bool const safe_method = request.Method() == Method::Get || request.Method() == Method::Head
                     || request.Method() == Method::Options || request.Method() == Method::Trace;
                 bool const unmatched_unsafe = !route.handled && !route.handler && !safe_method;
-                bool const skip_body = route.handled || unmatched_unsafe;
-                // Until interim response support is enabled, reject Expect before waiting for its body.
-                if (parser.Framing().expect_continue && !route.handled) {
-                    route.handled = true;
-                    static_cast<void>(response.SetError(Status::ExpectationFailed));
-                } else if (!skip_body) {
+                bool const rejected_expectation = parser.Framing().expect_continue && (route.handled || !route.handler);
+                bool const skip_body = route.handled || unmatched_unsafe || rejected_expectation;
+                if (parser.Framing().expect_continue && !skip_body && !body_complete) {
+                    auto interim = co_await m_connection->WriteAll("HTTP/1.1 100 Continue\r\n\r\n", m_options.write_timeout);
+                    if (!interim) { result.error = interim.error(); co_return; }
+                }
+                if (!skip_body) {
                     std::string body;
                     auto const deadline = Clock::now() + m_options.read_timeout;
                     for (;;) {
@@ -294,7 +295,7 @@ namespace mhttp::impl {
                     }
                 }
                 if (!co_await writeFinal(request, response, route, body_complete,
-                    unmatched_unsafe || !body_complete || parser.Framing().expect_continue, result)) { co_return; }
+                    unmatched_unsafe || !body_complete || rejected_expectation, result)) { co_return; }
                 parser.Reset();
             }
         }

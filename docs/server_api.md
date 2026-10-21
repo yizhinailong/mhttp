@@ -188,7 +188,11 @@ Error::Canceled 保持为取消控制流，不转成 500，也不会继续调用
 会话停止可从其他线程请求：在连接 strand 上取消用户 Task 并关闭套接字，
 等待所有嵌套 Task 完成清理后报告最终状态。Run 在初始挂起前持有会话，且只允许执行一次。
 私有测试通过 `python tools/check_session.py` 在临时项目中运行，不向正式消费者导出 Asio 或会话实现。
-监听器与公共 HttpServer 生命周期尚待接入；Expect 临时响应仍待实现。
+HTTP/1.1 的 `Expect: 100-continue` 在 pre-routing 与匹配通过、声明长度未超限且存在 body 时，
+先发送无 body 的 100，再读取完整 body。临时响应不调用响应钩子、不计入最大请求数。
+未匹配或被 pre-routing 提前处理时直接发送最终响应并关闭，不等待读取 body；
+不支持的期望值由解析器返回 417，超限返回 413。HTTP/1.0 忽略 Expect。
+监听器与公共 HttpServer 生命周期尚待接入。
 
 对应独立测试为 `tests/server/request_test.cpp`、`response_test.cpp`、
 `request_data_test.cpp`、`handler_test.cpp`、`middleware_test.cpp`、`router_test.cpp`、

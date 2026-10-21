@@ -363,6 +363,96 @@ namespace mhttp::test {
     }
 
     /**
+     * @brief Wait for 100 before transmitting the body, then reuse the connection for a successor.
+     * @param executor Fixture strand.
+     */
+    auto session_continue_scenario(asio::any_io_executor executor) -> asio::awaitable<void> {
+        server::Router router;
+        int handlers{}, posts{};
+        Check(router.Post("/", [&](auto& request, auto& response) {
+            ++handlers;
+            CheckEq(request.Body(), "body", "Expect body is complete before dispatch");
+            Check(response.SetContent("accepted", "text/plain").has_value(), "accepted upload");
+        }).has_value(), "register Expect route");
+        Check(router.SetPostRoutingHandler([&](auto&, auto&) { ++posts; }).has_value(), "register Expect post hook");
+        auto pair = co_await make_loopback(executor, { 5, 16 * 1024 * 1024 });
+        Check(detail::RouterAccess::Freeze(router).has_value(), "freeze Expect configuration");
+        server::ServerOptions options;
+        options.keep_alive_max_requests = 2;
+        auto session = *impl::Session::Create(pair->connection, router, options);
+        auto complete = spawn_transport(executor, session->Run());
+        std::string const head = "POST / HTTP/1.1\r\nHost: local\r\nContent-Length: 4\r\nExpect: 100-CoNtInUe\r\n\r\n";
+        co_await asio::async_write(pair->peer, asio::buffer(head), asio::use_awaitable);
+        std::string interim(25, '\0');
+        co_await asio::async_read(pair->peer, asio::buffer(interim), asio::use_awaitable);
+        CheckEq(interim, "HTTP/1.1 100 Continue\r\n\r\n", "100 arrives before any body is sent");
+        std::string const body_and_next = "bodyPOST / HTTP/1.1\r\nHost: local\r\nContent-Length: 4\r\n\r\nbody";
+        co_await asio::async_write(pair->peer, asio::buffer(body_and_next), asio::use_awaitable);
+        auto wire = co_await receive_peer(pair);
+        auto result = co_await complete->Wait();
+        std::size_t offset{};
+        CheckEq(parse_session_reply(wire, offset).body, "accepted", "first final response after 100");
+        CheckEq(parse_session_reply(wire, offset).body, "accepted", "connection reusable after accepted Expect");
+        CheckEq(result.responses, std::size_t{ 2 }, "100 excluded from final response count and request limit");
+        CheckEq(handlers, 2, "both complete uploads dispatched");
+        CheckEq(posts, 2, "post runs only for final responses");
+        Check(detail::RouterAccess::Thaw(router).has_value(), "Expect route drains");
+    }
+
+    /**
+     * @brief Verify early final responses never wait for an Expect body or emit an interim response.
+     * @param executor Fixture strand.
+     */
+    auto session_expect_rejection_scenario(asio::any_io_executor executor) -> asio::awaitable<void> {
+        struct Case { std::string wire; Status status; };
+        std::vector<Case> const cases{
+            { "POST /absent HTTP/1.1\r\nHost: local\r\nExpect: 100-continue\r\nContent-Length: 3\r\n\r\n",
+                Status::NotFound },
+            { "GET /absent HTTP/1.1\r\nHost: local\r\nExpect: 100-continue\r\nContent-Length: 3\r\n\r\n",
+                Status::NotFound },
+            { "PUT / HTTP/1.1\r\nHost: local\r\nExpect: 100-continue\r\nContent-Length: 3\r\n\r\n",
+                Status::MethodNotAllowed },
+            { "POST / HTTP/1.1\r\nHost: local\r\nExpect: magic\r\nContent-Length: 3\r\n\r\n",
+                Status::ExpectationFailed },
+            { "POST / HTTP/1.1\r\nHost: local\r\nExpect: 100-continue\r\nContent-Length: 9\r\n\r\n",
+                Status::ContentTooLarge },
+        };
+        for (auto const& test : cases) {
+            server::Router router;
+            Check(router.Post("/", [](auto&, auto&) { Check(false, "rejected Expect cannot dispatch"); }).has_value(),
+                "register rejected Expect sentinel");
+            server::ServerOptions options;
+            options.body_bytes = 3;
+            auto [wire, result] = co_await session_exchange(executor, router, test.wire, options);
+            Check(!wire.contains("100 Continue"), "early final response contains no 100");
+            std::size_t offset{};
+            auto reply = parse_session_reply(wire, offset);
+            CheckEq(reply.head.status, test.status, "Expect rejection status");
+            CheckEq(reply.head.headers.Get("Connection"), "close", "early Expect final closes connection");
+            CheckEq(result.responses, std::size_t{ 1 }, "one final Expect rejection");
+        }
+        server::Router router;
+        Check(router.Post("/", [](auto& request, auto& response) {
+            CheckEq(request.Body(), "abc", "HTTP/1.0 reads body without an interim response");
+            Check(response.SetContent("ignored", "text/plain").has_value(), "HTTP/1.0 response");
+        }).has_value(), "register HTTP/1.0 upload");
+        auto ignored = co_await session_exchange(executor, router,
+            "POST / HTTP/1.0\r\nExpect: magic\r\nContent-Length: 3\r\n\r\nabc");
+        Check(!ignored.first.contains("100 Continue"), "HTTP/1.0 ignores Expect");
+        std::size_t offset{};
+        CheckEq(parse_session_reply(ignored.first, offset).head.status, Status::Ok, "HTTP/1.0 upload succeeds");
+        Check(router.SetPreRoutingHandler([](auto&, auto& response) {
+            Check(response.SetError(Status::Forbidden).has_value(), "reject expected upload before routing");
+            return true;
+        }).has_value(), "register Expect interception");
+        auto intercepted = co_await session_exchange(executor, router,
+            "POST / HTTP/1.1\r\nHost: local\r\nExpect: 100-continue\r\nContent-Length: 3\r\n\r\n");
+        Check(!intercepted.first.contains("100 Continue"), "pre-routing interception emits no 100");
+        offset = 0;
+        CheckEq(parse_session_reply(intercepted.first, offset).head.status, Status::Forbidden, "pre-routing Expect rejection");
+    }
+
+    /**
      * @brief Cancel an awaited user Task from another thread and drain its request/route owners.
      * @param executor Fixture strand.
      * @param session Published before signaling entered to the canceling thread.
@@ -435,6 +525,8 @@ export namespace mhttp::test {
             { "session persistence", [] { run_session_scenario(session_persistence_scenario); } },
             { "session phase deadlines", [] { run_session_scenario(session_deadlines_scenario); } },
             { "session ownership", [] { run_session_scenario(session_ownership_scenario); } },
+            { "session 100 continue", [] { run_session_scenario(session_continue_scenario); } },
+            { "session Expect rejection", [] { run_session_scenario(session_expect_rejection_scenario); } },
             { "session cancellation", session_cancellation },
         });
     }
