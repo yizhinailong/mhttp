@@ -156,6 +156,53 @@ auto server_blocking_listen() -> void {
 }
 
 /**
+ * @brief Reenter server configuration when a retired callback releases its unique capture.
+ */
+struct AccessRetirement {
+    mhttp::server::HttpServer& server; ///< Borrowed server, alive through explicit callback replacement.
+
+    /**
+     * @brief Borrow an idle server for the retirement check.
+     * @param owner Server whose access callback will be retired.
+     */
+    explicit AccessRetirement(mhttp::server::HttpServer& owner) : server{ owner } {}
+
+    /**
+     * @brief Confirm callback destruction takes place outside the API mutex.
+     */
+    ~AccessRetirement() {
+        Check(server.SetAccessLogger({}).has_value(), "retired callback may reenter configuration without deadlock");
+    }
+};
+
+/**
+ * @brief Verify access observer ownership, startup guards, clearing, and destruction outside the API mutex.
+ */
+auto server_access_logger_configuration() -> void {
+    mhttp::Runtime runtime;
+    mhttp::server::HttpServer server{ runtime };
+    auto owned = std::make_shared<int>(7);
+    std::weak_ptr<int> lifetime = owned;
+    Check(server.SetAccessLogger([value = std::move(owned)](auto const&, auto const&, auto) {
+        CheckEq(*value, 7, "owned access callback capture");
+    }).has_value(), "configure access logger before binding");
+    Check(!lifetime.expired(), "server retains access callback ownership");
+    Check(runtime.Start(4).has_value(), "start access configuration runtime");
+    Check(server.BindToAnyPort("127.0.0.1").has_value(), "bind access configuration listener");
+    Check(server.Start().has_value(), "start access configuration listener");
+    CheckEq(server.SetAccessLogger({}).error(), mhttp::Error::AlreadyRunning, "access configuration freezes at Start");
+    Check(server.Stop().has_value(), "drain access configuration listener");
+    Check(server.SetAccessLogger({}).has_value(), "clear access callback after stop");
+    Check(lifetime.expired(), "clearing after drain releases callback captures");
+    auto reentrant = std::make_unique<AccessRetirement>(server);
+    Check(server.SetAccessLogger([owner = std::move(reentrant)](auto const&, auto const&, auto) {}).has_value(),
+        "configure reentrant callback ownership");
+    Check(server.SetAccessLogger({}).has_value(), "retire callback outside configuration lock");
+    Check(server.SetAccessLogger([owner = std::make_unique<int>(7)](auto const&, auto const&, auto) {}).has_value(),
+        "move-only captures are accepted without sharing the callback object itself");
+}
+
+/**
  * @brief Run public server lifecycle scenarios with bounded per-case watchdogs.
  * @param argc Argument count.
  * @param argv Optional case filters.
@@ -169,5 +216,6 @@ auto main(int argc, char* argv[]) -> int {
         { "server asynchronous and runtime Stop", server_async_and_runtime_stop },
         { "server configuration and destruction", server_configuration_and_destruction },
         { "server blocking Listen", server_blocking_listen },
+        { "server access logger configuration", server_access_logger_configuration },
     });
 }

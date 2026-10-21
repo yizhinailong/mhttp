@@ -9,6 +9,7 @@ import :server.impl.server;
 export import :core.runtime;
 export import :server.router;
 export import :server.options;
+export import :server.logging;
 
 export namespace mhttp::server {
 
@@ -44,6 +45,18 @@ export namespace mhttp::server {
         ~HttpServer() override {
             if (Runtime::IsIoThread()) { std::terminate(); }
             static_cast<void>(m_impl->Stop());
+        }
+
+        /**
+         * @brief Replace the synchronous access observer before startup; an empty callback disables it.
+         * @param logger Owned callback, including move-only captures, invoked after each complete final write.
+         * @return Success or AlreadyRunning until stop drains all sessions and observers.
+         * @note References borrow request/response state only during the callback. Calls across sessions
+         *       can overlap; avoid blocking I/O execution and synchronize shared application state.
+         *       Exceptions are contained and do not alter responses or connection persistence.
+         */
+        [[nodiscard]] auto SetAccessLogger(AccessLogger logger) -> Result<void> {
+            return m_impl->SetAccessLogger(std::move(logger));
         }
 
         /**

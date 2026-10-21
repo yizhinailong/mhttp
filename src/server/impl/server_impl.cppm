@@ -35,6 +35,7 @@ namespace mhttp::impl {
             std::vector<std::shared_ptr<asio::steady_timer>> waiters; ///< AsyncStop drain notifications.
             std::unique_ptr<std::stop_callback<std::function<void()>>> runtime_stop; ///< Owned cancellation link.
             std::stop_token token; ///< Runtime generation cancellation for each accepted session.
+            ServerObservers observers; ///< Owned callback snapshot, immutable after submission.
             bool stop_runtime{}; ///< Immutable: Listen owns this inline runtime generation.
             std::size_t next_id{}; ///< Server-strand session identity.
             bool stopping{}; ///< Server-strand stop guard.
@@ -48,6 +49,7 @@ namespace mhttp::impl {
         std::shared_ptr<RuntimeImpl> m_runtime; ///< Context owner; public Runtime must still outlive the server.
         std::shared_ptr<RouterImpl> m_router; ///< Stable route identity retained independently of public wrappers.
         server::ServerOptions m_options; ///< Immutable configuration snapshot, validated at Bind.
+        ServerObservers m_observers; ///< Callback identities, replaced only while idle/bound under m_mutex.
         asio::any_io_executor m_executor; ///< Server strand, independent of every session strand.
         mutable std::mutex m_mutex; ///< API state and readiness/completion publication.
         std::condition_variable m_changed; ///< Non-I/O readiness and Stop waiters.
@@ -66,6 +68,22 @@ namespace mhttp::impl {
         ServerImpl(Runtime const& runtime, server::Router const& router, server::ServerOptions options) :
             m_runtime{ runtime.m_impl }, m_router{ router.m_impl }, m_options{ std::move(options) },
             m_executor{ asio::make_strand(m_runtime->Context()) } {}
+
+        /**
+         * @brief Replace the owned access callback before startup, retiring old state outside the API mutex.
+         * @param logger Owned synchronous callback; empty disables observation.
+         * @return Success, or AlreadyRunning until the active generation drains.
+         */
+        auto SetAccessLogger(server::AccessLogger logger) -> Result<void> {
+            auto incoming = logger ? std::make_shared<server::AccessLogger>(std::move(logger)) : nullptr;
+            std::shared_ptr<server::AccessLogger> retired;
+            std::lock_guard lock{ m_mutex };
+            if (m_state == State::Running || m_state == State::Stopping) {
+                return std::unexpected{ Error::AlreadyRunning };
+            }
+            retired = std::exchange(m_observers.access_logger, std::move(incoming));
+            return {};
+        }
 
         /**
          * @brief Bind/listen on a non-I/O caller before transferring the socket to the server strand.
@@ -119,6 +137,7 @@ namespace mhttp::impl {
             if (m_state != State::Bound) { return std::unexpected{ Error::NotRunning }; }
             auto generation = std::make_shared<Generation>();
             generation->acceptor = m_bound;
+            generation->observers = m_observers;
             generation->stop_runtime = stop_runtime;
             auto operation = [self = shared_from_this(), generation](std::stop_token token) {
                 asio::post(self->m_executor, [self, generation, token] {
@@ -331,15 +350,16 @@ namespace mhttp::impl {
                     continue;
                 }
                 auto session = Session::Create(*connection, self->m_router, self->m_options,
-                    self->m_runtime, generation->token);
+                    self->m_runtime, generation->token, generation->observers);
                 if (!session) { (*connection)->Close(); continue; }
                 auto const id = generation->next_id++;
                 generation->sessions.emplace(id, *session);
                 try {
                     asio::co_spawn(self->m_executor, (*session)->Run(),
-                        [self, generation, id, owner = *session](std::exception_ptr failure, SessionResult) {
+                        [self, generation, id, owner = *session](std::exception_ptr failure, SessionResult) mutable {
                             if (failure) { owner->Stop(); }
                             generation->sessions.erase(id);
+                            owner.reset();
                             self->finishGeneration(generation);
                         });
                 } catch (...) {
@@ -380,6 +400,7 @@ namespace mhttp::impl {
                 || generation->finished) { return; }
             generation->finished = true;
             generation->runtime_stop.reset();
+            generation->observers = {};
             static_cast<void>(m_router->Thaw());
             if (generation->stop_runtime) { m_runtime->Stop(); }
             {

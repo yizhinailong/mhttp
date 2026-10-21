@@ -12,6 +12,7 @@ import :core.impl.bridge;
 import :core.parser;
 import :server.router;
 import :server.response_policy;
+import :server.impl.observers;
 
 namespace mhttp::impl {
 
@@ -36,6 +37,7 @@ namespace mhttp::impl {
         std::shared_ptr<Connection> m_connection; ///< Socket, transfer bounds, and serialized executor.
         std::shared_ptr<RouterImpl> m_router; ///< Configuration retained independently of the public wrapper.
         server::ServerOptions m_options; ///< Owned validated configuration snapshot.
+        ServerObservers m_observers; ///< Owned immutable callback identities for this session.
         std::shared_ptr<RuntimeImpl> m_runtime; ///< Runtime supplying Offload workers, retained through all roots.
         std::stop_token m_runtime_stop; ///< Cancellation generation supplied by RuntimeImpl::Submit.
         std::stop_source m_stop_source; ///< Session cancellation for awaited user Tasks.
@@ -43,6 +45,7 @@ namespace mhttp::impl {
         Endpoint m_local; ///< Owned initialized local address and port.
         std::string m_input; ///< One owned read chunk, retaining any pipelined successor bytes.
         std::size_t m_offset{}; ///< Consumed prefix of m_input.
+        Clock::time_point m_request_started{}; ///< First nonempty feed time, reset before each request head.
         bool m_started{}; ///< Run is one-shot; accessed only on the connection strand.
         bool m_stopping{}; ///< Stop prevents further requests and response persistence.
 
@@ -55,6 +58,7 @@ namespace mhttp::impl {
          * @param runtime_stop Runtime generation whose stop cancels this session.
          * @param remote Owned peer metadata.
          * @param local Owned local metadata.
+         * @param observers Owned immutable logger snapshot.
          */
         Session(
             std::shared_ptr<Connection> connection,
@@ -63,9 +67,11 @@ namespace mhttp::impl {
             std::shared_ptr<RuntimeImpl> runtime,
             std::stop_token runtime_stop,
             Endpoint remote,
-            Endpoint local
+            Endpoint local,
+            ServerObservers observers
         ) : m_connection{ std::move(connection) }, m_router{ std::move(router) },
-            m_options{ std::move(options) }, m_runtime{ std::move(runtime) }, m_runtime_stop{ runtime_stop },
+            m_options{ std::move(options) }, m_observers{ std::move(observers) },
+            m_runtime{ std::move(runtime) }, m_runtime_stop{ runtime_stop },
             m_remote{ std::move(remote) }, m_local{ std::move(local) } {}
 
     public:
@@ -76,6 +82,7 @@ namespace mhttp::impl {
          * @param options Limits; the connection write bound must be at least max_response_bytes.
          * @param runtime Optional runtime retained for blocking-work dispatch.
          * @param runtime_stop Runtime generation cancellation, captured before session submission.
+         * @param observers Owned optional logging callbacks.
          * @return Owned session, InvalidRequest for invalid options, or Connection for endpoint failure.
          */
         static auto Create(
@@ -83,9 +90,11 @@ namespace mhttp::impl {
             server::Router const& router,
             server::ServerOptions options = {},
             std::shared_ptr<RuntimeImpl> runtime = {},
-            std::stop_token runtime_stop = {}
+            std::stop_token runtime_stop = {},
+            ServerObservers observers = {}
         ) -> Result<std::shared_ptr<Session>> {
-            return Create(std::move(connection), router.m_impl, std::move(options), std::move(runtime), runtime_stop);
+            return Create(std::move(connection), router.m_impl, std::move(options), std::move(runtime),
+                runtime_stop, std::move(observers));
         }
 
         /**
@@ -95,6 +104,7 @@ namespace mhttp::impl {
          * @param options Owned validated configuration snapshot.
          * @param runtime Optional owned runtime for Offload.
          * @param runtime_stop Runtime generation cancellation.
+         * @param observers Owned immutable logging snapshot.
          * @return Owned session or a configuration/endpoint failure.
          */
         static auto Create(
@@ -102,7 +112,8 @@ namespace mhttp::impl {
             std::shared_ptr<RouterImpl> router,
             server::ServerOptions options,
             std::shared_ptr<RuntimeImpl> runtime,
-            std::stop_token runtime_stop
+            std::stop_token runtime_stop,
+            ServerObservers observers = {}
         ) -> Result<std::shared_ptr<Session>> {
             if (!connection || !router || !detail::validate_server_options(options)
                 || connection->MaxWriteSize() < options.max_response_bytes) {
@@ -116,7 +127,8 @@ namespace mhttp::impl {
             if (error) { return std::unexpected{ Error::Connection }; }
             return std::shared_ptr<Session>{ new Session{ std::move(connection), std::move(router),
                 std::move(options), std::move(runtime), runtime_stop,
-                { remote.address().to_string(), remote.port() }, { local.address().to_string(), local.port() } } };
+                { remote.address().to_string(), remote.port() }, { local.address().to_string(), local.port() },
+                std::move(observers) } };
         }
 
         /**
@@ -178,6 +190,7 @@ namespace mhttp::impl {
         ) -> asio::awaitable<Result<detail::ParseStep>> {
             for (;;) {
                 auto input = std::span<char const>{ m_input.data(), m_input.size() }.subspan(m_offset);
+                if (!saw_input && !input.empty()) { m_request_started = Clock::now(); }
                 saw_input = saw_input || !input.empty();
                 auto step = parser.Feed(input);
                 m_offset += step.consumed;
@@ -226,6 +239,7 @@ namespace mhttp::impl {
             auto written = co_await m_connection->WriteAll(std::move(wire->bytes), m_options.write_timeout);
             if (!written) { result.error = written.error(); co_return false; }
             ++result.responses;
+            m_observers.Access(request, response, Clock::now() - m_request_started);
             if (!keep_alive) { static_cast<void>(co_await m_connection->Shutdown()); }
             co_return keep_alive;
         }
@@ -257,6 +271,7 @@ namespace mhttp::impl {
         auto loop(SessionResult& result) -> asio::awaitable<void> {
             detail::RequestParser parser{ detail::server_parser_limits(m_options) };
             while (!m_stopping) {
+                m_request_started = {};
                 bool saw_input{};
                 auto const timeout = result.responses == 0 ? m_options.read_timeout : m_options.keep_alive_timeout;
                 auto event = co_await readEvent(parser, Clock::now() + timeout, saw_input);

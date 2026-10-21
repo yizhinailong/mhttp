@@ -585,6 +585,141 @@ namespace mhttp::test {
         }
     }
 
+    /**
+     * @brief Retain only owned access-log metadata after request and response references expire.
+     */
+    struct AccessEntry {
+        std::string method; ///< Owned method token.
+        std::string path; ///< Owned application path, sanitized for invalid heads.
+        Status status; ///< Final application status, including serialization fallback.
+        std::string body; ///< Final representation, including HEAD's suppressed body.
+        std::chrono::steady_clock::duration elapsed; ///< Complete request duration excluding idle wait.
+    };
+
+    /**
+     * @brief Exercise access records for normal, HEAD, interim, error, fallback, and rejected responses.
+     * @param executor Independent fixture strand.
+     * @param endpoint Owned loopback endpoint.
+     */
+    auto server_access_scenario(
+        asio::any_io_executor executor,
+        Endpoint endpoint
+    ) -> asio::awaitable<void> {
+        auto peer = co_await server_peer(executor, endpoint);
+        std::string const first = "GET /time HTTP/1.1\r\nHost: local\r\n\r\n";
+        co_await asio::async_write(*peer, asio::buffer(first), asio::use_awaitable);
+        static_cast<void>(co_await receive_one_server(peer));
+        asio::steady_timer idle{ executor, 250ms };
+        co_await idle.async_wait(asio::use_awaitable);
+        std::string const second = "GET /time HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n";
+        co_await asio::async_write(*peer, asio::buffer(second), asio::use_awaitable);
+        static_cast<void>(co_await receive_server(std::move(peer)));
+        for (auto input : {
+            "HEAD /time HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n",
+            "POST /echo HTTP/1.1\r\nHost: local\r\nExpect: 100-continue\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc",
+            "GET /missing HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n",
+            "GET /fail HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n",
+            "GET /large HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n",
+            "GET /post-fail HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n",
+            "GET / HTTP/1.2\r\nHost: local\r\n\r\n",
+        }) { static_cast<void>(co_await server_exchange(executor, endpoint, input)); }
+    }
+
+    /**
+     * @brief Verify access callback ownership, finalized data, one-call semantics, and duration boundaries.
+     */
+    auto server_access_observation() -> void {
+        Runtime runtime;
+        Check(runtime.Start(4).has_value(), "start access observer runtime");
+        server::HttpServer server{ runtime, { .max_response_bytes = 512 } };
+        Check(server.Get("/time", [](auto&, auto& response) -> Task<void> {
+            co_await Sleep(5ms);
+            Check(response.SetContent("timed", "text/plain").has_value(), "timed response");
+        }).has_value(), "register timed route");
+        Check(server.Post("/echo", [](auto& request, auto& response) {
+            Check(response.SetContent(request.Body(), "text/plain").has_value(), "logged Expect response");
+        }).has_value(), "register logged upload");
+        Check(server.Get("/fail", [](auto&, auto&) { throw 42; }).has_value(), "register logged exception");
+        Check(server.Get("/large", [](auto&, auto& response) {
+            Check(response.SetContent(std::string(2048, 'x'), "text/plain").has_value(), "oversized application response");
+        }).has_value(), "register fallback response");
+        Check(server.SetPostRoutingHandler([](auto& request, auto& response) {
+            if (request.Path() == "/post-fail") { throw 42; }
+            Check(response.Headers().Set("X-Post", "complete").has_value(), "mark finalized response");
+        }).has_value(), "register observer post sentinel");
+        std::mutex mutex;
+        std::vector<AccessEntry> entries;
+        Check(server.SetAccessLogger([owner = std::make_unique<int>(7), &server, &mutex, &entries](
+            auto const& request, auto const& response, auto elapsed) {
+            Check(Runtime::IsIoThread(), "access callback executes on session I/O execution");
+            CheckEq(*owner, 7, "move-only access capture survives every request");
+            CheckEq(server.SetAccessLogger({}).error(), Error::AlreadyRunning, "active observer cannot replace itself");
+            Check(request.RemoteEndpoint().port != 0 && request.LocalEndpoint().port != 0, "observer sees owned endpoints");
+            if (request.Path() != "/large") { CheckEq(response.Header("X-Post"), "complete", "post runs before access observation"); }
+            std::lock_guard lock{ mutex };
+            entries.push_back({ std::string{ request.MethodString() }, std::string{ request.Path() },
+                response.Status(), response.Body(), elapsed });
+        }).has_value(), "configure owned access observer");
+        Check(server.BindToAnyPort("127.0.0.1").has_value(), "bind observed listener");
+        Check(server.Start().has_value(), "start observed listener");
+        TransportRuntime peers;
+        peers.Run(server_access_scenario(peers.Executor(), *server.LocalEndpoint()));
+        Check(server.Stop().has_value(), "drain all access callbacks before inspection");
+        CheckEq(entries.size(), std::size_t{ 8 }, "one access per final response, none for 100 or failed post");
+        std::size_t timed{};
+        for (auto const& entry : entries) {
+            if (entry.path == "/time") {
+                ++timed;
+                Check(entry.elapsed >= 3ms && entry.elapsed < 200ms, "access duration includes handler and excludes 250ms idle wait");
+                CheckEq(entry.body, "timed", "HEAD observer sees representation even though no payload is sent");
+            } else if (entry.path == "/echo") { CheckEq(entry.body, "abc", "Expect logs only the final representation"); }
+            else if (entry.path == "/missing") { CheckEq(entry.status, Status::NotFound, "404 access status"); }
+            else if (entry.path == "/fail" || entry.path == "/large") {
+                CheckEq(entry.status, Status::InternalServerError, "exception or output-bound fallback logs actual final status");
+            } else if (entry.path == "/") { CheckEq(entry.status, Status::HttpVersionNotSupported, "fatal head logs sanitized request"); }
+        }
+        CheckEq(timed, std::size_t{ 3 }, "both keep-alive GETs and HEAD are logged");
+    }
+
+    /**
+     * @brief Verify a throwing observer cannot prevent a successor on the same persistent connection.
+     * @param executor Fixture strand.
+     * @param endpoint Owned dynamic endpoint.
+     */
+    auto server_throwing_access_scenario(
+        asio::any_io_executor executor,
+        Endpoint endpoint
+    ) -> asio::awaitable<void> {
+        auto wire = co_await server_exchange(executor, std::move(endpoint),
+            "GET / HTTP/1.1\r\nHost: local\r\n\r\nGET / HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n");
+        std::size_t offset{};
+        CheckEq(parse_session_reply(wire, offset).body, "observed", "throwing observer leaves first response intact");
+        CheckEq(parse_session_reply(wire, offset).body, "observed", "throwing observer preserves persistence");
+        CheckEq(offset, wire.size(), "no HTTP error response caused by observer failure");
+    }
+
+    /**
+     * @brief Isolate access logger exceptions and preserve listener behavior.
+     */
+    auto server_access_exception_isolation() -> void {
+        Runtime runtime;
+        Check(runtime.Start(4).has_value(), "start throwing observer runtime");
+        server::HttpServer server{ runtime };
+        std::atomic<int> calls{};
+        Check(server.Get("/", [](auto&, auto& response) {
+            Check(response.SetContent("observed", "text/plain").has_value(), "observed response");
+        }).has_value(), "register observed route");
+        Check(server.SetAccessLogger([&](auto const&, auto const&, auto) { ++calls; throw 42; }).has_value(),
+            "configure throwing observer");
+        Check(server.BindToAnyPort("127.0.0.1").has_value(), "bind throwing observer listener");
+        Check(server.Start().has_value(), "start throwing observer listener");
+        TransportRuntime peers;
+        peers.Run(server_throwing_access_scenario(peers.Executor(), *server.LocalEndpoint()));
+        Check(server.IsRunning(), "observer exception does not stop listener");
+        Check(server.Stop().has_value(), "drain throwing observers");
+        CheckEq(calls.load(), 2, "throwing access observer runs once per complete final response");
+    }
+
 } // namespace mhttp::test
 
 export namespace mhttp::test {
@@ -607,6 +742,8 @@ export namespace mhttp::test {
             { "listener socket options", server_listener_socket_options },
             { "listener accepted socket options", server_peer_socket_options },
             { "listener IPv6 dual stack", server_ipv6_and_dual_stack },
+            { "listener access observation", server_access_observation },
+            { "listener access exception isolation", server_access_exception_isolation },
         });
     }
 

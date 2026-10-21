@@ -239,7 +239,16 @@ Windows 使用 SO_EXCLUSIVEADDRUSE，阻止其他开启复用的监听器抢占�
 tcp_no_delay 默认 true，在会话启动前给每个接收套接字设置 TCP_NODELAY。
 IPv6 绑定显式设置 IPV6_V6ONLY：ipv6_only 默认 false，绑定 `::` 时可同时接收 IPv6 和 IPv4 映射连接；
 设为 true 则仅接收 IPv6。IPv4 绑定忽略 ipv6_only。端点保留操作系统报告的地址，包括 IPv4 映射形式。
-当前尚未提供日志钩子。
+
+SetAccessLogger 接受同步的 `void(Request const&, Response const&, steady_clock::duration)` 回调，
+可拥有只可移动的捕获对象，传空回调可清除。启动后直到停止完成都禁止替换，返回 AlreadyRunning。
+每个完整写完的最终响应回调一次，包括 404、协议错误、异常响应和输出超限后的有界 500；
+100 临时响应、post-routing 失败、未成功写完的响应与取消不触发访问日志。
+响应是最终应用表示，自动 Content-Length 等字段仅在序列化的线上头部中生成；HEAD 仍能观察表示 body。
+耗时从首个请求字节进入解析器开始，到完整写操作完成为止，排除 keep-alive 空闲时间及日志回调自身。
+引用只在同步回调期间有效，需要保留的数据必须拷贝。不同会话的回调可并发执行，应用负责同步，
+并避免在 I/O 线程阻塞。观察器异常被隔离，不改写响应、不关闭原本可复用的连接。
+当前尚未提供诊断日志钩子。
 
 对应独立测试为 `tests/server/request_test.cpp`、`response_test.cpp`、
 `request_data_test.cpp`、`handler_test.cpp`、`middleware_test.cpp`、`router_test.cpp`、
