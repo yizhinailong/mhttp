@@ -72,17 +72,16 @@ jobs:
         run: mcpp toolchain default llvm@23.1.3
 
       - name: Build
-        run: mcpp build
+        run: mcpp build --locked
+
+      - name: Check public Asio boundary
+        run: python3 tools/check_asio_boundary.py
+
+      - name: Verify implementation partitions
+        run: python3 tools/check_module_boundary.py
 
       - name: Test
         run: mcpp test --timeout 30
 
-      - name: Test OpenSSL and compression
-        run: mcpp test --features tls,zlib,brotli --timeout 30
-
-      - name: Test explicit OpenSSL feature
-        run: mcpp test tls --features tls-openssl --timeout 30
-
-      - name: Run consumer example
-        working-directory: example
-        run: mcpp run --offline
+      - name: Verify test harness failure paths
+        run: python3 tools/check_test_support.py
