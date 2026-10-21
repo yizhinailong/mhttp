@@ -22,6 +22,10 @@ main = "examples/rest_server/main.cpp"
 kind = "bin"
 main = "examples/rest_client/main.cpp"
 
+[targets.stress_test]
+kind = "bin"
+main = "examples/stress_test/main.cpp"
+
 [dependencies.chriskohlhoff]
 asio = "1.38.1"
 
