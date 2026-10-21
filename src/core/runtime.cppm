@@ -6,7 +6,15 @@ export module mhttp:core.runtime;
 
 import std;
 import :core.impl.runtime;
+import :core.impl.bridge;
 export import :core.error;
+export import :core.task;
+
+export namespace mhttp::detail {
+
+    struct RuntimeAccess;
+
+} // namespace mhttp::detail
 
 export namespace mhttp {
 
@@ -19,6 +27,7 @@ export namespace mhttp {
     class Runtime {
     private:
         std::shared_ptr<impl::RuntimeImpl> m_impl; ///< Owned context and thread lifecycle.
+        friend struct detail::RuntimeAccess;
 
     public:
         /**
@@ -95,5 +104,100 @@ export namespace mhttp {
          */
         [[nodiscard]] static auto IsIoThread() noexcept -> bool { return impl::RuntimeImpl::IsIoThread(); }
     };
+
+} // namespace mhttp
+
+export namespace mhttp::detail {
+
+    /**
+     * @brief Submit runtime roots through standard types without exposing an executor.
+     * @internal
+     */
+    struct RuntimeAccess {
+        /**
+         * @brief Start a root only if the runtime still accepts operations.
+         * @param runtime Borrowed runtime, alive through completion and drain.
+         * @param task Consumed root Task.
+         * @param complete Owned exception-aware completion, called after Task frame destruction.
+         * @return Success or NotRunning before execution.
+         */
+        static auto Submit(
+            Runtime& runtime,
+            Task<void> task,
+            std::function<void(std::exception_ptr)> complete
+        ) -> Result<void> {
+            return impl::submit_task(runtime.m_impl, std::move(task), std::move(complete));
+        }
+    };
+
+    /**
+     * @brief Own a blocking caller's completion state and result awaiting root cleanup.
+     * @tparam T Owned result or void.
+     * @internal
+     */
+    template <typename T>
+    struct SyncWaitState {
+        std::mutex mutex; ///< Completion publication, paired with the caller's blocking wait.
+        std::condition_variable ready; ///< Wakes only after all user Task frames are destroyed.
+        bool completed{}; ///< Predicate published under mutex.
+        std::exception_ptr failure; ///< Original user exception, if any.
+        std::optional<std::conditional_t<std::is_void_v<T>, std::monostate, T>> value; ///< Owned pending value.
+    };
+
+    /**
+     * @brief Store a value without waking the blocking caller before frame cleanup.
+     * @tparam T Owned result or void.
+     * @param task Consumed user Task.
+     * @param state Shared storage retained by the completion callback.
+     * @internal
+     */
+    template <typename T>
+    auto collect_wait_result(Task<T> task, std::shared_ptr<SyncWaitState<T>> state) -> Task<void> {
+        if constexpr (std::is_void_v<T>) { co_await std::move(task); }
+        else { state->value.emplace(co_await std::move(task)); }
+    }
+
+} // namespace mhttp::detail
+
+export namespace mhttp {
+
+    /**
+     * @brief Run a Task on a started Runtime and block this non-I/O caller for its result.
+     * @tparam T Owned result or void.
+     * @param runtime Started runtime, alive through the wait and completion cleanup.
+     * @param task Consumed lazy user Task.
+     * @return Owned result, after all user coroutine frames have been destroyed.
+     * @throws std::system_error With Busy on any I/O thread, or NotRunning for an idle/stopping runtime.
+     * @note User exceptions propagate unchanged. Never use this for a wait on an I/O execution thread.
+     */
+    template <typename T>
+    auto SyncWait(Runtime& runtime, Task<T> task) -> T {
+        if (Runtime::IsIoThread()) { impl::throw_error(Error::Busy); }
+        auto state = std::make_shared<detail::SyncWaitState<T>>();
+        auto submitted = detail::RuntimeAccess::Submit(runtime,
+            detail::collect_wait_result(std::move(task), state), [state](std::exception_ptr failure) {
+                {
+                    std::lock_guard lock{ state->mutex };
+                    state->failure = failure;
+                    state->completed = true;
+                }
+                state->ready.notify_one();
+            });
+        if (!submitted) { impl::throw_error(submitted.error()); }
+        std::unique_lock lock{ state->mutex };
+        state->ready.wait(lock, [&state] { return state->completed; });
+        if (state->failure) { std::rethrow_exception(state->failure); }
+        if constexpr (!std::is_void_v<T>) { return std::move(*state->value); }
+    }
+
+    /**
+     * @brief Suspend without blocking an I/O thread, resuming on the awaiting Task's strand.
+     * @param duration Relative delay; zero/negative durations complete asynchronously.
+     * @return Lazy timer Task.
+     * @throws std::system_error With Canceled when the owning runtime/connection stops.
+     */
+    [[nodiscard]] auto Sleep(std::chrono::steady_clock::duration duration) -> Task<void> {
+        return impl::sleep_for(duration);
+    }
 
 } // namespace mhttp
