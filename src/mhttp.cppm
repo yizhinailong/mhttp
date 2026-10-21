@@ -10,6 +10,7 @@ export import :core.endpoint;
 export import :core.method;
 export import :core.status;
 export import :core.headers;
+export import :core.form_data;
 export import :core.query;
 export import :core.url;
 export import :core.message;

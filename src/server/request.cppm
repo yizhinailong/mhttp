@@ -11,6 +11,7 @@ export import :core.query;
 export import :core.endpoint;
 export import :server.request_data;
 export import :core.json_support;
+export import :core.form_data;
 
 export namespace mhttp::detail {
 
@@ -128,6 +129,17 @@ export namespace mhttp::server {
          *       changing it does not affect Body or Query, and it may outlive this request.
          */
         [[nodiscard]] auto Form() const -> Result<QueryParams> { return m_impl->Form(); }
+
+        /**
+         * @brief Parse a complete multipart body on demand into independently owned fields and files.
+         * @param limits Allocation/count/header bounds in addition to the server's HTTP request limit.
+         * @return Owned form or recoverable syntax/header/size error; duplicate Content-Type is InvalidHeaders.
+         * @note Parsing does not mutate Body or cache state; the result may outlive this request.
+         */
+        [[nodiscard]] auto Multipart(MultipartLimits limits = {}) const -> Result<FormData> {
+            if (Headers().Count("Content-Type") > 1) { return std::unexpected{ Error::InvalidHeaders }; }
+            return FormData::Parse(Body(), ContentType(), limits);
+        }
 
         /**
          * @brief Parse an independent JSON value on demand when the optional JSON adapter is available.
