@@ -116,6 +116,9 @@ jobs:
       - name: Test REST examples
         run: python tools/check_examples.py
 
+      - name: Test stress example
+        run: python tools/check_stress.py
+
       - name: Test
         run: mcpp test --timeout 30
 
