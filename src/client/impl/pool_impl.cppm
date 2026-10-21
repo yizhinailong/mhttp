@@ -317,6 +317,13 @@ namespace mhttp::impl {
             Result<Url> origin,
             Clock::duration wait
         ) -> Task<Result<Loan>> {
+            if (self->m_initialization_error) { co_return std::unexpected{ *self->m_initialization_error }; }
+            if (!origin) { co_return std::unexpected{ origin.error() }; }
+            if (origin->Scheme() != "http") { co_return std::unexpected{ Error::UnsupportedScheme }; }
+            if (self->Stopped()) { co_return std::unexpected{ Error::Canceled }; }
+            if (wait > Clock::duration::max() / 2) { co_return std::unexpected{ Error::InvalidRequest }; }
+            auto token = self->m_runtime->StopToken();
+            if (!token) { co_return std::unexpected{ token.error() }; }
             try {
                 auto result = co_await ToTask(self->m_executor, acquire(self, std::move(origin), wait));
                 if (!result) { co_return std::unexpected{ result.error() }; }

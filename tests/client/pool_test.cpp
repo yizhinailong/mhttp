@@ -300,6 +300,21 @@ auto runtime_shutdown() -> void {
 }
 
 /**
+ * @brief Fail before dispatching to an idle destination Runtime, preserving later startup and caller scheduling.
+ */
+auto idle_destination_runtime() -> void {
+    mhttp::Runtime caller_runtime;
+    mhttp::Runtime destination_runtime;
+    Check(caller_runtime.Start(2).has_value(), "start independent caller runtime");
+    ClientPool pool{ destination_runtime };
+    auto idle = mhttp::SyncWait(caller_runtime, pool.Acquire("localhost", 80));
+    Check(!idle && idle.error() == mhttp::Error::NotRunning && !pool.Stopped(), "idle target reports NotRunning without posting an unexecutable wait");
+    Check(destination_runtime.Start(2).has_value(), "start target after rejected acquisition");
+    auto ready = mhttp::SyncWait(caller_runtime, pool.Acquire("localhost", 80));
+    Check(ready && pool.Stats().active == 1, "pool created before Runtime startup can attach later");
+}
+
+/**
  * @brief Run public pool cases with bounded watchdogs.
  * @param argc Argument count.
  * @param argv Optional case filters.
@@ -313,5 +328,6 @@ auto main(int argc, char* argv[]) -> int {
         { "issued Task loan ownership", issued_task_ownership }, { "terminal pool shutdown", terminal_shutdown },
         { "movable pool ownership", movable_pool }, { "concurrent borrowers", concurrent_borrowers },
         { "runtime generation shutdown", runtime_shutdown },
+        { "idle destination runtime", idle_destination_runtime },
     });
 }

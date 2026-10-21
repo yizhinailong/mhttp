@@ -181,6 +181,27 @@ auto inherited_acquire_cancellation() -> void {
 }
 
 /**
+ * @brief Return a timed-out connection's slot and reconnect through the next loan without losing capacity.
+ */
+auto timed_out_transfer_return() -> void {
+    mhttp::Runtime runtime;
+    Check(runtime.Start(4).has_value(), "start pooled timeout runtime");
+    mhttp::server::HttpServer server{ runtime };
+    Check(server.Get("/slow", [](auto&, auto&) -> mhttp::Task<void> { co_await mhttp::Sleep(1s); }).has_value(), "register slow pooled response");
+    Check(server.Get("/ready", [](auto&, auto& response) { static_cast<void>(response.SetContent("ready", "text/plain")); }).has_value(), "register pool recovery route");
+    auto port = start_pool_server(server);
+    mhttp::client::ClientPool pool{ runtime, { .max_per_origin = 1, .client_options = { .read_timeout = 30ms } } };
+    auto first = mhttp::SyncWait(runtime, pool.Acquire("127.0.0.1", port));
+    auto failed = mhttp::SyncWait(runtime, (*first)->Get("/slow"));
+    Check(!failed && failed.error() == mhttp::Error::ReadTimeout && !(*first)->IsOpen(), "response timeout closes borrowed socket");
+    first->Release();
+    auto next = mhttp::SyncWait(runtime, pool.Acquire("127.0.0.1", port, 0ms));
+    if (!Check(next.has_value(), "failed transfer does not leak pool capacity")) { return; }
+    auto recovered = mhttp::SyncWait(runtime, (*next)->Get("/ready"));
+    Check(recovered && recovered->Body() == "ready", "returned wrapper reconnects after read timeout");
+}
+
+/**
  * @brief Run loopback pool integration cases.
  * @param argc Argument count.
  * @param argv Optional filters.
@@ -191,5 +212,6 @@ auto main(int argc, char* argv[]) -> int {
         { "pooled persistent and closed connections", persistent_borrowing },
         { "streaming loan lifetime", streaming_loan_lifetime }, { "streaming pool shutdown", streaming_shutdown },
         { "inherited acquisition cancellation", inherited_acquire_cancellation },
+        { "timed-out transfer return", timed_out_transfer_return },
     });
 }
