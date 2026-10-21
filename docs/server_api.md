@@ -178,6 +178,11 @@ HTTP/1.1 使用 chunked。provider 成功返回后，服务器自动发送唯一
 不能发送 trailer、不能复用；这种旧版本分帧无法区分正常结束与传输中断。
 HEAD、204、304 不调用 provider，也不发送任何 chunk 或终止块。
 
+已知总长度时使用 `SetContentProvider(length, provider, content_type)`：两个 HTTP 版本均生成
+Content-Length，完整发送后可复用连接。`ContentLength()` 返回缓冲体长度或声明的流长度，
+未知长度流返回 nullopt。`StreamWriter::MaxWriteSize()` 给出当前分帧和服务器限制下可发送的
+最大原始块大小。固定长度流不接受 trailer；字节不足、超出声明长度或其他输出错误会关闭连接。
+
 provider 借用的 writer 和请求元数据只在整个回调 Task 完成前有效。捕获处理器局部数据时必须取得
 所有权；处理器的局部变量在 provider 开始前已经销毁。请求对象由会话保留，允许在 provider 中
 只读访问。响应头已发送，provider 不应再修改 Response。发出的写入和 Finish 必须逐个等待，
@@ -190,6 +195,52 @@ SetRedirect 会释放已有 provider，切回缓冲表示。写入、trailer、p
 即使 provider 忽略一个传输错误，也不会得到成功终止块。诊断日志保留错误及异常，
 访问日志只在完整流和终止分帧都成功后调用，仍可看到 IsStreaming 而不持有完整 body。
 HttpServer.Stop 和 Runtime.Stop 会取消 provider 的异步等待，并在协程帧排空后完成停机。
+
+## 静态文件
+
+在非 I/O 线程、服务器启动前注册目录：
+
+```cpp
+server.Mount("/static", std::filesystem::path{ "public" }, {
+    .index_file = "index.html",
+    .max_ranges = 16,
+    .mime_types = { { "custom", "application/custom" } }
+}).value();
+```
+
+`Mount` 同步打开并保留根目录，失败不替换旧挂载。相同前缀替换已有配置，末尾斜杠不影响注册。
+停止并排空后可用 `Unmount(prefix)` 移除，返回是否存在；冻结或存在已准备请求时，沿用路由配置的
+AlreadyRunning / Busy 规则。根路径可以显式指向链接目录，根目录以下的符号链接和 Windows
+reparse point 均拒绝，包括仍指向根目录内部的链接。
+
+普通路由的匹配和 405 优先，随后选择按路径段匹配的最长挂载前缀；该挂载缺少文件时不会退回
+更短前缀。GET / HEAD 提供文件，其他方法返回带 Allow 的 405。目录默认提供 index.html，
+`index_file` 为空则禁用；没有目录列表或自动重定向。缺少、不可访问或不安全的路径返回 404，
+沿用 not-found、错误处理、全局 aspect 和 post-routing。全局 Before 在打开请求文件之前执行。
+挂载按需分派，不自动缓冲请求体；未消费的请求体会使这条响应之后关闭连接。
+
+URL 每段只解码一次，`+` 保持字面意义；编码斜杠不会变成文件系统分隔符。拒绝点段、重复分隔符、
+反斜杠、NUL/控制字节、冒号和其他不便携的文件名字符、DOS 设备别名、尾随点或空格，
+以及超过 128 段的请求路径。POSIX 使用根目录描述符逐级 openat / O_NOFOLLOW；Windows 逐级
+拒绝 reparse point、固定目录句柄，并核对实际打开文件的最终路径。检查后读取保留的同一个句柄。
+
+文件选择、元数据查询和读取通过 Offload 在工作线程执行。文件响应使用已知长度 provider，
+每次只读取和等待发送一个有界块，总长度可超过 max_response_bytes。HEAD 只产生元数据。
+每块读取前后核对原始元数据；截断、可检测的修改、断连、取消或写超时使响应失败并关闭连接。
+停止会等待已开始的 worker 操作及 provider 排空，释放文件句柄。此机制不提供可变文件的原子快照。
+
+`MimeType(filename, fallback)` 根据最终扩展名查询常见类型，按 ASCII 忽略大小写，未知类型默认
+application/octet-stream；挂载的 mime_types 可覆盖单个扩展名，不含前导点。
+文件响应带 Accept-Ranges、Last-Modified 和基于原生文件身份、大小、时间戳的弱 ETag。
+If-None-Match 支持弱比较、列表和通配符，优先于 If-Modified-Since，命中返回无 body 的 304；
+日期解析接受三种 HTTP 日期格式。If-Match / If-Unmodified-Since 失败返回 412。
+元数据和秒级日期不能证明强校验，因此带 If-Range 的请求保守返回完整表示。
+
+Range 仅作用于 GET，且在条件请求求值后执行。支持闭区间、开放末尾、后缀、巨大十进制位置和
+混合可满足区间；单段返回带 Content-Range 的 206，多段按请求顺序生成 multipart/byteranges，
+均有精确 Content-Length。所有区间不可满足或数量超过 max_ranges 时返回 416 和 bytes */size。
+不支持的单位、语法错误和空文件忽略 Range，HEAD 同样忽略。
+行为依据 [RFC 9110 条件请求与 Range](https://www.rfc-editor.org/rfc/rfc9110.html#name-range-requests)。
 
 ## 认证中间件
 

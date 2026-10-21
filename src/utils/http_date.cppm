@@ -91,12 +91,16 @@ export namespace mhttp {
 
     /**
      * @brief Format a system-clock instant as an IMF-fixdate value in GMT.
+     * @tparam Duration Clock precision, including whole-second filesystem timestamps.
      * @param time Instant to format; subsecond precision is discarded toward the earlier second.
      * @return Owned English date in the form Sun, 06 Nov 1994 08:49:37 GMT.
      * @throws std::out_of_range If the calendar year cannot be written with four decimal digits.
      * @note Calendar conversion is independent of the process locale and time zone and is thread-safe.
      */
-    [[nodiscard]] auto FormatHttpDate(std::chrono::system_clock::time_point time) -> std::string {
+    template <typename Duration>
+    [[nodiscard]] auto FormatHttpDate(
+        std::chrono::time_point<std::chrono::system_clock, Duration> time
+    ) -> std::string {
         using namespace std::chrono;
         constexpr std::array<std::string_view, 7> WEEKDAYS{
             "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"

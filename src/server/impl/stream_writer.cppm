@@ -223,6 +223,21 @@ namespace mhttp::impl {
         [[nodiscard]] auto Finished() const noexcept -> bool { return m_finished; }
 
         /**
+         * @brief Inspect a decoded segment size that fits both application and transport bounds.
+         * @return Maximum safe raw Write size for the selected framing; zero if no segment can fit.
+         */
+        [[nodiscard]] auto MaxWriteSize() const noexcept -> std::size_t {
+            auto size = std::min(m_chunk_bytes, m_connection->MaxWriteSize());
+            if (m_kind != detail::BodyKind::Chunked) { return size; }
+            for (;;) {
+                std::size_t overhead{ 4 };
+                for (auto value = size; value != 0; value /= 16) { ++overhead; }
+                if (size == 0 || overhead <= m_connection->MaxWriteSize() - size) { return size; }
+                --size;
+            }
+        }
+
+        /**
          * @brief Record the first terminal failure and stop provider awaits before closing the socket.
          * @param error Owned backend-independent cause; call only on the connection strand.
          */

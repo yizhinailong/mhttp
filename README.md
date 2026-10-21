@@ -11,7 +11,8 @@
 客户端提供 Get / Head / Post / Put / Patch / Delete / Options、连接复用、
 有界重定向、默认头部与认证、分阶段或整体超时。`Task<T>`、`Runtime`、`Sleep`、
 `Offload` 和 `SyncWait` 负责异步执行与停止排空。普通请求与默认客户端响应完整缓冲；
-服务端支持基于 Task 的 StreamWriter 与内容 provider，以有界分块发送响应，HTTP/1.0 使用关闭分帧。
+服务端支持基于 Task 的 StreamWriter 与内容 provider，以有界分块或已知长度发送响应。
+静态目录挂载支持 MIME、条件请求、单段与多段 Range，并拒绝目录穿越和根目录以下的链接。
 服务端支持 RouteLazy 按需读取请求体；客户端支持流式响应接收、进度回调和有界 provider 上传；TLS 和压缩尚未实现。
 
 ## 构建

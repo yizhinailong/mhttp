@@ -6,6 +6,9 @@ module mhttp:server.impl.router;
 
 import std;
 import :server.routing;
+import :server.impl.static_response;
+import :server.impl.static_policy;
+import :server.static_files;
 
 namespace mhttp::impl {
 
@@ -49,6 +52,7 @@ namespace mhttp::impl {
         std::mutex m_mutex; ///< Protect configuration, freeze state, and reader registration.
         detail::RouteTree m_tree; ///< Immutable while frozen or any configuration reader exists.
         std::unordered_map<std::size_t, std::shared_ptr<RouteHandler const>> m_handlers; ///< Owned bindings.
+        std::vector<std::shared_ptr<StaticMount const>> m_mounts; ///< Longest-prefix static fallbacks.
         std::vector<detail::HttpMiddleware> m_middleware; ///< Global aspects, immutable while readers exist.
         std::shared_ptr<detail::HttpHandler const> m_not_found; ///< Optional 404 handler with its own aspects.
         std::shared_ptr<detail::HttpHandler const> m_error_handler; ///< Optional final error response transformation.
@@ -60,6 +64,54 @@ namespace mhttp::impl {
         bool m_frozen{}; ///< Server lifecycle rejects mutation until all sessions drain and thaw succeeds.
 
     public:
+        /**
+         * @brief Validate and open a static fallback root outside the configuration mutex.
+         * @param prefix Decoded portable absolute prefix.
+         * @param root Native directory to pin until replacement, removal, or router destruction.
+         * @param options Owned static response configuration.
+         * @return Success, AlreadyRunning, Busy, or a configuration error without replacing a prior mount.
+         */
+        auto Mount(
+            std::string_view prefix,
+            std::filesystem::path const& root,
+            server::StaticFileOptions options
+        ) -> Result<void> {
+            {
+                std::lock_guard lock{ m_mutex };
+                if (m_frozen) { return std::unexpected{ Error::AlreadyRunning }; }
+                if (m_readers != 0) { return std::unexpected{ Error::Busy }; }
+            }
+            auto incoming = StaticMount::Create(prefix, root, std::move(options));
+            if (!incoming) { return std::unexpected{ incoming.error() }; }
+            std::shared_ptr<StaticMount const> retired;
+            std::lock_guard lock{ m_mutex };
+            if (m_frozen) { return std::unexpected{ Error::AlreadyRunning }; }
+            if (m_readers != 0) { return std::unexpected{ Error::Busy }; }
+            for (auto& mount : m_mounts) {
+                if (mount->data->key == (*incoming)->data->key) { retired = std::exchange(mount, std::move(*incoming)); return {}; }
+            }
+            m_mounts.push_back(std::move(*incoming));
+            return {};
+        }
+
+        /**
+         * @brief Remove a configured static fallback without releasing native resources under the mutex.
+         * @param prefix Decoded absolute prefix, canonicalized as during registration.
+         * @return Whether a mount existed, or AlreadyRunning, Busy, or InvalidRequest.
+         */
+        auto Unmount(std::string_view prefix) -> Result<bool> {
+            auto parts = static_components(prefix, false);
+            if (!parts) { return std::unexpected{ Error::InvalidRequest }; }
+            std::shared_ptr<StaticMount const> retired;
+            std::lock_guard lock{ m_mutex };
+            if (m_frozen) { return std::unexpected{ Error::AlreadyRunning }; }
+            if (m_readers != 0) { return std::unexpected{ Error::Busy }; }
+            for (auto it = m_mounts.begin(); it != m_mounts.end(); ++it) {
+                if ((*it)->data->prefix == *parts) { retired = std::move(*it); m_mounts.erase(it); return true; }
+            }
+            return false;
+        }
+
         /**
          * @brief Create empty route configuration with fixed regular-expression bounds.
          * @param limits Pattern source and decoded matching subject limits.
@@ -407,6 +459,17 @@ namespace mhttp::impl {
                         auto selected = std::as_const(owner.m_handlers).at(*route.match.handler);
                         route.handler = std::shared_ptr<detail::HttpHandler const>{ selected, &selected->handler };
                         route.lazy = selected->lazy;
+                    } else if (route.match.status == Status::NotFound) {
+                        auto parts = static_components(detail::ServerRequestAccess::EncodedPath(request));
+                        std::shared_ptr<StaticMount const> selected;
+                        if (parts) {
+                            for (auto const& mount : owner.m_mounts) {
+                                auto const& prefix = mount->data->prefix;
+                                if (parts->size() >= prefix.size() && std::equal(prefix.begin(), prefix.end(), parts->begin())
+                                    && (!selected || prefix.size() > selected->data->prefix.size())) { selected = mount; }
+                            }
+                        }
+                        if (selected) { route.handler = selected->handler; route.lazy = true; }
                     }
                     detail::ServerRequestAccess::SetPathParams(request, std::move(route.match.params));
                 }

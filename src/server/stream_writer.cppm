@@ -36,6 +36,12 @@ export namespace mhttp::server {
 
     public:
         /**
+         * @brief Inspect the maximum safe decoded segment for the selected framing and server limits.
+         * @return Immutable bound; producers can split larger inputs before calling Write.
+         */
+        [[nodiscard]] auto MaxWriteSize() const noexcept -> std::size_t { return m_impl->MaxWriteSize(); }
+
+        /**
          * @brief Prevent copying a borrowed provider window.
          * @param other Unused source.
          */

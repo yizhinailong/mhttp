@@ -7,6 +7,7 @@ export module mhttp:server.router;
 import std;
 import :server.impl.router;
 export import :server.routing;
+export import :server.static_files;
 
 namespace mhttp::impl {
 
@@ -66,6 +67,29 @@ export namespace mhttp::server {
          * @brief Release this wrapper while issued Tasks retain their own callback and configuration ownership.
          */
         virtual ~Router() = default;
+
+        /**
+         * @brief Mount regular files as a GET/HEAD fallback after ordinary route matching.
+         * @param prefix Decoded absolute URL prefix, matched on segment boundaries; longest prefix wins.
+         * @param root Native directory opened synchronously during configuration on a non-I/O thread.
+         * @param options Owned index, range-count, and MIME override configuration.
+         * @return Success, AlreadyRunning while frozen, Busy with readers/on I/O threads, or invalid configuration.
+         * @note Duplicate prefixes replace prior mounts. Missing files run the normal not-found handler.
+         *       All global hooks apply. Links/reparse points below root, dot segments, encoded separators,
+         *       control bytes, DOS device names, alternate streams, and paths over 128 components are rejected.
+         */
+        [[nodiscard]] auto Mount(
+            std::string_view prefix,
+            std::filesystem::path const& root,
+            StaticFileOptions options = {}
+        ) -> Result<void> { return m_impl->Mount(prefix, root, std::move(options)); }
+
+        /**
+         * @brief Remove a static mount while configuration is mutable.
+         * @param prefix Decoded absolute prefix, with the same canonicalization as Mount.
+         * @return Whether a mount existed, or AlreadyRunning, Busy, or InvalidRequest.
+         */
+        [[nodiscard]] auto Unmount(std::string_view prefix) -> Result<bool> { return m_impl->Unmount(prefix); }
 
         /**
          * @brief Append global aspects around all routes and default 404/405 responses.
