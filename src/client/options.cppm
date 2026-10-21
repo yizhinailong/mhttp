@@ -1,6 +1,6 @@
 /**
  * @file options.cppm
- * @brief Define bounded buffered-client configuration independently of the network backend.
+ * @brief Define bounded client transfer configuration independently of the network backend.
  */
 export module mhttp:client.options;
 
@@ -35,7 +35,7 @@ export namespace mhttp::client {
         std::size_t header_bytes{ 64 * 1024 }; ///< Response fields and trailers together, including delimiters.
         std::size_t header_fields{ 100 }; ///< Response fields and trailers together, including discarded fields.
         std::uint64_t body_bytes{ 8 * 1024 * 1024 }; ///< Maximum decoded response body, buffered or streamed.
-        std::size_t max_request_bytes{ 16 * 1024 * 1024 }; ///< Maximum complete buffered wire request.
+        std::size_t max_request_bytes{ 16 * 1024 * 1024 }; ///< Maximum buffered wire request, provider head, or framed upload segment.
         bool keep_alive{ true }; ///< Permit connection reuse unless either peer requests closure.
         std::string user_agent{ std::string{ "mhttp/" } + std::string{ VERSION } }; ///< Validated optional fallback.
         Headers default_headers; ///< Ordered fallback fields; every explicit request name takes precedence.
@@ -46,6 +46,7 @@ export namespace mhttp::client {
         std::chrono::milliseconds expect_continue_timeout{ 1'000 }; ///< Positive maximum handshake wait before sending the body without 100.
         std::size_t response_chunk_bytes{ 16 * 1024 }; ///< Maximum decoded bytes passed to one response receiver; positive.
         std::size_t upload_chunk_bytes{ 64 * 1024 }; ///< Maximum decoded bytes per upload/progress segment; positive.
+        std::uint64_t upload_body_bytes{ 64 * 1024 * 1024 }; ///< Maximum decoded request body, including providers; zero permits only empty uploads.
     };
 
 } // namespace mhttp::client

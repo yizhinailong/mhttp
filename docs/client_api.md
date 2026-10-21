@@ -207,3 +207,40 @@ auto response = co_await client.Send(mhttp::client::Request{ mhttp::Method::Get,
 选定的 Phase/Overall/Step/Never 策略也约束回调：下载回调超时为 ReadTimeout，上传进度超时为 WriteTimeout。
 已运行的 Offload 函数仍须执行完毕后才报告取消。回调捕获的对象及 Runtime 必须存活至整个 Send 完成。
 总响应正文仍受 `body_bytes` 限制，trailer 与初始字段共同受头部限制；流式读取不会放宽协议校验。
+
+## Provider 上传
+
+`Request::SetContentProvider(length, provider, content_type)` 拥有异步上传来源并清空 Body()。
+`length` 为解码后的精确长度，nullopt 表示未知长度，使用 HTTP/1.1 chunked 分帧。
+`IsStreaming()` 与 `ContentLength()` 可在不调用来源的情况下检查模式与长度；SetContent/SetMultipart/SetJson
+会清除 provider。空回调及非法媒体类型被拒绝并保留原状态。
+
+provider 的签名为 `Task<Result<std::string>>(std::uint64_t offset, std::size_t maximum)`，
+每次返回独立拥有的二进制块，大小不超过正值 maximum；空字符串表示 EOF。
+固定长度来源必须提供精确数量，提前 EOF 返回 InvalidRequest，到达声明长度后不会再调用来源。
+未知长度来源持续读取到 EOF，并在全部数据写出后发送终止块。
+
+```cpp
+mhttp::client::Request request{ mhttp::Method::Post, "/upload" };
+request.SetContentProvider(std::nullopt,
+    [owned = std::make_unique<std::string>("payload")](std::uint64_t offset, std::size_t maximum)
+        -> mhttp::Task<mhttp::Result<std::string>> {
+        co_return owned->substr(static_cast<std::size_t>(offset), maximum);
+    });
+auto response = co_await client.Send(std::move(request));
+```
+
+来源只会在请求头成功写出、且 Expect 允许上传或达到回退时限后执行。
+提前最终响应不会调用 provider 或上传进度回调。零字节请求头失败的透明重试也不消耗来源。
+307/308 保留来源并从 offset 零重新调用；因此启用自动重定向时，来源必须按偏移量支持重放。
+303 及需要改为 GET 的 301/302 会清除来源、正文及 Expect。无法重放的单次来源应关闭自动跟随。
+
+`upload_body_bytes` 限制解码后的上传总量，默认 64 MiB，也适用于缓冲正文；零只允许空上传。
+已知长度超限在网络操作前拒绝，未知长度逐块检查，总量恰好达限后仍允许来源返回 EOF。
+`upload_chunk_bytes` 限制每次请求的原始块大小；`max_request_bytes` 限制完整缓冲请求，
+或 provider 的请求头及单个编码后写入。客户端会为十六进制长度和 CRLF 预留空间，保证每块分帧都能容纳。
+这些限制独立生效，来源返回超出请求大小或总量的块时返回 BodyTooLarge，并关闭未完成连接。
+
+来源按顺序等待完成，沿用上传阶段的超时策略和进度语义，可使用 Offload 处理阻塞来源。
+返回错误、抛出异常、取消或超时均会清理嵌套 Task 后返回；异常映射为 Unknown，写预算耗尽为 WriteTimeout。
+不得捕获已经离开作用域的 handler 局部引用；Runtime 和捕获的外部对象必须存活到 Send 完成。

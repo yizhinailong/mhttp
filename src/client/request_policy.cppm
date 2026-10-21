@@ -1,6 +1,6 @@
 /**
  * @file request_policy.cppm
- * @brief Prepare complete bounded HTTP client requests without performing network operations.
+ * @brief Prepare bounded buffered or provider HTTP client requests without performing network operations.
  */
 export module mhttp:client.request_policy;
 
@@ -73,7 +73,7 @@ export namespace mhttp::detail {
      * @param request Owned request, retained in the success result for the entire subsequent operation.
      * @param origin Validated HTTP destination used for an absent Host and empty target.
      * @param options Borrowed configuration; never modified and not retained.
-     * @return Prepared data, validation failure, or BodyTooLarge when the complete wire request exceeds its bound.
+     * @return Prepared data, validation failure, or BodyTooLarge when buffered wire data, a provider head, or a declared upload exceeds its bound.
      * @note Explicit names suppress every matching default field, preserving duplicate defaults otherwise.
      *       No Accept-Encoding or Content-Type is inferred. Stale CL/TE/Trailer fields are replaced by
      *       the serializer. A request-supplied Host is permitted but must be a single valid authority.
@@ -86,7 +86,8 @@ export namespace mhttp::detail {
     ) -> Result<PreparedClientRequest> {
         auto valid = validate_client_options(options);
         if (!valid) { return std::unexpected{ valid.error() }; }
-        if (request.Body().size() > options.max_request_bytes) {
+        auto const length = request.ContentLength();
+        if ((length && *length > options.upload_body_bytes) || request.Body().size() > options.max_request_bytes) {
             return std::unexpected{ Error::BodyTooLarge };
         }
         RequestHead head{ .method = std::string{ request.MethodString() },
@@ -105,8 +106,8 @@ export namespace mhttp::detail {
             auto added = head.headers.Add("User-Agent", options.user_agent);
             if (!added) { return std::unexpected{ added.error() }; }
         }
-        if (!head.headers.Has("Expect") && options.expect_continue_threshold != 0 && !request.Body().empty()
-            && request.Body().size() >= options.expect_continue_threshold) {
+        if (!head.headers.Has("Expect") && options.expect_continue_threshold != 0 && (!length || *length != 0)
+            && (!length || *length >= options.expect_continue_threshold)) {
             auto added = head.headers.Add("Expect", "100-continue");
             if (!added) { return std::unexpected{ added.error() }; }
         }
@@ -121,9 +122,9 @@ export namespace mhttp::detail {
                 expect_continue = true;
             }
         }
-        if (expect_continue && request.Body().empty()) { return std::unexpected{ Error::InvalidRequest }; }
+        if (expect_continue && length && *length == 0) { return std::unexpected{ Error::InvalidRequest }; }
         auto serialized = serialize_request_head(head,
-            { .body_bytes = request.Body().size(), .keep_alive = options.keep_alive });
+            { .body_bytes = length.value_or(0), .chunked = request.IsStreaming() && !length, .keep_alive = options.keep_alive });
         if (!serialized) { return std::unexpected{ serialized.error() }; }
         if (serialized->bytes.size() > options.max_request_bytes - request.Body().size()) {
             return std::unexpected{ Error::BodyTooLarge };

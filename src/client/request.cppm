@@ -10,6 +10,7 @@ export import :core.message;
 export import :core.query;
 export import :core.json_support;
 export import :core.form_data;
+export import :client.content_provider;
 
 namespace mhttp::impl {
 
@@ -201,6 +202,35 @@ export namespace mhttp::client {
             std::string body,
             std::string_view content_type = {}
         ) -> Result<void> { return m_impl->SetContent(std::move(body), content_type); }
+        /**
+         * @brief Own an asynchronous offset-based upload source, clearing the buffered representation.
+         * @param length Exact decoded size, or nullopt to send chunked until the provider returns EOF.
+         * @param provider Owned callable, invoked only after a successful head write and any Expect negotiation.
+         * @param content_type Validated optional media type; empty removes Content-Type.
+         * @return Success, InvalidRequest for an empty callable, or InvalidHeaders; failure preserves prior state.
+         * @note Each produced chunk must fit the requested maximum. upload_body_bytes bounds the total;
+         *       upload_chunk_bytes and max_request_bytes bound each decoded/framed write. 307/308 replay
+         *       restarts at offset zero; 301/302/303 method rewriting clears the provider with the body.
+         */
+        [[nodiscard]] auto SetContentProvider(
+            std::optional<std::uint64_t> length,
+            ContentProvider provider,
+            std::string_view content_type = "application/octet-stream"
+        ) -> Result<void> { return m_impl->SetContentProvider(length, std::move(provider), content_type); }
+
+        /**
+         * @brief Inspect whether this request owns a deferred upload source.
+         * @return True for provider content; Body() is empty in this mode.
+         */
+        [[nodiscard]] auto IsStreaming() const noexcept -> bool { return static_cast<bool>(m_impl->provider); }
+
+        /**
+         * @brief Inspect the buffered or provider decoded length without invoking the source.
+         * @return Known length, or nullopt for an unknown-length provider.
+         */
+        [[nodiscard]] auto ContentLength() const noexcept -> std::optional<std::uint64_t> {
+            return IsStreaming() ? m_impl->provider_length : std::optional<std::uint64_t>{ m_impl->body.size() };
+        }
     };
 
 } // namespace mhttp::client

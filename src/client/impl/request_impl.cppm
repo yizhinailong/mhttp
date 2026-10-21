@@ -7,6 +7,7 @@ module mhttp:client.impl.request;
 import std;
 import :core.message;
 import :core.query;
+import :client.content_provider;
 import :utils.string;
 
 namespace mhttp::impl {
@@ -19,7 +20,9 @@ namespace mhttp::impl {
         std::string target; ///< Original request target, including query and optional local fragment.
         QueryParams query; ///< Additional parameters appended after the target's existing query.
         Headers headers; ///< Owned validated fields in insertion order.
-        std::string body; ///< Owned buffered binary representation.
+        std::string body; ///< Owned buffered binary representation, empty for providers.
+        client::ContentProvider provider; ///< Optional owned asynchronous offset-based upload source.
+        std::optional<std::uint64_t> provider_length; ///< Declared provider size, absent for chunked input.
 
         /**
          * @brief Retain constructor arguments for validation by the sending boundary.
@@ -53,6 +56,31 @@ namespace mhttp::impl {
                 if (!assigned) { return assigned; }
             }
             body = std::move(bytes);
+            provider = nullptr;
+            provider_length.reset();
+            return {};
+        }
+        /**
+         * @brief Replace buffered data with a validated owned provider without starting user code.
+         * @param length Declared decoded length, or nullopt for chunked streaming.
+         * @param source Owned callable; empty providers are rejected without changing the prior request.
+         * @param content_type Validated media type; empty removes Content-Type.
+         * @return Success or validation failure preserving prior content and fields.
+         */
+        auto SetContentProvider(
+            std::optional<std::uint64_t> length,
+            client::ContentProvider source,
+            std::string_view content_type
+        ) -> Result<void> {
+            if (!source) { return std::unexpected{ Error::InvalidRequest }; }
+            if (content_type.empty()) { headers.Erase("Content-Type"); }
+            else {
+                auto assigned = headers.Set("Content-Type", content_type);
+                if (!assigned) { return assigned; }
+            }
+            body.clear();
+            provider = std::move(source);
+            provider_length = length;
             return {};
         }
     };

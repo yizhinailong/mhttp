@@ -484,6 +484,89 @@ namespace mhttp::impl {
         }
 
         /**
+         * @brief Compute a positive provider request size that also fits exact chunk framing when needed.
+         * @param chunked Whether hexadecimal length and CRLF delimiters consume write capacity.
+         * @return Maximum decoded segment, or zero when no framed payload can fit.
+         */
+        auto providerChunkSize(bool chunked) const noexcept -> std::size_t {
+            auto const wire_limit = m_connection->MaxWriteSize();
+            auto count = std::min(m_options.upload_chunk_bytes, wire_limit);
+            if (!chunked) { return count; }
+            while (count != 0) {
+                std::size_t overhead{ 4 };
+                auto value = count;
+                do { ++overhead; value /= 16; } while (value != 0);
+                if (overhead >= wire_limit) { return 0; }
+                if (count <= wire_limit - overhead) { return count; }
+                count = wire_limit - overhead;
+            }
+            return 0;
+        }
+
+        /**
+         * @brief Pull and transmit bounded provider chunks without buffering or consuming a source before upload permission.
+         * @param request Send-owned provider, retained unchanged for redirect replay from offset zero.
+         * @param epoch Current request cancellation epoch.
+         * @param deadlines Send-owned timeout policy, also bounding provider and progress awaits.
+         * @param until Fixed write phase/overall deadline, absent for Step/Never.
+         * @param callbacks Borrowed Send-owned asynchronous progress.
+         * @param hop Zero-based redirect index.
+         * @return Complete fixed/chunked upload, provider error, premature EOF, size violation, or I/O/cancellation.
+         */
+        auto writeProvider(
+            detail::PreparedClientRequest& request,
+            std::uint64_t epoch,
+            ClientDeadlines const& deadlines,
+            std::optional<Clock::time_point> until,
+            client::TransferCallbacks& callbacks,
+            std::size_t hop
+        ) -> asio::awaitable<Result<void>> {
+            auto connection = m_connection;
+            auto const total = request.request.ContentLength();
+            bool const chunked = request.head.body_kind == detail::BodyKind::Chunked;
+            auto const capacity = providerChunkSize(chunked);
+            if (capacity == 0) { co_return std::unexpected{ Error::BodyTooLarge }; }
+            auto reported = co_await reportProgress(callbacks, { client::TransferDirection::Upload, 0, total, hop },
+                deadlines.Remaining(until), Error::WriteTimeout);
+            if (!reported) { co_return reported; }
+            detail::ChunkEncoder encoder;
+            std::uint64_t offset{};
+            while (!total || offset != *total) {
+                auto const count = total ? static_cast<std::size_t>(std::min<std::uint64_t>(capacity, *total - offset)) : capacity;
+                auto block = co_await runCallback(callbackTask(request.request.m_impl->provider, offset, count),
+                    deadlines.Remaining(until), Error::WriteTimeout);
+                if (isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
+                if (!block) { co_return std::unexpected{ block.error() }; }
+                if (block->size() > count || block->size() > m_options.upload_body_bytes - offset) {
+                    co_return std::unexpected{ Error::BodyTooLarge };
+                }
+                if (block->empty()) {
+                    if (total) { co_return std::unexpected{ Error::InvalidRequest }; }
+                    break;
+                }
+                auto const size = block->size();
+                auto wire = chunked ? encoder.Encode(*block) : Result<std::string>{ std::move(*block) };
+                if (!wire) { co_return std::unexpected{ wire.error() }; }
+                auto written = co_await connection->WriteAll(std::move(*wire), deadlines.Remaining(until));
+                if (isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
+                if (!written) { co_return written; }
+                offset += size;
+                reported = co_await reportProgress(callbacks, { client::TransferDirection::Upload, offset, total, hop },
+                    deadlines.Remaining(until), Error::WriteTimeout);
+                if (!reported) { co_return reported; }
+            }
+            if (chunked) {
+                auto terminal = encoder.Finish();
+                if (!terminal) { co_return std::unexpected{ terminal.error() }; }
+                auto written = co_await connection->WriteAll(std::move(*terminal), deadlines.Remaining(until));
+                if (isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
+                if (!written) { co_return written; }
+            }
+            co_return co_await reportProgress(callbacks, { client::TransferDirection::Upload, offset, total, hop, true },
+                deadlines.Remaining(until), Error::WriteTimeout);
+        }
+
+        /**
          * @brief Transfer an owned buffered body once, retaining replay storage for configured redirects.
          * @param request Send-owned prepared request, alive throughout this coroutine.
          * @param epoch Current request cancellation epoch.
@@ -502,6 +585,9 @@ namespace mhttp::impl {
             std::size_t hop
         ) -> asio::awaitable<Result<void>> {
             if (isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
+            if (request.request.IsStreaming()) {
+                co_return co_await writeProvider(request, epoch, deadlines, until, callbacks, hop);
+            }
             auto connection = m_connection;
             auto bytes = m_options.max_redirects == 0 ? std::move(request.request.m_impl->body)
                 : std::string{ request.request.Body() };
