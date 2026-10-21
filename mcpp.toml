@@ -14,6 +14,14 @@ path = "src/mhttp.cppm"
 [targets.mhttp]
 kind = "lib"
 
+[targets.rest_server]
+kind = "bin"
+main = "examples/rest_server/main.cpp"
+
+[targets.rest_client]
+kind = "bin"
+main = "examples/rest_client/main.cpp"
+
 [dependencies.chriskohlhoff]
 asio = "1.38.1"
 
