@@ -11,6 +11,7 @@ export import :core.status;
 export import :core.headers;
 export import :core.query;
 export import :core.url;
+export import :core.message;
 
 export import :utils.string;
 export import :utils.percent;
