@@ -101,6 +101,8 @@ IPv4。IPv4 与 IPv6 分别匹配，IPv4 CIDR 不信任 IPv4-mapped IPv6；双�
 `RemoteEndpoint()` 的真实地址与端口始终保留。只有复制出的字符串能在请求结束后继续使用。
 头部大小和字段数量受原有服务器输入上限约束；单独使用 `TrustedProxies::Resolve(peer, headers)`
 时由调用方限制输入大小。`Contains(address)` 可在启动前检查地址是否属于配置网段。
+请求头或声明的 body 大小在接收阶段被拒绝时，错误请求保留真实对端 IP，不采信部分解析的转发字段。
+完整请求头被接受后发生的 body 中断仍使用已经计算的客户端 IP。
 
 ## 认证中间件
 
@@ -383,3 +385,7 @@ handler 验收还覆盖全局/路由 aspect 顺序、403 短路、带 aspect 的
 其他连接的响应仍能在 250 ms 内完成。
 慢速客户端验收让请求头每 100 ms 到达一个字节，确认 1 秒整头期限不会被进度重置；
 另用小接收窗口且不读取响应的客户端，确认 100 ms 写期限关闭未写完的响应，并报告 WriteTimeout。
+`tests/server/trusted_proxies_test.cpp` 覆盖地址/CIDR 校验、全部前缀位、地址族、重复转发字段和请求所有权；
+`tests/integration/client_ip_test.cpp` 覆盖默认拒信、策略快照、异步中间件/日志、并发会话和 IPv6 回环。
+原始对端的 `listener trusted proxy input` 用例逐字节发送流水线请求，验证 trailer 不改变客户端 IP、
+非法/超限请求头不会信任部分字段、隐藏请求不会执行，以及 body 断连后的地址一致性。
