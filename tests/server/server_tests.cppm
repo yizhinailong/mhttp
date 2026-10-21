@@ -214,6 +214,27 @@ namespace mhttp::test {
     }
 
     /**
+     * @brief Verify stopping a bound-only socket releases the port without waiting for an accept generation.
+     */
+    auto server_bound_only_stop() -> void {
+        for (bool started_runtime : { false, true }) {
+            Runtime runtime;
+            if (started_runtime) { Check(runtime.Start(4).has_value(), "start optional bound-only runtime"); }
+            server::HttpServer server{ runtime };
+            Check(server.BindToAnyPort("127.0.0.1").has_value(), "bind without submitting an accept loop");
+            auto const endpoint = *server.LocalEndpoint();
+            CheckEq(server.WaitUntilReady().error(), Error::NotRunning, "bound-only readiness returns without waiting");
+            Check(server.Stop().has_value(), "stop bound-only listener synchronously");
+            CheckEq(server.WaitUntilReady().error(), Error::NotRunning, "stopped readiness returns without waiting");
+            Check(!server.IsRunning() && !server.LocalEndpoint(), "bound-only stop clears published state");
+            TransportRuntime peers;
+            peers.Run(server_refused_scenario(peers.Executor(), endpoint));
+            Check(server.Stop().has_value(), "repeated bound-only stop remains safe");
+            CheckEq(runtime.IsRunning(), started_runtime, "bound-only stop preserves caller-owned runtime execution");
+        }
+    }
+
+    /**
      * @brief Start several raw requests and await cancellation of all owning peer sockets.
      * @param executor Fixture strand.
      * @param endpoint Owned server endpoint.
@@ -867,6 +888,7 @@ export namespace mhttp::test {
         return RunTests(argc, argv, {
             { "listener methods and restart", server_methods_and_restart },
             { "listener idle and destructor stop", server_idle_and_destructor_stop },
+            { "listener bound-only stop", server_bound_only_stop },
             { "listener in-flight stop", server_inflight_stop },
             { "listener Offload drain", server_offload_drain },
             { "listener callback isolation", server_callback_isolation },
