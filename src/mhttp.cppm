@@ -1,8 +1,5 @@
 /**
  * @file mhttp.cppm
- * @brief Define the primary module for the asynchronous server library.
+ * @brief Re-export the public interfaces of the asynchronous HTTP library.
  */
 export module mhttp;
-
-import std;
-import asio;
