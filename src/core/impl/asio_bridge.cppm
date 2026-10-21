@@ -42,6 +42,7 @@ namespace mhttp::impl {
         asio::any_io_executor m_executor; ///< Root strand, also used for completion observation.
         std::stop_token m_stop; ///< Connection or runtime generation cancellation.
         std::weak_ptr<TaskRoot> m_root; ///< Root held by its awaiting Asio coroutine, avoiding a cycle.
+        std::shared_ptr<RuntimeImpl> m_runtime; ///< Retain the root context and lazy blocking-work pool.
 
     public:
         /**
@@ -49,13 +50,16 @@ namespace mhttp::impl {
          * @param executor Strand on which the root starts and resumes.
          * @param stop Cancellation token for all nested operations.
          * @param root Root retained by AwaitTask until completion.
+         * @param runtime Runtime owning the blocking-work pool, when Offload is supported.
          */
         AsioScheduler(
             asio::any_io_executor executor,
             std::stop_token stop,
-            std::weak_ptr<TaskRoot> root
+            std::weak_ptr<TaskRoot> root,
+            std::shared_ptr<RuntimeImpl> runtime
         ) :
-            m_executor{ std::move(executor) }, m_stop{ stop }, m_root{ std::move(root) } {}
+            m_executor{ std::move(executor) }, m_stop{ stop }, m_root{ std::move(root) },
+            m_runtime{ std::move(runtime) } {}
 
         /**
          * @brief Queue a root or child resumption, retaining the root through the callback.
@@ -76,6 +80,16 @@ namespace mhttp::impl {
          * @return Stop token valid across the root's lifetime.
          */
         [[nodiscard]] auto StopToken() const noexcept -> std::stop_token { return m_stop; }
+
+        /**
+         * @brief Select the root runtime's separate executor for blocking work.
+         * @return Owned copy of the worker executor.
+         * @throws std::logic_error If this internal root has no associated runtime.
+         */
+        [[nodiscard]] auto WorkerExecutor() -> asio::any_io_executor {
+            if (!m_runtime) { throw std::logic_error{ "Offload requires an owning runtime" }; }
+            return m_runtime->WorkerExecutor();
+        }
     };
 
     /**
@@ -118,13 +132,15 @@ namespace mhttp::impl {
      * @param task Consumed user coroutine.
      * @param executor Serialized executor for all user code in this root.
      * @param stop Connection/runtime stop token; cancellation completes nested operations before drain.
+     * @param runtime Runtime owning the blocking-work pool; keep for roots that allow Offload.
      * @return User result, rethrowing its exception after frame cleanup.
      */
     template <typename T>
     auto AwaitTask(
         Task<T> task,
         asio::any_io_executor executor,
-        std::stop_token stop = {}
+        std::stop_token stop = {},
+        std::shared_ptr<RuntimeImpl> runtime = {}
     ) -> asio::awaitable<T> {
         auto state = std::make_shared<AwaitTaskState<T>>(executor);
         state->root = std::make_shared<TaskRoot>();
@@ -134,7 +150,7 @@ namespace mhttp::impl {
             owner->failure = failure;
             static_cast<void>(owner->done.try_send(asio::error_code{}));
         };
-        auto scheduler = std::make_shared<AsioScheduler>(executor, stop, state->root);
+        auto scheduler = std::make_shared<AsioScheduler>(executor, stop, state->root, std::move(runtime));
         detail::TaskAccess::Bind(state->root->task, scheduler);
         scheduler->Schedule(detail::TaskAccess::Handle(state->root->task));
         bool const previous = co_await asio::this_coro::throw_if_cancelled();
@@ -339,6 +355,28 @@ namespace mhttp::impl {
     }
 
     /**
+     * @brief Execute owned blocking work on a worker, preserving failures and completion lifetime.
+     * @param function Callback borrowing only values owned by its awaiting Task frame.
+     * @param stop Runtime/connection generation token.
+     * @note A running function finishes before cancellation is reported; it is never interrupted.
+     */
+    auto run_blocking(std::function<void()> function, std::stop_token stop) -> asio::awaitable<void> {
+        if (stop.stop_requested()) { throw_error(Error::Canceled); }
+        function();
+        if (stop.stop_requested()) { throw_error(Error::Canceled); }
+        co_return;
+    }
+
+    /**
+     * @brief Run blocking work separately, then resume the awaiting Task on its original strand.
+     * @param function Owned callback; any borrowed Task storage remains alive until completion.
+     */
+    auto offload(std::function<void()> function) -> Task<void> {
+        auto scheduler = co_await CurrentAsioScheduler{};
+        co_await ToTask(scheduler->WorkerExecutor(), run_blocking(std::move(function), scheduler->StopToken()));
+    }
+
+    /**
      * @brief Submit a root to a running generation and report all exceptions to its completion.
      * @param runtime Runtime retained through initiation; its public owner must drain before destruction.
      * @param task Consumed lazy root.
@@ -356,7 +394,7 @@ namespace mhttp::impl {
         return runtime->Submit([runtime, root](std::stop_token stop) mutable {
             try {
                 auto executor = asio::make_strand(runtime->Context());
-                asio::co_spawn(executor, AwaitTask(std::move(root->task), executor, stop),
+                asio::co_spawn(executor, AwaitTask(std::move(root->task), executor, stop, runtime),
                     [root](std::exception_ptr failure) { root->complete(failure); });
             } catch (...) {
                 root->task = {};

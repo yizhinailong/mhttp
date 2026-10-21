@@ -45,6 +45,7 @@ namespace mhttp::impl {
         std::condition_variable m_drained; ///< Notify inline runners and concurrent joiners.
         State m_state{ State::Idle }; ///< Current generation lifecycle.
         std::vector<std::thread> m_threads; ///< Threads owned until extracted by Join.
+        std::shared_ptr<asio::thread_pool> m_workers; ///< Lazily created pool, reused across drained generations.
         std::size_t m_runners{}; ///< All run loops, including an inline Run.
         bool m_failed{}; ///< An unexpected callback exception stopped this generation.
 
@@ -151,6 +152,17 @@ namespace mhttp::impl {
          * @return Context owned by the public Runtime for longer than every server/client using it.
          */
         [[nodiscard]] auto Context() noexcept -> asio::io_context& { return m_context; }
+
+        /**
+         * @brief Lazily create a bounded pool for blocking application work.
+         * @return Executor owned until this runtime's final destruction, after all roots drain.
+         * @note Root work guards keep I/O runners alive while worker completions are outstanding.
+         */
+        [[nodiscard]] auto WorkerExecutor() -> asio::any_io_executor {
+            std::lock_guard lock{ m_mutex };
+            if (!m_workers) { m_workers = std::make_shared<asio::thread_pool>(2); }
+            return m_workers->get_executor();
+        }
 
         /**
          * @brief Submit initial work atomically with respect to stopping this generation.

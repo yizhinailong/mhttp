@@ -200,4 +200,26 @@ export namespace mhttp {
         return impl::sleep_for(duration);
     }
 
+    /**
+     * @brief Execute blocking work on a separate pool, returning to this Task's original strand.
+     * @tparam Function Owned invocable; move-only callables and results are supported.
+     * @param function Function moved into the lazy Task frame, invoked once on a worker thread.
+     * @return Owned function result, or void. References are not supported.
+     * @throws std::system_error With Canceled when cancellation precedes invocation or follows it.
+     * @note A running function cannot be interrupted. Stop returns promptly; Join waits for it.
+     *       Keep anything borrowed by function alive until the Task completes. Exceptions propagate
+     *       unchanged, and execution resumes on the original strand for success and failure.
+     */
+    template <typename Function> requires std::invocable<Function&>
+    [[nodiscard]] auto Offload(Function function) -> Task<std::invoke_result_t<Function&>> {
+        using Value = std::invoke_result_t<Function&>;
+        static_assert(!std::is_reference_v<Value>, "Offload must return an owned value or void");
+        std::optional<std::conditional_t<std::is_void_v<Value>, std::monostate, Value>> result;
+        co_await impl::offload([&function, &result] {
+            if constexpr (std::is_void_v<Value>) { std::invoke(function); }
+            else { result.emplace(std::invoke(function)); }
+        });
+        if constexpr (!std::is_void_v<Value>) { co_return std::move(*result); }
+    }
+
 } // namespace mhttp
