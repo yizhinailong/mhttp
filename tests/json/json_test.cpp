@@ -218,6 +218,61 @@ auto json_client_shortcuts() -> void {
 }
 
 /**
+ * @brief Rewrite errors from different layers into one JSON envelope while retaining status and required fields.
+ */
+auto json_error_responses() -> void {
+    mhttp::Runtime runtime;
+    Check(runtime.Start(4).has_value(), "start JSON error runtime");
+    mhttp::server::HttpServer server{ runtime };
+    std::atomic<unsigned> errors{}, posts{};
+    Check(server.SetErrorHandler([&errors](auto&, auto& response) -> mhttp::Task<void> {
+        ++errors;
+        co_await mhttp::Sleep(std::chrono::milliseconds{ 1 });
+        Check(response.SetJson(mhttp::Json{ { "error", {
+            { "code", static_cast<unsigned>(response.Status()) },
+            { "message", mhttp::ReasonPhrase(response.Status()) },
+        } } }).has_value(), "serialize one application-selected JSON error format");
+    }).has_value(), "register asynchronous JSON error transformer");
+    Check(server.SetPostRoutingHandler([&posts](auto&, auto& response) {
+        ++posts;
+        Check(response.Headers().Set("X-Final", "once").has_value(), "finalize customized JSON error");
+    }).has_value(), "register JSON error finalizer");
+    Check(server.Post("/input", [](auto& request, auto& response) {
+        if (!request.Json()) { Check(response.SetError(mhttp::Status::BadRequest).has_value(), "reject malformed JSON request"); }
+    }).has_value(), "register JSON validation route");
+    auto auth = mhttp::server::BearerAuth::Create("valid-token", "REST");
+    Check(auth.has_value(), "create JSON error authentication policy");
+    Check(server.Get("/protected", [](auto&, auto&) { Check(false, "missing Bearer token cannot dispatch"); }, *auth).has_value(), "register JSON authentication rejection");
+    Check(server.Get("/throw", [](auto&, auto&) { throw std::runtime_error{ "private secret" }; }).has_value(), "register JSON exception boundary");
+    auto port = server.BindToAnyPort("127.0.0.1");
+    if (!port || !server.Start() || !server.WaitUntilReady()) { throw std::runtime_error{ "cannot start JSON error peer" }; }
+    mhttp::client::HttpClient client{ runtime, "127.0.0.1", *port };
+    struct Case { mhttp::Method method; std::string_view path; mhttp::Status status; };
+    for (auto const& test : {
+             Case{ mhttp::Method::Get, "/missing", mhttp::Status::NotFound },
+             Case{ mhttp::Method::Get, "/input", mhttp::Status::MethodNotAllowed },
+             Case{ mhttp::Method::Post, "/input", mhttp::Status::BadRequest },
+             Case{ mhttp::Method::Get, "/protected", mhttp::Status::Unauthorized },
+             Case{ mhttp::Method::Get, "/throw", mhttp::Status::InternalServerError } }) {
+        mhttp::client::Request request{ test.method, std::string{ test.path } };
+        if (test.method == mhttp::Method::Post) { Check(request.SetContent("{", "application/json").has_value(), "send invalid JSON input"); }
+        auto result = mhttp::SyncWait(runtime, client.Send(std::move(request)));
+        if (!Check(result.has_value(), "customized REST error remains an ordinary HTTP response")) { continue; }
+        CheckEq(result->Status(), test.status, "JSON formatter preserves error status");
+        auto value = result->Json();
+        Check(value && (*value)["error"]["code"] == static_cast<unsigned>(test.status)
+            && (*value)["error"]["message"] == std::string{ mhttp::ReasonPhrase(test.status) }, "all REST error sources share the selected JSON envelope");
+        CheckEq(result->Header("X-Final"), "once"sv, "post hook runs after JSON error transformation");
+        CheckEq(result->Header("Content-Length"), std::to_string(result->Body().size()), "JSON error framing uses transformed bytes");
+        Check(!result->Body().contains("secret"), "exception diagnostics stay outside the public error representation");
+        if (test.status == mhttp::Status::MethodNotAllowed) { CheckEq(result->Header("Allow"), "POST"sv, "JSON error preserves Allow"); }
+        if (test.status == mhttp::Status::Unauthorized) { CheckEq(result->Header("WWW-Authenticate"), "Bearer realm=\"REST\""sv, "JSON error preserves authentication challenge"); }
+        if (test.status == mhttp::Status::InternalServerError) { Check(!result->KeepAlive(), "JSON exception response closes despite formatting"); }
+    }
+    Check(errors == 5 && posts == 5, "one error and post callback per transformed response");
+}
+
+/**
  * @brief Run optional JSON consumer acceptance independently of the feature-free test suite.
  * @param argc Argument count.
  * @param argv Optional filters.
@@ -229,5 +284,6 @@ auto main(int argc, char* argv[]) -> int {
         { "optional JSON writers", json_writers },
         { "optional JSON HTTP round trips", json_http_round_trips },
         { "optional JSON client shortcuts", json_client_shortcuts },
+        { "optional JSON error responses", json_error_responses },
     });
 }

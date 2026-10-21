@@ -55,6 +55,25 @@ auto response = co_await std::move(task);
 JSON 序列化失败产生 InvalidRequest Task，不发起网络 I/O，也不关闭已有连接。
 字符串重载仍传输原始字节；仅精确 Json / OrderedJson 类型启用 JSON 重载，不隐式转换字符串或标量。
 
+错误响应默认使用安全的纯文本格式。REST 应用可以统一改成 JSON；状态码、Allow 和认证 challenge
+由原错误保留，最终分帧在改写后计算。例如在启动前注册：
+
+```cpp
+auto configured = server.SetErrorHandler([](auto&, auto& response) {
+    auto encoded = response.SetJson(mhttp::Json{ { "error", {
+        { "code", static_cast<unsigned>(response.Status()) },
+        { "message", mhttp::ReasonPhrase(response.Status()) },
+    } } });
+    if (!encoded) {
+        static_cast<void>(response.SetError(mhttp::Status::InternalServerError));
+    }
+});
+if (!configured) { throw std::runtime_error{ "cannot configure error handler" }; }
+```
+
+错误处理器应返回 void 或 Task<void>。处理器自身抛异常时，路由层按已有异常边界恢复安全响应，
+已经调用过的错误处理器不会递归重入。
+
 `tests/core/json_support_test.cpp` 验证仅导入 mhttp 不会隐式启用 JSON 接口。
 `python tools/check_json.py` 在独立消费者工程中从依赖侧开启 feature，运行有锁文件的测试，
 覆盖空对象、数组、约 33 KiB 数据、15 轮随机 JSON、媒体类型、深度、无效输入和序列化失败。
