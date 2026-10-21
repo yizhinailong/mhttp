@@ -7,3 +7,4 @@ export module mhttp;
 export import :utils.string;
 export import :utils.percent;
 export import :utils.base64;
+export import :utils.date;
