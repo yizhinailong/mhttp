@@ -58,6 +58,33 @@ auto expected_results() -> void {
 }
 
 /**
+ * @brief Verify mhttp errors survive standard exception construction, propagation, and destruction.
+ */
+auto system_errors() -> void {
+    for (auto error : { mhttp::Error::Busy, mhttp::Error::NotRunning, mhttp::Error::Canceled }) {
+        bool caught{};
+        try { throw std::system_error{ mhttp::make_error_code(error) }; }
+        catch (std::system_error const& exception) {
+            caught = exception.code() == error;
+            Check(!std::string_view{ exception.what() }.empty(), "system error has a diagnostic");
+        }
+        Check(caught, "system error preserves the mhttp category and value");
+        std::exception_ptr captured;
+        try { throw std::system_error{ mhttp::make_error_code(error) }; }
+        catch (...) { captured = std::current_exception(); }
+        caught = false;
+        try { std::rethrow_exception(captured); }
+        catch (std::system_error const& exception) { caught = exception.code() == error; }
+        Check(caught, "captured system error preserves category and value");
+        captured = std::make_exception_ptr(std::system_error{ mhttp::make_error_code(error) });
+        caught = false;
+        try { std::rethrow_exception(captured); }
+        catch (std::system_error const& exception) { caught = exception.code() == error; }
+        Check(caught, "copied system error preserves category and value");
+    }
+}
+
+/**
  * @brief Verify endpoint storage is owned and independent of source strings and copies.
  */
 auto endpoint_values() -> void {
@@ -82,6 +109,7 @@ auto main(int argc, char* argv[]) -> int {
     return mhttp::test::RunTests(argc, argv, {
         { "standard error codes", error_codes },
         { "expected results", expected_results },
+        { "standard system errors", system_errors },
         { "endpoint values", endpoint_values },
     });
 }
