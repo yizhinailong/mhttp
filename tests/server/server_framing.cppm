@@ -44,6 +44,22 @@ namespace mhttp::test {
             { "GET /ok HTTP/1.1\r\nHost: local\r\nBad Field: yes\r\n\r\n", Status::BadRequest },
             { "GET /ok HTTP/1.1\r\nHost: local\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n",
                 Status::BadRequest },
+            { "POST /ok HTTP/1.1\r\nHost: local\r\nContent-Length: +1\r\n\r\n", Status::BadRequest },
+            { "POST /ok HTTP/1.1\r\nHost: local\r\nContent-Length: 0x2e\r\n\r\n", Status::BadRequest },
+            { "POST /ok HTTP/1.1\r\nHost: local\r\nContent-Length: 1, 1\r\n\r\n", Status::BadRequest },
+            { "POST /ok HTTP/1.1\r\nHost: local\r\nContent-Length:\r\n\r\n", Status::BadRequest },
+            { "POST /ok HTTP/1.1\r\nHost: local\r\nContent-Length: -1\r\n\r\n", Status::BadRequest },
+            { "POST /ok HTTP/1.1\r\nHost: local\r\nContent-Length: 1 0\r\n\r\n", Status::BadRequest },
+            { "POST /ok HTTP/1.1\r\nHost: local\r\nContent-Length: 18446744073709551616\r\n\r\n",
+                Status::BadRequest },
+            { "POST /ok HTTP/1.1\r\nHost: local\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n",
+                Status::BadRequest },
+            { "POST /ok HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n", Status::BadRequest },
+            { "POST /ok HTTP/1.1\r\nHost: local\r\nTransfer-Encoding: chunked, gzip\r\n\r\n",
+                Status::BadRequest },
+            { "POST /ok HTTP/1.1\r\nHost: local\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
+                Status::NotImplemented },
+            { "POST /ok HTTP/1.1\r\nHost: local\r\nTransfer-Encoding: gzip\r\n\r\n", Status::NotImplemented },
             { "POST /ok HTTP/1.1\r\nHost: local\r\nContent-Length: 129\r\n\r\n" + std::string(129, 'x'),
                 Status::ContentTooLarge },
             { "POST /ok HTTP/1.1\r\nHost: local\r\nTransfer-Encoding: chunked\r\n\r\n81\r\n"
@@ -66,12 +82,15 @@ namespace mhttp::test {
             CheckEq(reply.head.headers.Get("Connection"), "close", "rejected or unread input cannot reuse its connection");
             CheckEq(offset, wire.size(), "hidden body and pipeline bytes never produce another response");
         }
-        auto wire = co_await server_exchange(executor, endpoint,
-            std::format("GET /ok HTTP/1.1\r\nHost: local\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                HIDDEN_REQUEST.size(), HIDDEN_REQUEST));
-        std::size_t offset{};
-        CheckEq(parse_session_reply(wire, offset).body, "ok", "accepted GET consumes its complete body before dispatch");
-        CheckEq(offset, wire.size(), "HTTP-looking bytes inside an accepted body never become a pipeline request");
+        for (bool const duplicate : { false, true }) {
+            auto const extra = duplicate ? std::format("Content-Length: {}\r\n", HIDDEN_REQUEST.size()) : "";
+            auto wire = co_await server_exchange(executor, endpoint,
+                std::format("GET /ok HTTP/1.1\r\nHost: local\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n{}",
+                    HIDDEN_REQUEST.size(), extra, HIDDEN_REQUEST));
+            std::size_t offset{};
+            CheckEq(parse_session_reply(wire, offset).body, "ok", "identical lengths consume one complete body before dispatch");
+            CheckEq(offset, wire.size(), "HTTP-looking bytes inside an accepted body never become a pipeline request");
+        }
     }
 
     /**
@@ -101,7 +120,7 @@ namespace mhttp::test {
         TransportRuntime peers;
         peers.Run(server_rejected_input_scenario(peers.Executor(), *server.LocalEndpoint()));
         Check(server.Stop().has_value(), "drain rejected input sessions");
-        CheckEq(legitimate.load(), 1U, "only the completely accepted request dispatches a handler");
+        CheckEq(legitimate.load(), 2U, "only completely accepted single/equal lengths dispatch a handler");
         CheckEq(hidden.load(), 0U, "no request hidden behind rejection or inside a body is dispatched");
     }
 
