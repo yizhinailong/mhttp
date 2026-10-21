@@ -2,7 +2,7 @@
 
 消费者通过 `import mhttp;` 使用 `Task<T>`、`Runtime`、`Sleep`、`Offload` 和
 `SyncWait`。公共接口使用标准库类型；Asio 执行器和桥接函数位于实现分区。
-这些组件尚不包含 TCP 连接、监听器或 HTTP 会话。
+内部 TCP 连接已经实现；监听器和 HTTP 会话将在后续阶段接入。
 
 ## Task 的所有权
 
@@ -72,10 +72,44 @@ auto main() -> int {
 }
 ```
 
+## 内部 TCP 连接
+
+`impl::Connection` 通过共享所有权持有 socket，每个连接有独立 strand。
+创建时校验读缓冲和单次发送上限：读缓冲默认 16 KiB、最大 64 KiB，
+单次发送默认最多 16 MiB，两者必须为正数。HTTP 消息的大小限制由协议层另外管理。
+接受或建立连接期间才可借用初始化 socket；开始读写后，所有 socket 访问均由连接管理。
+
+`ReadSome` 返回独立拥有数据的字符串，后续读取不会使其失效。
+`WriteAll` 拥有传入的字符串，处理部分写入，成功表示全部字节已发送。
+发送超过上限时在发送任何字节前返回 `BodyTooLarge`。
+同一方向只允许一个操作在途，重复操作返回 `Busy`；读取与发送可以同时挂起。
+返回的惰性操作在初始挂起前已经持有连接，调用方可以释放自己的连接引用。
+
+读写默认超时 30 秒，可传 `nullopt` 禁用；非正时长立即超时。
+一次 `WriteAll` 的所有部分写入共享截止时间；`ReadSome` 的截止时间针对这一次读取，
+后续 HTTP 会话还需维护整个头部读取的截止时间。
+超时会关闭连接，触发超时的操作返回 `ReadTimeout` 或 `WriteTimeout`，
+其他在途操作返回 `Canceled`。失败发送可能已发出前缀，连接不能继续复用。
+已完成操作的定时器即使排队等待回调，也不会关闭后续操作。
+
+对端 EOF 和 reset 映射为 `ConnectionClosed`，其中接收 EOF 仍允许本地发送响应。
+`Shutdown` 在发送完成后半关闭发送方向，读取仍可继续；发送在途时返回 `Busy`。
+`Close` 可从任意线程请求，实际关闭投递到连接 strand，重复调用安全。
+关闭后的新操作返回 `ConnectionClosed`。取消在途 I/O 返回 `Canceled`；
+桥接尚未启动的操作时，取消也可能以代码为 `Canceled` 的 `std::system_error` 传播。
+上层公共请求接口需要统一这一边界。
+
+Runtime 必须活过连接和异步操作，并持续执行到关闭、取消回调及定时器清理完成。
+`core.impl.io_error` 按连接、解析地址、绑定、读取和发送的上下文集中映射传输错误，
+区分操作截止时间、主动取消和对端断开。
+
 ## 验证
 
 `tests/core/task_test.cpp` 覆盖值、异常、深层对称转移及帧所有权；
 `runtime_test.cpp` 覆盖启停、并发停止和等待、重启以及析构；
 `async_test.cpp` 覆盖定时器、取消竞争、I/O 同步等待拒绝和同 strand 串行性；
 `offload_test.cpp` 覆盖工作线程、结果与异常恢复、I/O 响应和停止清理。
+`python tools/check_transport.py` 运行内部传输测试，覆盖回环分段收发、读写上限、
+整体写超时、定时器复用、半关闭、跨线程关闭和取消、连接所有权与对端重置，
+并检查 Task 根、Asio 调用方和操作使用独立 strand 时的结果、异常与恢复位置。
 当前本地验证平台为 Windows；Linux 尚未本地验证。
