@@ -26,18 +26,23 @@ namespace mhttp::test {
      * @param wire Borrowed collected peer bytes.
      * @param offset Consumed prefix, updated through one response.
      * @param method Originating method, including HEAD suppression semantics.
+     * @param end_of_stream Whether transport EOF was observed, allowing a close-delimited final response.
      * @return Owned response, throwing if the session emits invalid or incomplete HTTP.
      */
     auto parse_session_reply(
         std::string const& wire,
         std::size_t& offset,
-        Method method = Method::Get
+        Method method = Method::Get,
+        bool end_of_stream = false
     ) -> SessionReply {
         detail::ResponseParser parser{ method };
         SessionReply reply;
         for (;;) {
             auto step = parser.Feed(std::span<char const>{ wire.data(), wire.size() }.subspan(offset));
             offset += step.consumed;
+            if (step.event == detail::ParseEvent::NeedMore && end_of_stream && offset == wire.size()) {
+                step = parser.Finish();
+            }
             if (step.event == detail::ParseEvent::Body) {
                 reply.body.append(step.data.data(), step.data.size());
             } else if (step.event == detail::ParseEvent::Complete) {

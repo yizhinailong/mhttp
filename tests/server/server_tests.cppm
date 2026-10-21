@@ -20,6 +20,7 @@ import :test.server_concurrency;
 import :test.server_deadlines;
 import :test.server_multipart;
 import :test.server_proxies;
+import :test.server_streams;
 
 namespace mhttp::test {
 
@@ -837,6 +838,9 @@ export namespace mhttp::test {
             { "listener exception concurrency", server_exception_concurrency },
             { "listener request metadata", server_request_metadata },
             { "listener trusted proxy input", server_proxy_input },
+            { "listener incremental streams", server_incremental_streams },
+            { "listener committed stream failures", server_failed_streams },
+            { "listener stream backpressure", server_stream_backpressure },
             { "listener request bodies", server_request_bodies },
             { "listener response mutations", server_response_mutations },
             { "listener rejected input", server_rejected_input },

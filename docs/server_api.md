@@ -436,3 +436,7 @@ handler 验收还覆盖全局/路由 aspect 顺序、403 短路、带 aspect 的
 `tests/integration/client_ip_test.cpp` 覆盖默认拒信、策略快照、异步中间件/日志、并发会话和 IPv6 回环。
 原始对端的 `listener trusted proxy input` 用例逐字节发送流水线请求，验证 trailer 不改变客户端 IP、
 非法/超限请求头不会信任部分字段、隐藏请求不会执行，以及 body 断连后的地址一致性。
+`tests/integration/stream_test.cpp` 覆盖流式二进制往返、trailer、复用、HEAD/204/304、provider 错误与异常、
+整条响应期限、两种停机路径、遗留写入和旧定时器的清理；总输出超过缓冲响应上限仍能成功。
+原始对端的三个 stream 用例用接收首块后才放行 provider 的 gate 验证增量发送，覆盖 HTTP/1.0 EOF、
+流水线顺序、编码后块大小的精确边界、非法/超限 trailer、peer reset，以及不读取时的背压和写超时。
