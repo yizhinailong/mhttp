@@ -12,6 +12,7 @@ import :server.impl.socket_options;
 import :test.transport;
 import :test.session;
 import :test.server_peer;
+import :test.server_routes;
 
 namespace mhttp::test {
 
@@ -822,6 +823,8 @@ export namespace mhttp::test {
             { "listener methods and restart", server_methods_and_restart },
             { "listener idle and destructor stop", server_idle_and_destructor_stop },
             { "listener bound-only stop", server_bound_only_stop },
+            { "listener route paths", server_route_paths },
+            { "listener route methods", server_route_methods },
             { "listener in-flight stop", server_inflight_stop },
             { "listener Offload drain", server_offload_drain },
             { "listener callback isolation", server_callback_isolation },

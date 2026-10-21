@@ -269,3 +269,5 @@ Bind 的同步回调由调用 Bind 的线程完成，其生命周期不依赖运
 `request_data_test.cpp`、`handler_test.cpp`、`middleware_test.cpp`、`router_test.cpp`、
 `routing_hooks_test.cpp`、`exception_test.cpp` 和 `response_policy_test.cpp`，覆盖数据所有权、错误拒绝、分帧衔接、
 类型化参数、并发上下文、调用顺序、短路、异常、注册替换、配置冻结、惰性所有权与取消清理。
+`tools/check_server.py` 在隔离模块中运行原始回环客户端，覆盖监听器生命周期、容量、双栈、日志，
+以及路由参数、编码分隔符、正则限制、404/405 与 HEAD 的完整 HTTP 响应；支持按用例名过滤。
