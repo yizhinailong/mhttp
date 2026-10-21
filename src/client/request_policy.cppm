@@ -23,6 +23,7 @@ export namespace mhttp::detail {
         client::Request request; ///< Original owned data; body stays alive without copying or borrowing callers.
         SerializedHead head; ///< Validated head with authoritative framing and connection policy.
         std::string target; ///< Final encoded origin-form target, including all query parameters, without fragment.
+        bool expect_continue{}; ///< Wait for 100 or a final response before transferring the nonempty body.
     };
 
     /**
@@ -104,13 +105,31 @@ export namespace mhttp::detail {
             auto added = head.headers.Add("User-Agent", options.user_agent);
             if (!added) { return std::unexpected{ added.error() }; }
         }
+        if (!head.headers.Has("Expect") && options.expect_continue_threshold != 0 && !request.Body().empty()
+            && request.Body().size() >= options.expect_continue_threshold) {
+            auto added = head.headers.Add("Expect", "100-continue");
+            if (!added) { return std::unexpected{ added.error() }; }
+        }
+        bool expect_continue{};
+        for (auto const& [name, value] : head.headers) {
+            if (!utils::iequals(name, "Expect")) { continue; }
+            if (value.empty()) { return std::unexpected{ Error::InvalidHeaders }; }
+            for (auto token : utils::split(value, ',')) {
+                if (!utils::iequals(utils::trim_ows(token), "100-continue")) {
+                    return std::unexpected{ Error::InvalidHeaders };
+                }
+                expect_continue = true;
+            }
+        }
+        if (expect_continue && request.Body().empty()) { return std::unexpected{ Error::InvalidRequest }; }
         auto serialized = serialize_request_head(head,
             { .body_bytes = request.Body().size(), .keep_alive = options.keep_alive });
         if (!serialized) { return std::unexpected{ serialized.error() }; }
         if (serialized->bytes.size() > options.max_request_bytes - request.Body().size()) {
             return std::unexpected{ Error::BodyTooLarge };
         }
-        return PreparedClientRequest{ std::move(request), std::move(*serialized), encode_request_target(head.target) };
+        return PreparedClientRequest{ std::move(request), std::move(*serialized), encode_request_target(head.target),
+            expect_continue };
     }
 
 } // namespace mhttp::detail

@@ -413,30 +413,63 @@ namespace mhttp::impl {
         }
 
         /**
-         * @brief Read one bounded final response using the Send's phase, overall, step, or untimed policy.
-         * @param request Prepared outgoing metadata used for HEAD and persistence decisions.
+         * @brief Transfer an owned body once, retaining a replay copy only for configured redirects.
+         * @param request Send-owned prepared request, alive throughout this coroutine.
+         * @param epoch Current request cancellation epoch.
+         * @param deadlines Send-owned timeout policy.
+         * @param until Fixed write phase/overall deadline, absent for Step/Never.
+         * @return Complete upload or a classified cancellation/write failure.
+         */
+        auto writeBody(
+            detail::PreparedClientRequest& request,
+            std::uint64_t epoch,
+            ClientDeadlines const& deadlines,
+            std::optional<std::chrono::steady_clock::time_point> until
+        ) -> asio::awaitable<Result<void>> {
+            if (isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
+            auto connection = m_connection;
+            auto bytes = m_options.max_redirects == 0 ? std::move(request.request.m_impl->body)
+                : std::string{ request.request.Body() };
+            auto written = co_await connection->WriteAll(std::move(bytes), deadlines.Remaining(until));
+            if (isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
+            co_return written;
+        }
+
+        /**
+         * @brief Negotiate an optional upload and read one bounded final response under the Send's deadline policy.
+         * @param request Prepared request; body storage may be transferred after upload permission or fallback.
          * @param epoch Current request cancellation epoch.
          * @param deadlines Borrowed Send-owned budget, retained through every asynchronous read.
          * @return Immutable complete response or classified read/framing/content-encoding failure.
          */
         auto readResponse(
-            detail::PreparedClientRequest const& request,
+            detail::PreparedClientRequest& request,
             std::uint64_t epoch,
             ClientDeadlines const& deadlines
         ) -> asio::awaitable<Result<client::Response>> {
-            detail::ResponseParser parser{ request.request.Method().value_or(Method::Get), detail::client_parser_limits(m_options) };
-            auto const until = deadlines.Until(m_options.read_timeout);
+            detail::ResponseParser parser{ request.request.Method().value_or(Method::Get),
+                detail::client_parser_limits(m_options), true };
+            auto until = deadlines.Until(m_options.read_timeout);
+            auto const continue_until = std::chrono::steady_clock::now() + m_options.expect_continue_timeout;
             auto connection = m_connection;
             std::string input, body;
             std::size_t offset{};
             bool eof{};
+            bool body_pending = request.expect_continue;
+            bool body_suppressed{};
             for (;;) {
                 if (isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
                 auto step = parser.Feed(std::span{ input.data(), input.size() }.subspan(offset));
                 offset += step.consumed;
                 if (step.event == detail::ParseEvent::NeedMore && eof) { step = parser.Finish(); }
+                bool send_body{};
                 switch (step.event) {
+                case detail::ParseEvent::Informational:
+                    if (parser.Head().status == Status::SwitchingProtocols) { co_return std::unexpected{ Error::ProtocolError }; }
+                    send_body = body_pending && parser.Head().status == Status::Continue;
+                    break;
                 case detail::ParseEvent::HeadersComplete:
+                    if (body_pending) { body_pending = false; body_suppressed = true; }
                     if (unsupportedEncoding(parser.Head().headers)) { co_return std::unexpected{ Error::UnsupportedContentEncoding }; }
                     break;
                 case detail::ParseEvent::Body:
@@ -446,13 +479,34 @@ namespace mhttp::impl {
                     co_return std::unexpected{ step.failure->error };
                 case detail::ParseEvent::Complete: {
                     if (offset != input.size()) { co_return std::unexpected{ Error::ProtocolError }; }
-                    bool const keep_alive = request.head.keep_alive && parser.Framing().keep_alive && !eof;
+                    bool const keep_alive = request.head.keep_alive && parser.Framing().keep_alive && !eof && !body_suppressed;
                     co_return detail::ClientResponseAccess::Create(parser.Head(), std::move(body), parser.Trailers(),
                         keep_alive, m_remote, m_local);
                 }
                 case detail::ParseEvent::NeedMore: {
-                    auto const remaining = deadlines.Remaining(until);
+                    auto remaining = deadlines.Remaining(until);
                     if (remaining && *remaining <= Duration::zero()) { co_return std::unexpected{ Error::ReadTimeout }; }
+                    if (body_pending) {
+                        auto const gap = continue_until - std::chrono::steady_clock::now();
+                        if (gap <= Duration::zero()) { send_body = true; break; }
+                        auto const read_until = remaining
+                            ? std::optional{ std::chrono::steady_clock::now() + *remaining } : std::nullopt;
+                        bool const fallback_wait = !remaining || gap < *remaining;
+                        auto ready = co_await connection->WaitForPeerData(fallback_wait ? gap : *remaining);
+                        if (isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
+                        if (!ready) {
+                            if (ready.error() == Error::ReadTimeout && fallback_wait
+                                && (!read_until || std::chrono::steady_clock::now() < *read_until)) {
+                                send_body = true;
+                                break;
+                            }
+                            co_return std::unexpected{ ready.error() };
+                        }
+                        if (read_until) {
+                            remaining = *read_until - std::chrono::steady_clock::now();
+                            if (*remaining <= Duration::zero()) { co_return std::unexpected{ Error::ReadTimeout }; }
+                        }
+                    }
                     auto read = co_await connection->ReadSome(remaining);
                     if (isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
                     if (!read) {
@@ -463,6 +517,12 @@ namespace mhttp::impl {
                     offset = 0;
                     break;
                 }
+                }
+                if (send_body) {
+                    body_pending = false;
+                    auto written = co_await writeBody(request, epoch, deadlines, deadlines.Until(m_options.write_timeout));
+                    if (!written) { co_return std::unexpected{ written.error() }; }
+                    until = deadlines.Until(m_options.read_timeout);
                 }
             }
         }
@@ -527,11 +587,10 @@ namespace mhttp::impl {
                 }
                 if (self->isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
                 if (written.error) { co_return std::unexpected{ *written.error }; }
-                auto wire_body = options.max_redirects == 0 ? std::move(prepared->request.m_impl->body)
-                    : std::string{ prepared->request.Body() };
-                auto body = co_await connection->WriteAll(std::move(wire_body), deadlines.Remaining(until));
-                if (self->isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
-                if (!body) { co_return std::unexpected{ body.error() }; }
+                if (!prepared->expect_continue) {
+                    auto body = co_await self->writeBody(*prepared, epoch, deadlines, until);
+                    if (!body) { co_return std::unexpected{ body.error() }; }
+                }
                 auto response = co_await self->readResponse(*prepared, epoch, deadlines);
                 if (!response) { co_return response; }
                 if (self->isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }

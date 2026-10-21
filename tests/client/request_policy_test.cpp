@@ -23,7 +23,7 @@ auto bounded_configuration() -> void {
     CheckEq(options.user_agent, "mhttp/" + std::string{ mhttp::VERSION }, "agent identifies the library release");
     for (auto member : { &mhttp::client::ClientOptions::connect_timeout,
                         &mhttp::client::ClientOptions::read_timeout, &mhttp::client::ClientOptions::write_timeout,
-                        &mhttp::client::ClientOptions::timeout }) {
+                        &mhttp::client::ClientOptions::timeout, &mhttp::client::ClientOptions::expect_continue_timeout }) {
         for (auto duration : { 0ms, -1ms, std::chrono::milliseconds::max() }) {
             auto changed = options;
             changed.*member = duration;
@@ -217,6 +217,58 @@ auto request_admission() -> void {
 }
 
 /**
+ * @brief Validate explicit/default expectations and automatic body thresholds before any connection is attempted.
+ */
+auto expect_continue_policy() -> void {
+    auto const origin = *mhttp::Url::Parse("http://localhost:8080/");
+    auto prepare = [&](std::string body, mhttp::client::ClientOptions options, mhttp::Headers headers = {}) {
+        mhttp::client::Request request{ mhttp::Method::Post, "/upload" };
+        request.Headers() = std::move(headers);
+        Check(request.SetContent(std::move(body)).has_value(), "construct owned expectation body");
+        return prepare_client_request(std::move(request), origin, options);
+    };
+    auto disabled = prepare("payload", {});
+    Check(disabled && !disabled->expect_continue && !disabled->head.bytes.contains("Expect:"),
+        "automatic expectation remains opt-in");
+    mhttp::client::ClientOptions options{ .expect_continue_threshold = 7 };
+    auto below = prepare("123456", options);
+    Check(below && !below->expect_continue, "body below threshold sends directly");
+    auto exact = prepare("1234567", options);
+    Check(exact && exact->expect_continue && exact->head.bytes.contains("Expect: 100-continue\r\n"),
+        "threshold equality adds the exact expectation field");
+    Check(exact->head.bytes.ends_with("\r\n\r\n") && !exact->head.bytes.contains("1234567"),
+        "preparation keeps the pending upload out of its head bytes");
+    CheckEq(exact->request.Body(), "1234567"sv, "pending body remains owned and unconsumed");
+    auto empty = prepare("", options);
+    Check(empty && !empty->expect_continue, "automatic expectation never describes an empty upload");
+    mhttp::Headers explicit_headers;
+    Check(explicit_headers.Add("eXpEcT", "100-CoNtInUe, 100-continue").has_value(), "list-valued explicit expectation");
+    Check(explicit_headers.Add("Expect", "100-continue").has_value(), "repeated known expectation");
+    auto explicit_request = prepare("x", {}, explicit_headers);
+    Check(explicit_request && explicit_request->expect_continue, "explicit known tokens work without an automatic threshold");
+    options.default_headers = explicit_headers;
+    auto fallback = prepare("x", options);
+    Check(fallback && fallback->expect_continue, "fallback expectation activates the same handshake");
+    CheckEq(prepare("", {}, explicit_headers).error(), mhttp::Error::InvalidRequest,
+        "explicit expectation cannot promise an absent body");
+    for (auto value : { "", "custom", "100-continue,", ",100-continue", "100-continue; a=b", "100-continue, custom" }) {
+        mhttp::Headers headers;
+        Check(headers.Set("Expect", value).has_value(), "lexically valid unsupported expectation");
+        CheckEq(prepare("x", {}, std::move(headers)).error(), mhttp::Error::InvalidHeaders,
+            "unsupported or incomplete expectations fail before I/O");
+    }
+    mhttp::Headers override_headers;
+    Check(override_headers.Set("Expect", "100-continue").has_value(), "valid explicit override");
+    Check(options.default_headers.Set("Expect", "unsupported").has_value(), "unsupported fallback");
+    Check(prepare("x", options, std::move(override_headers)).has_value(), "explicit field suppresses invalid fallback");
+    options.default_headers.Clear();
+    options.max_request_bytes = exact->head.bytes.size() + 7;
+    Check(prepare("1234567", options).has_value(), "wire admission includes automatically inserted Expect");
+    --options.max_request_bytes;
+    CheckEq(prepare("1234567", options).error(), mhttp::Error::BodyTooLarge, "one byte under the complete wire bound fails");
+}
+
+/**
  * @brief Run client preparation scenarios with bounded per-case watchdogs.
  * @param argc Argument count.
  * @param argv Optional case filters.
@@ -230,5 +282,6 @@ auto main(int argc, char* argv[]) -> int {
         { "client fallback fields", default_fields },
         { "client body and connection policy", body_and_connection_policy },
         { "client request admission", request_admission },
+        { "client Expect preparation", expect_continue_policy },
     });
 }

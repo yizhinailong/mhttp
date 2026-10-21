@@ -62,7 +62,7 @@ TimeoutPolicy::Overall 使用 timeout，为一次 Send 的连接、写入、读�
 共用一个单调时钟截止时间；新数据到达或切换连接均不重置预算。
 TimeoutPolicy::Step 为连接建立（DNS 和所有端点尝试合计）、每次完整请求头写入、完整 body 写入、
 每次底层读取分别重新设置 timeout，因此持续收到数据可以超过单次预算。
-TimeoutPolicy::Never 关闭所有自动计时，Stop、Runtime 停止和 Task 取消仍有效。
+TimeoutPolicy::Never 关闭请求失败期限，Stop、Runtime 停止和 Task 取消仍有效。
 Overall / Step 忽略独立阶段超时，Phase 忽略 timeout；所有配置的时长仍必须为正且可安全表示。
 超时按发生阶段返回 ConnectionTimeout、WriteTimeout 或 ReadTimeout，并关闭当前连接。
 
@@ -112,6 +112,46 @@ Content-Length 或 chunked 尚未完成就断开时返回 ConnectionClosed。
 已知 gzip、deflate、br、zstd Content-Encoding 返回 UnsupportedContentEncoding，未知编码原样保留。
 接收到的 HTTP 错误状态保持正常 Response；只有传输、语法、上限、取消等失败才作为 Result 错误。
 
+## Expect 上传握手
+
+大请求可以先发头部，等待 `100 Continue` 后再上传 body。显式请求字段和 default_headers
+中的 `Expect: 100-continue` 均会启用握手；字段名与 token 大小写无关，也接受重复的已知 token。
+不支持的 token、空字段或不完整列表返回 InvalidHeaders；对空 body 显式声明此期望返回
+InvalidRequest，均在连接前失败。
+
+可用 `ClientOptions::expect_continue_threshold` 自动为达到字节阈值的非空 body 添加该字段。
+阈值默认是 0，关闭自动添加；已有显式或默认 Expect 字段优先。自动字段也计入完整请求大小上限。
+
+```cpp
+mhttp::client::ClientOptions options;
+options.expect_continue_threshold = 1024 * 1024;
+options.expect_continue_timeout = std::chrono::milliseconds{ 500 };
+mhttp::client::HttpClient client{ runtime, "http://127.0.0.1:8080", options };
+auto task = client.Post("/upload", owned_binary_body, "application/octet-stream");
+```
+
+`expect_continue_timeout` 是正数，默认值见 ClientOptions 声明。100 的完整头部解析成功后
+只发送一次 body；103 等其他中间响应不会放行。对端没有及时返回 100 时，在有限等待后
+直接上传。该等待是协商回退，即使 TimeoutPolicy::Never 也生效；到期本身不作为请求失败。
+等待使用不消费字节的可读性操作，到期取消后排空，保留所有未读响应字节。
+回退后晚到或重复的 100 只作为中间响应处理，不会再次上传。中间响应仍受个数、字段和大小限制，
+不支持的 101 协议升级返回 ProtocolError。
+
+如果先收到完整的最终响应头，客户端不上传 body，继续读取完整最终响应并关闭连接。
+Response::KeepAlive() 因此为 false，即使原始响应字段声明 keep-alive；下一次请求建立新连接。
+417 同样作为普通 HTTP 响应返回，不自动重发业务请求。
+
+握手受 read_timeout / Overall / Step 的较早期限约束。Phase 模式下，握手等待不消耗 body
+写入预算：头部写入、握手读取、body 写入和最终响应读取分别有阶段预算；普通请求仍共用头部和
+body 的写入预算。Step 模式下，一次握手读取的可读性等待与实际读取共用该次读取预算；
+Overall 在上传、回退和重定向之间始终使用同一截止时间。
+提前 307 / 308 保留尚未上传的 body，目标连接重新协商；100 后再收到这类重定向时使用保留的
+拥有数据副本。303 和相应的 301 / 302 改写会清除 body 与 Expect。
+
+握手语义参考 [RFC 9110 §10.1.1](https://www.rfc-editor.org/rfc/rfc9110.html#section-10.1.1)。
+
+## 验证
+
 `tests/client/message_test.cpp` 覆盖所有权、二进制与重复字段、修改拒绝、移动和响应只读访问器。
 `tests/client/request_policy_test.cpp` 覆盖配置校验、构造 host、查询拼接、默认头优先级、分帧和发送边界。
 `tests/client/auth_test.cpp` 通过真实回环通信验证认证格式、默认字段替换、显式覆盖、非法输入拒绝和跨线程快照。
@@ -133,3 +173,7 @@ Never 延迟响应和整体上传超时。
 静默丢弃连接尝试的 HTTP 端点后运行；立即拒绝连接的端点不能用于此用例。
 `tests/client/keep_alive_test.cpp` 验证空闲关闭后的透明重连、200 次同连接复用、服务端每连接请求上限、
 禁用复用、Stop 世代竞争及销毁客户端时的空闲等待排空。
+`tests/integration/expect_test.cpp` 验证二进制握手往返、连接复用、404 / 413 的提前拒绝，
+以及提前和上传后 307、303 的 body 所有权。隔离客户端验收还用独立 TCP 对端检查 103 与
+分段 100 之前没有上传字节、有限等待回退、晚到 100 不重复上传、提前最终响应后的 EOF 与新连接、
+读写及整体期限、客户端和 Runtime 取消、异常中间响应，以及握手前断连。

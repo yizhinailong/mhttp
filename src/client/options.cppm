@@ -22,9 +22,10 @@ export namespace mhttp::client {
     };
 
     /**
-     * @brief Configure connection/read/write deadlines, buffered input/output limits, and fallback fields.
-     * @note A client owns a configuration snapshot. All timeouts and limits must be positive except
-     *       body_bytes, where zero accepts only empty responses. An empty user_agent disables the
+     * @brief Configure I/O deadlines, upload negotiation, buffered limits, and fallback fields.
+     * @note A client owns a configuration snapshot. All timeouts must be positive. Admission limits
+     *       must be positive except body_bytes, where zero accepts only empty responses. Zero
+     *       expect_continue_threshold disables automatic negotiation. An empty user_agent disables the
      *       built-in field; explicit request fields override default_headers and the built-in agent.
      */
     struct ClientOptions {
@@ -41,6 +42,8 @@ export namespace mhttp::client {
         std::size_t max_redirects{}; ///< Maximum followed redirects; zero returns 3xx responses unchanged.
         TimeoutPolicy timeout_policy{ TimeoutPolicy::Phase }; ///< Preserve separately configured phase deadlines by default.
         std::chrono::milliseconds timeout{ 30'000 }; ///< Positive budget used by Overall and Step.
+        std::size_t expect_continue_threshold{}; ///< Add Expect for nonempty bodies at least this large; zero disables automatic insertion.
+        std::chrono::milliseconds expect_continue_timeout{ 1'000 }; ///< Positive maximum handshake wait before sending the body without 100.
     };
 
 } // namespace mhttp::client
@@ -60,7 +63,8 @@ export namespace mhttp::detail {
             return value.count() > 0 && value <= max_timeout;
         };
         if (!valid_timeout(options.connect_timeout) || !valid_timeout(options.read_timeout)
-            || !valid_timeout(options.write_timeout) || !valid_timeout(options.timeout) || options.header_bytes == 0
+            || !valid_timeout(options.write_timeout) || !valid_timeout(options.timeout)
+            || !valid_timeout(options.expect_continue_timeout) || options.header_bytes == 0
             || options.header_fields == 0 || options.max_request_bytes == 0
             || options.body_bytes > std::numeric_limits<std::size_t>::max()) {
             return std::unexpected{ Error::InvalidRequest };
