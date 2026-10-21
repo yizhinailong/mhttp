@@ -8,7 +8,7 @@ FULL_PATH_NAMES        = YES
 STRIP_FROM_PATH        = .
 
 # Document the project pages and C++ module interfaces.
-INPUT                  = README.md AGENTS.md src
+INPUT                  = README.md AGENTS.md docs src
 FILE_PATTERNS          = *.cppm *.cpp *.hpp *.h *.md *.dox
 EXTENSION_MAPPING      = cppm=C++
 RECURSIVE              = YES

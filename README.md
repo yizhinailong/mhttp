@@ -1,7 +1,12 @@
 # mhttp
 
-基于 standalone Asio 的异步服务端项目，使用 mcpp、LLVM 和 C++23 Modules。
-当前已初始化构建骨架，服务端功能尚未实现。
+基于 standalone Asio 的异步 HTTP 库，使用 mcpp、LLVM 和 C++23 Modules。
+目标是提供 HTTP/1.1 服务端与客户端，公共接口通过 `import mhttp;` 使用。
+
+当前已实现不依赖网络的基础组件：HTTP 字符串校验、URL 百分号编码与解码、
+Base64、HTTP 日期、错误与 `Result<T>`、`Endpoint`、方法和状态码、
+有序多值 `Headers` 与 `QueryParams`，以及 HTTP URL 解析与相对引用解析。
+监听器、连接会话、协议解析器和客户端 I/O 待后续阶段实现。
 
 ## 构建
 
@@ -10,7 +15,32 @@
 
 ```text
 mcpp build
+mcpp build --locked
 ```
+
+保留自动生成的 `mcpp.lock`；锁文件由 mcpp 管理。
+
+## 测试
+
+每个 `tests/**/*.cpp` 是独立测试程序。用例在本地运行，不依赖公网服务：
+
+```text
+mcpp test --timeout 30
+mcpp test url --timeout 30
+mcpp test smoke --timeout 30 -- public
+```
+
+模块隔离和测试框架的额外检查：
+
+```text
+python tools/check_asio_boundary.py
+python tools/check_module_boundary.py
+python tools/check_test_support.py
+```
+
+边界规则与检查方法见 [模块边界](docs/module_boundaries.md)。
+依赖 Asio 的库代码限定在 `src/**/impl/` 的实现分区内。
+当前检查已在 Windows 本地通过；Linux 由 CI 验证。
 
 ## 文档
 
