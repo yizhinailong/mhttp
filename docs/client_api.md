@@ -2,7 +2,7 @@
 
 客户端的请求与响应类型通过 `import mhttp;` 使用，公共接口只包含标准库和 mhttp 类型。
 `client::HttpClient` 提供惰性连接和 `Send(Request) -> Task<Result<Response>>`。
-构造时不进行 DNS 或 socket I/O；连接、发送与读取均异步进行。重定向与可选整体超时策略待后续接入。
+构造时不进行 DNS 或 socket I/O；连接、发送与读取均异步进行。可选整体超时策略待后续接入。
 
 ```cpp
 import std;
@@ -86,6 +86,20 @@ Stop 可由任意线程调用，立即清除 IsOpen 的已知状态，投递取�
 Stop 前签发但尚未执行的 Task 同样被取消；之后新签发的请求可重新连接。
 Runtime 停止会关闭空闲及在途连接，Join 排空后重启 Runtime，可继续使用原客户端。
 
+max_redirects 默认为零，直接返回原始 3xx 响应。设置为正数后跟随 301、302、303、307、308，
+最多跟随指定次数，仍需跳转时返回 ExceedRedirectCount。304 或缺少非空 Location 的响应原样返回，
+跟随时拒绝多个 Location；跳转到 HTTPS 返回 UnsupportedScheme。
+Location 按实际发送 URL 解析相对路径，保留 percent escape、路径和查询中的 `+`，不发送 fragment，
+不重复追加原请求的 QueryParams。303 改为 GET；301/302 除 HEAD 外改为 GET，并移除 body、
+Content-Type、Content-Encoding 和 Expect；307/308 保留方法及完整二进制 body。
+跟随时完整读取各跳响应并执行相同的输入上限和阶段超时，最终只返回最后一个响应。
+启用重定向时会在发送期间保留请求 body，以便后续跳转重新发送。
+
+同源跳转保留 Cookie 和 Authorization；跨源时关闭原连接，重新生成 Host，
+并从显式字段和默认字段快照中移除 Authorization、Proxy-Authorization 和 Cookie。
+后续跳回原源也不恢复凭据；这些修改不影响客户端配置或之后独立签发的 Task。
+Host / Port 始终报告构造时的目的地，新 Send 从该目的地开始，不会误用最后一跳的跨源连接。
+
 响应支持 Content-Length、chunked 和读到关闭三种分帧；HEAD、204、304 不读取 body。
 Content-Length 或 chunked 尚未完成就断开时返回 ConnectionClosed。
 已知 gzip、deflate、br、zstd Content-Encoding 返回 UnsupportedContentEncoding，未知编码原样保留。
@@ -94,6 +108,8 @@ Content-Length 或 chunked 尚未完成就断开时返回 ConnectionClosed。
 `tests/client/message_test.cpp` 覆盖所有权、二进制与重复字段、修改拒绝、移动和响应只读访问器。
 `tests/client/request_policy_test.cpp` 覆盖配置校验、构造 host、查询拼接、默认头优先级、分帧和发送边界。
 `tests/client/auth_test.cpp` 通过真实回环通信验证认证格式、默认字段替换、显式覆盖、非法输入拒绝和跨线程快照。
+`tests/client/redirect_test.cpp` 覆盖方法/body 改写、关闭跟随、次数上限、相对和绝对 Location、
+编码查询、同源 Cookie、跨端口凭据移除、返回原源、跨源 body 上限和读超时。
 `tests/client/client_basic_test.cpp` 通过真实服务端验证常用方法、默认字段、端点、4 MiB 二进制往返、
 Busy、四个客户端的跨线程 Stop、读超时、空闲/在途 Runtime 取消与重启，以及消息在网络状态销毁后的所有权。
 `python tools/check_client.py` 使用隔离工程中的原始 TCP 对端验证 CL / chunked / EOF、trailer、

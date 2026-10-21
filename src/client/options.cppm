@@ -28,6 +28,7 @@ export namespace mhttp::client {
         bool keep_alive{ true }; ///< Permit connection reuse unless either peer requests closure.
         std::string user_agent{ std::string{ "mhttp/" } + std::string{ VERSION } }; ///< Validated optional fallback.
         Headers default_headers; ///< Ordered fallback fields; every explicit request name takes precedence.
+        std::size_t max_redirects{}; ///< Maximum followed redirects; zero returns 3xx responses unchanged.
     };
 
 } // namespace mhttp::client

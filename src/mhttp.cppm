@@ -22,6 +22,7 @@ export import :client.request;
 export import :client.response;
 export import :client.options;
 export import :client.request_policy;
+export import :client.redirect_policy;
 export import :client.http_client;
 
 export import :server.route_pattern;

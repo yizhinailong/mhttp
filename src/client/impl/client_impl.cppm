@@ -11,6 +11,7 @@ import :core.impl.connection;
 import :core.runtime;
 import :core.parser;
 import :client.request_policy;
+import :client.redirect_policy;
 import :client.response;
 import :utils.base64;
 
@@ -87,6 +88,7 @@ namespace mhttp::impl {
         std::mutex m_headers_mutex; ///< Protects configuration accessed outside the client strand.
         Headers m_default_headers; ///< Fallback fields copied synchronously when a Task is issued.
         std::shared_ptr<Connection> m_connection; ///< Current connecting or connected transport.
+        std::optional<Url> m_connection_origin; ///< Actual transport origin, distinct from the constructor URL.
         std::shared_ptr<IdleWatch> m_idle_watch; ///< Idle peer-close detection, retired before another Send.
         std::shared_ptr<ConnectDeadline> m_connect_deadline; ///< Active connection phase only.
         std::unique_ptr<std::stop_callback<std::function<void()>>> m_runtime_stop; ///< Idle and active runtime cancellation.
@@ -238,6 +240,7 @@ namespace mhttp::impl {
                 m_idle_watch.reset();
             }
             if (m_connection) { m_connection->Close(); m_connection.reset(); }
+            m_connection_origin.reset();
             m_remote = {};
             m_local = {};
         }
@@ -338,9 +341,10 @@ namespace mhttp::impl {
         /**
          * @brief Resolve and connect lazily under one deadline, retaining the transport through initialization.
          * @param epoch Current Send cancellation epoch.
+         * @param origin Effective destination for this hop, retained by the awaiting Send frame.
          * @return Success or classified DNS/connect/deadline/cancellation failure.
          */
-        auto connect(std::uint64_t epoch) -> asio::awaitable<Result<void>> {
+        auto connect(std::uint64_t epoch, Url const& origin) -> asio::awaitable<Result<void>> {
             auto deadline = std::make_shared<ConnectDeadline>(m_executor);
             m_connect_deadline = deadline;
             deadline->timer.expires_after(m_options.connect_timeout);
@@ -351,7 +355,7 @@ namespace mhttp::impl {
                 }
             });
             auto const [resolve_error, endpoints] = co_await m_resolver.async_resolve(
-                std::string{ m_origin->Host() }, std::to_string(m_origin->Port()), asio::as_tuple(asio::use_awaitable));
+                std::string{ origin.Host() }, std::to_string(origin.Port()), asio::as_tuple(asio::use_awaitable));
             if (isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
             if (deadline->expired) { co_return std::unexpected{ Error::ConnectionTimeout }; }
             if (auto failure = map_io_error(resolve_error, IoOperation::Resolve)) { co_return std::unexpected{ *failure }; }
@@ -372,6 +376,7 @@ namespace mhttp::impl {
             if (error) { co_return std::unexpected{ Error::Connection }; }
             m_remote = { endpoint.address().to_string(), endpoint.port() };
             m_local = { local.address().to_string(), local.port() };
+            m_connection_origin = origin;
             m_open.store(true);
             if (isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
             co_return Result<void>{};
@@ -458,7 +463,7 @@ namespace mhttp::impl {
         }
 
         /**
-         * @brief Run exactly one exchange on the client strand, rejecting overlap without disturbing its owner.
+         * @brief Run a bounded redirect chain on the client strand without admitting overlapping Sends.
          * @param self Owned implementation for the entire operation.
          * @param request Owned outgoing data.
          * @param headers Issue-time fallback fields, isolated from later configuration changes.
@@ -480,43 +485,65 @@ namespace mhttp::impl {
             options.default_headers = std::move(headers);
             auto prepared = detail::prepare_client_request(std::move(request), *self->m_origin, options);
             if (!prepared) { co_return std::unexpected{ prepared.error() }; }
+            auto current = Url::Resolve(*self->m_origin, prepared->target == "*" ? "/" : prepared->target);
+            if (!current) { co_return std::unexpected{ current.error() }; }
             self->m_busy = true;
             SendScope scope{ *self };
             if (self->m_active_epoch != epoch) { self->closeConnection(); }
             self->m_active_epoch = epoch;
             self->linkRuntime(token);
             co_await self->stopIdleWatch();
-            if (self->isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
-            bool const reused = static_cast<bool>(self->m_connection);
-            if (!self->m_connection) {
-                auto connected = co_await self->connect(epoch);
-                self->retireConnectDeadline();
-                if (!connected) { co_return std::unexpected{ connected.error() }; }
+            std::size_t followed{};
+            for (;;) {
+                if (self->isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
+                if (self->m_connection_origin && !detail::same_client_origin(*self->m_connection_origin, *current)) {
+                    self->closeConnection();
+                }
+                bool const reused = static_cast<bool>(self->m_connection);
+                if (!self->m_connection) {
+                    auto connected = co_await self->connect(epoch, *current);
+                    self->retireConnectDeadline();
+                    if (!connected) { co_return std::unexpected{ connected.error() }; }
+                }
+                auto const until = Clock::now() + self->m_options.write_timeout;
+                auto connection = self->m_connection;
+                auto written = co_await connection->WriteAllWithProgress(prepared->head.bytes, until - Clock::now());
+                if (self->isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
+                if (reused && written.error == Error::ConnectionClosed && written.bytes_transferred == 0) {
+                    self->closeConnection();
+                    auto connected = co_await self->connect(epoch, *current);
+                    self->retireConnectDeadline();
+                    if (!connected) { co_return std::unexpected{ connected.error() }; }
+                    connection = self->m_connection;
+                    written = co_await connection->WriteAllWithProgress(prepared->head.bytes, until - Clock::now());
+                }
+                if (self->isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
+                if (written.error) { co_return std::unexpected{ *written.error }; }
+                auto wire_body = options.max_redirects == 0 ? std::move(prepared->request.m_impl->body)
+                    : std::string{ prepared->request.Body() };
+                auto body = co_await connection->WriteAll(std::move(wire_body), until - Clock::now());
+                if (self->isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
+                if (!body) { co_return std::unexpected{ body.error() }; }
+                auto response = co_await self->readResponse(*prepared, epoch);
+                if (!response) { co_return response; }
+                if (self->isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
+                if (!response->KeepAlive()) { self->closeConnection(); }
+                auto destination = detail::client_redirect_target(*current, response->Status(), response->Headers(),
+                    options.max_redirects, followed);
+                if (!destination) { co_return std::unexpected{ destination.error() }; }
+                if (*destination) {
+                    auto next = std::move(**destination);
+                    detail::redirect_client_request(prepared->request, options.default_headers, *current, next, response->Status());
+                    current = std::move(next);
+                    prepared = detail::prepare_client_request(std::move(prepared->request), *current, options);
+                    if (!prepared) { co_return std::unexpected{ prepared.error() }; }
+                    ++followed;
+                    continue;
+                }
+                self->watchIdleConnection();
+                scope.succeeded = true;
+                co_return response;
             }
-            auto const until = Clock::now() + self->m_options.write_timeout;
-            auto connection = self->m_connection;
-            auto written = co_await connection->WriteAllWithProgress(prepared->head.bytes, until - Clock::now());
-            if (self->isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
-            if (reused && written.error == Error::ConnectionClosed && written.bytes_transferred == 0) {
-                self->closeConnection();
-                auto connected = co_await self->connect(epoch);
-                self->retireConnectDeadline();
-                if (!connected) { co_return std::unexpected{ connected.error() }; }
-                connection = self->m_connection;
-                written = co_await connection->WriteAllWithProgress(prepared->head.bytes, until - Clock::now());
-            }
-            if (self->isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
-            if (written.error) { co_return std::unexpected{ *written.error }; }
-            auto body = co_await connection->WriteAll(std::move(prepared->request.m_impl->body), until - Clock::now());
-            if (self->isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
-            if (!body) { co_return std::unexpected{ body.error() }; }
-            auto response = co_await self->readResponse(*prepared, epoch);
-            if (!response) { co_return response; }
-            if (self->isCanceled(epoch)) { co_return std::unexpected{ Error::Canceled }; }
-            if (!response->KeepAlive()) { self->closeConnection(); }
-            else { self->watchIdleConnection(); }
-            scope.succeeded = true;
-            co_return response;
         }
     };
 
