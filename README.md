@@ -13,7 +13,8 @@ HTTP 协议核心支持有大小限制的增量请求/响应解析、分块与 t
 路由匹配核心支持静态、正则、参数和通配段，以及方法分派与 HEAD 回落。
 服务端基础提供拥有数据的 Request / Response、线程安全的 RequestData，
 以及公共 Router 注册、同步和协程 handler、有序全局/路由 aspect、路由钩子与异常响应处理。
-监听器、HTTP 会话和客户端请求接口待后续阶段实现。
+内部 HTTP 会话已接入完整请求体、顺序流水线、keep-alive、协议错误响应和停止取消。
+监听器和客户端请求接口待后续阶段实现。
 
 ## 构建
 
@@ -44,6 +45,7 @@ mcpp test smoke --timeout 30 -- public
 python tools/check_asio_boundary.py
 python tools/check_module_boundary.py
 python tools/check_transport.py
+python tools/check_session.py
 python tools/check_test_support.py
 ```
 

@@ -158,7 +158,7 @@ Router 清除未完成的响应，先设置纯文本 500，再调用异常钩子
 随后错误钩子与 post-routing 各最多运行一次；错误钩子自己的失败同样被隔离，
 已经调用过的异常/错误钩子不会重入。post-routing 失败则要求关闭连接而不写回部分响应。
 Error::Canceled 保持为取消控制流，不转成 500，也不会继续调用尚未进入的响应钩子。
-响应分帧、关闭连接与实际网络写入由后续会话层执行。
+内部会话执行响应分帧、关闭连接与实际网络写入。
 
 内部准备结果保存配置使用权及准备异常，异常发生时不再读取请求 body；
 处理结果 RoutingOutcome 给出是否可以发送响应、是否强制关闭，以及可供记录的异常。
@@ -166,6 +166,29 @@ Error::Canceled 保持为取消控制流，不转成 500，也不会继续调用
 
 以上 setter 都替换先前的对应钩子，旧资源在配置锁外释放，遵循相同的冻结/使用权守卫。
 钩子可拥有只可移动的对象；异步调用仍遵循 Request、Response 和引用捕获的借用生命周期约束。
+
+## 内部 HTTP 会话
+
+会话在连接 strand 上串行执行读头部、pre-routing 与匹配、完整 body 读取、handler 与响应钩子，
+最后写回有大小上限的拥有数据的响应。同一读取中剩余的流水线字节保留到下一请求，
+前一响应写完后才处理下一请求。配置使用权保留到写操作完成，公共 Router 包装器销毁后内部状态仍被持有。
+
+首个头部和每个 body 使用 read_timeout；后续头部使用 keep_alive_timeout。
+每个阶段使用整体截止时间，单个字节到达不会重新计时。读写超时关闭连接；
+空闲 EOF 不生成响应，半关闭导致的截断请求生成 400。
+非法协议、URI、头部或 body 分别写回解析器指定的状态码，再关闭连接。
+头部失败跳过 pre-routing、匹配与 aspect，错误钩子与 post-routing 仍各执行一次。
+
+未命中的 POST、PUT、PATCH、DELETE 等请求直接生成 404/405，跳过 body 并关闭，
+即使声明长度为零也关闭。pre-routing 提前处理且有未读 body 时也关闭。
+连接复用还受 HTTP 版本、双方 Connection 字段、最大请求数和停止状态约束。
+序列化超限或非法最终 1xx 尝试改发有界 500 并关闭，不重新进入响应钩子；
+连安全错误响应也超过输出上限时只关闭。
+
+会话停止可从其他线程请求：在连接 strand 上取消用户 Task 并关闭套接字，
+等待所有嵌套 Task 完成清理后报告最终状态。Run 在初始挂起前持有会话，且只允许执行一次。
+私有测试通过 `python tools/check_session.py` 在临时项目中运行，不向正式消费者导出 Asio 或会话实现。
+监听器与公共 HttpServer 生命周期尚待接入；Expect 临时响应仍待实现。
 
 对应独立测试为 `tests/server/request_test.cpp`、`response_test.cpp`、
 `request_data_test.cpp`、`handler_test.cpp`、`middleware_test.cpp`、`router_test.cpp`、

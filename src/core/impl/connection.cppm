@@ -128,6 +128,12 @@ namespace mhttp::impl {
         [[nodiscard]] auto Executor() const -> asio::any_io_executor { return m_executor; }
 
         /**
+         * @brief Inspect the immutable single-write byte bound before a session starts.
+         * @return Maximum owned payload accepted by WriteAll.
+         */
+        [[nodiscard]] auto MaxWriteSize() const noexcept -> std::size_t { return m_max_write_size; }
+
+        /**
          * @brief Receive one bounded owned chunk on the connection strand.
          * @param timeout Relative deadline; nullopt disables it, nonpositive durations expire immediately.
          * @return Owned bytes, Busy, ConnectionClosed, Canceled, ReadTimeout, or a read failure.

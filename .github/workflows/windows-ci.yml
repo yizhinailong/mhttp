@@ -101,6 +101,9 @@ jobs:
       - name: Test private transport implementation
         run: python tools/check_transport.py
 
+      - name: Test private HTTP sessions
+        run: python tools/check_session.py
+
       - name: Test
         run: mcpp test --timeout 30
 
