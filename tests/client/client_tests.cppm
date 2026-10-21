@@ -11,6 +11,7 @@ import :server.http_server;
 import :test.transport;
 import :test.client_peer;
 import :test.client_write_fault;
+import :test.client_expect;
 
 namespace mhttp::test {
 
@@ -335,6 +336,13 @@ export namespace mhttp::test {
             { "client IPv6 loopback", client_ipv6_loopback },
             { "client partial head no retry", client_partial_head_no_retry },
             { "client head retry budget", client_head_retry_budget },
+            { "client Expect handshake", client_expect_handshake },
+            { "client Expect fallback", client_expect_fallback },
+            { "client Expect early final", client_expect_early_final },
+            { "client Expect deadlines", client_expect_deadlines },
+            { "client Expect cancellation", client_expect_cancellation },
+            { "client Expect invalid interims", client_expect_invalid_interims },
+            { "client Expect write deadline", client_expect_write_deadline },
         });
     }
 

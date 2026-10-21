@@ -35,7 +35,7 @@ def main() -> int:
         transport = project / "src/core/impl/transport_tests.cppm"
         shutil.copy2(root / "tests/transport/transport_tests.cppm", transport)
         shutil.copy2(root / "tests/support/test_support.hpp", transport.parent / "test_support.hpp")
-        for name in ("client_peer.cppm", "client_tests.cppm"):
+        for name in ("client_peer.cppm", "client_expect.cppm", "client_tests.cppm"):
             shutil.copy2(root / "tests/client" / name, project / "src/client/impl" / name)
         shutil.copy2(root / "tests/client/client_write_fault.cppm", project / "src/core/impl/client_write_fault.cppm")
         install_write_fault(project)
