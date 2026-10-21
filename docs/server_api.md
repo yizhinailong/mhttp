@@ -297,6 +297,44 @@ auto auth = mhttp::server::BearerAuth::Create("token");
 server.Use(std::move(*cors), std::move(*auth)).value();
 ```
 
+## 限速
+
+`server::RateLimit::Create(RateLimitOptions)` 返回按 Request::ClientIp 计数的固定窗口 aspect，
+可传入单路由或通过 `Use` 全局安装。复制同一实例会共享额度，单独 Create 的实例相互独立。
+多个 TCP 连接与路由使用同一个 ClientIp 时共享计数；地址来自既有可信代理策略，限速器不再解析转发字段。
+
+```cpp
+auto limiter = mhttp::server::RateLimit::Create({
+    .max_requests = 100,
+    .window = std::chrono::seconds{ 60 },
+    .max_tracked_clients = 8192,
+    .when_full = mhttp::server::RateLimitCapacityAction::EvictOldest,
+});
+server.Use(*limiter).value();
+```
+
+max_requests、window 和 max_tracked_clients 必须为正，非法配置返回 InvalidRequest。
+每个客户端的第一条请求开始窗口，达到额度后返回 429，handler 不执行。
+Retry-After 是向上取整且至少为一秒的重试提示，已记录客户端按原窗口的剩余时间计算；
+拒绝请求更新访问顺序和空闲时间，但不会延长原窗口或增加已用额度。
+RouteLazy 可在请求头阶段拒绝；未读取正文时沿用关闭连接的策略，显式 Expect 协商可避免客户端启动上传来源。
+
+idle_expiration 缺省使用 window，零禁用空闲回收；每次请求先按访问顺序回收过期桶，不另起线程或定时器。
+较短的 idle_expiration 可在原额度窗口结束前重置长期空闲客户端的计数。
+TrackedClients() 返回当前保留的桶数，观察本身不触发回收。
+表达到容量时，EvictOldest 淘汰最久未访问的桶，并计入新客户端的第一条请求；被淘汰客户端再次出现会重新计数。
+Reject 保留现有桶并拒绝未见过的客户端，先回收空闲桶后再检查容量；Retry-After 只提示可能的空位恢复时间，
+实际恢复取决于已有客户端的活动。禁用空闲回收时，Reject 下的满表持续拒绝新客户端，直到容量增加。
+两种策略都严格限制跟踪数量；按 IP 的额度不限制跨 IP 的合计请求数。
+
+SetMaxTrackedClients(n) 可跨线程调整共享容量，不重置保留桶的计数；缩小时立即按 LRU 淘汰，
+零返回 InvalidRequest 并保留状态。Before、统计和容量调整使用短时元数据锁同步。
+CORS 若需覆盖 429，应在限速器之前注册，让其 After 阶段补充权限字段。
+
+`tests/server/rate_limit_test.cpp` 覆盖配额、窗口、向上取整、空闲回收、轮换地址上限、LRU、容量调整、
+满表拒绝和并发计数；`tests/integration/rate_limit_test.cpp` 验证跨路由与会话共享、可信代理归一化、
+CORS 短路响应、惰性上传拒绝和并发池化客户端。
+
 ## 响应
 
 Response 默认是空的 200 OK，只可移动，内部拥有状态、按顺序保存的头部和二进制 body。

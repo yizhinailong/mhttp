@@ -4,12 +4,12 @@
 提供 HTTP/1.1 服务端与客户端，公共接口通过 `import mhttp;` 使用。
 
 服务端支持同步/协程 handler、路径与查询参数、正则和通配路由、HEAD 回落、
-404 / 405、路由 aspect、Basic / Bearer 认证和 CORS。请求与响应拥有数据，
+404 / 405、路由 aspect、Basic / Bearer 认证、CORS 和有界的按客户端 IP 限速。请求与响应拥有数据，
 支持 URL 编码表单、multipart 文件与字段，以及可选的 JSON 适配。
 协议处理支持有界增量解析、分块、trailer、keep-alive、超时、取消和错误响应后关闭连接。
 
 客户端提供 Get / Head / Post / Put / Patch / Delete / Options、连接复用、
-有界重定向、默认头部与认证、分阶段或整体超时。`Task<T>`、`Runtime`、`Sleep`、
+有界重定向、默认头部与认证、分阶段或整体超时，以及按目标限额的异步连接池。`Task<T>`、`Runtime`、`Sleep`、
 `Offload` 和 `SyncWait` 负责异步执行与停止排空。普通请求与默认客户端响应完整缓冲；
 服务端支持基于 Task 的 StreamWriter 与内容 provider，以有界分块或已知长度发送响应。
 静态目录挂载支持 MIME、条件请求、单段与多段 Range，并拒绝目录穿越和根目录以下的链接。
