@@ -148,6 +148,54 @@ auto relative_references() -> void {
 }
 
 /**
+ * @brief Cover exact authority edges and distinguish supported syntax from unsupported schemes.
+ */
+auto url_authority_edges() -> void {
+    constexpr std::pair<std::string_view, std::string_view> VALID[]{
+        { "hTtP://[0001:0002:0003:0004:0005:0006:0007:0008]:1?x#f",
+          "http://[0001:0002:0003:0004:0005:0006:0007:0008]:1/?x#f" },
+        { "http://[::ffff:255.255.255.255]:65535/?", "http://[::ffff:255.255.255.255]:65535/?" },
+        { "http://[0:0:0:0:0:0:0:0]:0/", "http://[0:0:0:0:0:0:0:0]:0/" },
+        { "http://host:00065535/", "http://host:65535/" },
+        { "http://host:00000/", "http://host:0/" },
+        { "http://host?query/#fragment", "http://host/?query/#fragment" },
+    };
+    for (auto const& [input, expected] : VALID) {
+        auto parsed = mhttp::Url::Parse(input);
+        if (Check(parsed.has_value(), std::format("valid authority edge {:?}", input))) {
+            CheckEq(parsed->ToString(), expected, std::format("normalized authority {:?}", input));
+        }
+    }
+    for (auto input : { "http://[1:2:3:4:5:6:7]/", "http://[1:2:3:4:5:6:7:8:9]/",
+                       "http://[1:2:3:4:5:6:7::8]/", "http://[::ffff:192.0.2.256]/",
+                       "http://[::ffff:192.00.2.1]/", "http://[1.2.3.4::]/", "http://[::1%25eth0]/",
+                       "http://host:+80/", "http://host:00065536/", "http://host:80:90/",
+                       "%68ttp://host/", "-http://host/", "http_1://host/" }) {
+        auto parsed = mhttp::Url::Parse(input);
+        Check(!parsed && parsed.error() == mhttp::Error::InvalidUrl,
+            std::format("invalid authority/scheme syntax {:?}", input));
+    }
+    for (auto input : { "http+v1://host/", "http.1://host/", "http-1://host/" }) {
+        auto parsed = mhttp::Url::Parse(input);
+        Check(!parsed && parsed.error() == mhttp::Error::UnsupportedScheme,
+            std::format("valid but unsupported scheme {:?}", input));
+    }
+    auto const base = mhttp::Url::Parse("http://[::1]:8080/a?old#fragment");
+    constexpr std::pair<std::string_view, std::string_view> REFERENCES[]{
+        { "?new=1", "http://[::1]:8080/a?new=1" },
+        { "?", "http://[::1]:8080/a?" },
+        { "//[::ffff:192.0.2.1]:65535?only", "http://[::ffff:192.0.2.1]:65535/?only" },
+        { "//host:00080?", "http://host/?" },
+    };
+    for (auto const& [reference, expected] : REFERENCES) {
+        auto resolved = mhttp::Url::Resolve(*base, reference);
+        if (Check(resolved.has_value(), std::format("authority/query reference {:?}", reference))) {
+            CheckEq(resolved->ToString(), expected, "reference preserves port and explicit empty query semantics");
+        }
+    }
+}
+
+/**
  * @brief Run URL cases.
  * @param argc Argument count.
  * @param argv Case filters.
@@ -159,5 +207,6 @@ auto main(int argc, char* argv[]) -> int {
         { "invalid URLs", invalid_urls },
         { "Host values", host_values },
         { "relative URL references", relative_references },
+        { "URL authority edges", url_authority_edges },
     });
 }

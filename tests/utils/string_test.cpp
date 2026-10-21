@@ -109,6 +109,41 @@ auto http_character_classes() -> void {
 }
 
 /**
+ * @brief Restore the process C and C++ locales after testing named locale changes.
+ */
+struct LocaleRestore {
+    std::locale previous; ///< Original global locale, retained until scope exit.
+    /**
+     * @brief Restore before another case executes, including when a locale assertion throws.
+     */
+    ~LocaleRestore() { std::locale::global(previous); }
+};
+
+/**
+ * @brief Keep HTTP classification and case folding ASCII-only after named global/setlocale changes.
+ */
+auto locale_independent_ascii() -> void {
+    LocaleRestore restore;
+    unsigned tested{};
+    for (auto name : { "C", "C.UTF-8", "C.utf8", "en_US.UTF-8", "tr_TR.UTF-8",
+                       "Turkish_Turkey.1254", ".1254", "" }) {
+        std::optional<std::locale> candidate;
+        try { candidate.emplace(name); }
+        catch (std::runtime_error const&) { continue; } // Locale packages differ across platforms.
+        std::locale::global(*candidate); // Named global locales also update the process C locale.
+        ++tested;
+        http_character_classes();
+        Check(mhttp::utils::iequals("I-IDENTIFIER", "i-identifier"),
+            std::format("ASCII I folds independently of locale {:?}", name));
+        CheckEq(mhttp::utils::ToLower("I\xDD\xFD\xC0"sv), "i\xDD\xFD\xC0"sv,
+            std::format("non-ASCII bytes survive folding in locale {:?}", name));
+        CheckEq(mhttp::utils::CaseInsensitiveHash{}("IDENTIFIER"),
+            mhttp::utils::CaseInsensitiveHash{}("identifier"), "locale-independent hash/equality agreement");
+    }
+    Check(tested > 0, "at least the required C locale was exercised");
+}
+
+/**
  * @brief Run the HTTP string utility cases.
  * @param argc Argument count.
  * @param argv Case filters.
@@ -120,5 +155,6 @@ auto main(int argc, char* argv[]) -> int {
         { "trim and split", trim_and_split },
         { "strict integers", strict_integers },
         { "HTTP character classes", http_character_classes },
+        { "locale-independent ASCII", locale_independent_ascii },
     });
 }
