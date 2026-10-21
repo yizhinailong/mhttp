@@ -42,7 +42,7 @@ export namespace mhttp::client {
         std::size_t max_redirects{}; ///< Maximum followed redirects; zero returns 3xx responses unchanged.
         TimeoutPolicy timeout_policy{ TimeoutPolicy::Phase }; ///< Preserve separately configured phase deadlines by default.
         std::chrono::milliseconds timeout{ 30'000 }; ///< Positive budget used by Overall and Step.
-        std::size_t expect_continue_threshold{}; ///< Add Expect for nonempty bodies at least this large; zero disables automatic insertion.
+        std::size_t expect_continue_threshold{}; ///< Add Expect for known bodies at least this large or unknown providers; zero disables automatic insertion.
         std::chrono::milliseconds expect_continue_timeout{ 1'000 }; ///< Positive maximum handshake wait before sending the body without 100.
         std::size_t response_chunk_bytes{ 16 * 1024 }; ///< Maximum decoded bytes passed to one response receiver; positive.
         std::size_t upload_chunk_bytes{ 64 * 1024 }; ///< Maximum decoded bytes per upload/progress segment; positive.

@@ -13,6 +13,7 @@ import :test.client_peer;
 import :test.client_write_fault;
 import :test.client_expect;
 import :test.client_streaming;
+import :test.client_providers;
 
 namespace mhttp::test {
 
@@ -327,6 +328,10 @@ export namespace mhttp::test {
             { "client streamed raw framing", client_streamed_raw_framing },
             { "client streamed raw failures", client_streamed_raw_failures },
             { "client streamed callback policies", client_streamed_callback_policies },
+            { "client provider head failures", client_provider_head_failures },
+            { "client provider backpressure", client_provider_backpressure },
+            { "client provider Expect fallback", client_provider_expect_fallback },
+            { "client provider peer reset", client_provider_peer_reset },
             { "client response framing", client_response_framing },
             { "client truncated responses", client_truncated_responses },
             { "client response limits", client_response_limits },

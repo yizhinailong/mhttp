@@ -249,3 +249,9 @@ auto response = co_await client.Send(std::move(request));
 以及客户端、Runtime 和调用者会话的取消传播。
 `python tools/check_client.py streamed` 使用原始响应覆盖固定长度/chunked/EOF、HEAD/204/304、
 二进制、trailer、截断、总量限制及逐次回调的超时策略。
+
+`tests/integration/client_provider_test.cpp` 覆盖固定/未知长度、空正文、二进制、精确编码边界、
+307/308 重放与 303 清除、Expect 提前拒绝、大小限制、四种超时策略及停止清理。
+`python tools/check_client.py provider` 校验请求头失败前不调用来源、单次透明重试预算，
+慢接收端的传输背压、不发送 100 的对端触发有界回退，以及正文首块后真实 reset 时停止来源并清理协程。
+启用自动 Expect 时，未知长度来源始终进行协商；声明长度零不会自动协商，也不允许显式 Expect。
