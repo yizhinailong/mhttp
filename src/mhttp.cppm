@@ -22,6 +22,7 @@ export import :server.route_tree;
 export import :server.request_data;
 export import :server.response;
 export import :server.request;
+export import :server.handler;
 
 export import :utils.string;
 export import :utils.percent;
