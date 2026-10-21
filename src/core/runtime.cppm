@@ -14,6 +14,7 @@ namespace mhttp::impl {
 
     class ServerImpl;
     class ClientImpl;
+    class ClientPoolImpl;
 
 } // namespace mhttp::impl
 
@@ -37,6 +38,7 @@ export namespace mhttp {
         friend struct detail::RuntimeAccess;
         friend class impl::ServerImpl;
         friend class impl::ClientImpl;
+        friend class impl::ClientPoolImpl;
 
     public:
         /**

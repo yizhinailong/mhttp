@@ -26,6 +26,7 @@ export import :client.options;
 export import :client.request_policy;
 export import :client.redirect_policy;
 export import :client.http_client;
+export import :client.client_pool;
 
 export import :server.route_pattern;
 export import :server.route_tree;

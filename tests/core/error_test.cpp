@@ -19,7 +19,7 @@ auto error_codes() -> void {
         Unknown, Connection, ConnectionTimeout, ResolveFailed, BindIpAddress, Read, ReadTimeout,
         Write, WriteTimeout, ConnectionClosed, Canceled, ExceedRedirectCount, InvalidUrl,
         UnsupportedScheme, InvalidHeaders, InvalidRequest, ProtocolError, HeaderTooLarge,
-        BodyTooLarge, UnsupportedContentEncoding, Busy, AlreadyRunning, NotRunning,
+        BodyTooLarge, UnsupportedContentEncoding, Busy, AlreadyRunning, NotRunning, AcquireTimeout,
     };
     std::unordered_set<std::string_view> descriptions;
     auto const fallback = mhttp::ToString(static_cast<mhttp::Error>(9999));

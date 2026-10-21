@@ -36,6 +36,7 @@ export namespace mhttp {
         Busy, ///< Another operation is already in flight.
         AlreadyRunning, ///< Component is already running.
         NotRunning, ///< Operation requires a running component.
+        AcquireTimeout, ///< No pool connection became available within the acquisition deadline.
     };
 
     /**
@@ -75,6 +76,7 @@ export namespace mhttp {
         case Error::Busy: return "Operation already in flight";
         case Error::AlreadyRunning: return "Component already running";
         case Error::NotRunning: return "Component not running";
+        case Error::AcquireTimeout: return "Pool acquisition timed out";
         }
         return "Unrecognized mhttp error";
     }
