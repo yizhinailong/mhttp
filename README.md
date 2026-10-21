@@ -39,6 +39,7 @@ mcpp test smoke --timeout 30 -- public
 ```text
 python tools/check_asio_boundary.py
 python tools/check_module_boundary.py
+python tools/check_transport.py
 python tools/check_test_support.py
 ```
 

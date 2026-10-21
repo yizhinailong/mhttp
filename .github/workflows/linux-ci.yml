@@ -80,6 +80,9 @@ jobs:
       - name: Verify implementation partitions
         run: python3 tools/check_module_boundary.py
 
+      - name: Test private transport implementation
+        run: python3 tools/check_transport.py
+
       - name: Test
         run: mcpp test --timeout 30
 
