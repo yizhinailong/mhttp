@@ -83,3 +83,5 @@ if (!configured) { throw std::runtime_error{ "cannot configure error handler" };
 同一消费者套件的 rest_crud_test 验证用户资源的创建、查询、替换、局部更新与删除，
 包含 201/Location、204、404、405/Allow、类型化路径错误、分页与过滤。
 应用示例状态由 fixture 自己的 mutex 保护，路由返回独立快照；这些测试业务类型不属于库 API。
+concurrency_test 使用四线程 Runtime 和八个独立客户端，各执行十轮 CRUD，检查创建标识唯一，
+并核对保留资源的最终 HTTP 集合与同步后的应用快照。
