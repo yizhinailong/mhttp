@@ -19,6 +19,7 @@ namespace mhttp::impl {
     class RequestInput {
     private:
         std::shared_ptr<Connection> m_connection; ///< Owned socket and serialized executor.
+        std::shared_ptr<std::atomic<bool>> m_admission_closed; ///< Optional generation gate for new request heads.
         std::string m_input; ///< Current transport chunk, including any pipelined successor bytes.
         std::size_t m_offset{}; ///< Consumed prefix of the current chunk.
         std::chrono::steady_clock::time_point m_started{}; ///< First nonempty input for this request.
@@ -27,8 +28,12 @@ namespace mhttp::impl {
         /**
          * @brief Retain the connection before publishing input ownership.
          * @param connection Initialized socket; all reads use its strand.
+         * @param admission_closed Optional shared gate; existing requests may continue after it closes.
          */
-        explicit RequestInput(std::shared_ptr<Connection> connection) : m_connection{ std::move(connection) } {}
+        explicit RequestInput(
+            std::shared_ptr<Connection> connection,
+            std::shared_ptr<std::atomic<bool>> admission_closed = {}
+        ) : m_connection{ std::move(connection) }, m_admission_closed{ std::move(admission_closed) } {}
 
         /**
          * @brief Begin timing a successor without discarding retained pipelined bytes.
@@ -57,6 +62,9 @@ namespace mhttp::impl {
                 auto input = std::span<char const>{ m_input.data(), m_input.size() }.subspan(m_offset);
                 input = input.first(std::min(input.size(), max_input));
                 if (m_started == std::chrono::steady_clock::time_point{} && !input.empty()) {
+                    if (m_admission_closed && m_admission_closed->load()) {
+                        co_return std::unexpected{ Error::Canceled };
+                    }
                     m_started = std::chrono::steady_clock::now();
                 }
                 auto step = parser.Feed(input);

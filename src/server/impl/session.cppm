@@ -44,10 +44,12 @@ namespace mhttp::impl {
         std::stop_source m_stop_source; ///< Session cancellation for awaited user Tasks.
         Endpoint m_remote; ///< Owned initialized peer address and port.
         Endpoint m_local; ///< Owned initialized local address and port.
+        std::shared_ptr<std::atomic<bool>> m_admission_closed; ///< Shared generation cutoff for new requests.
         std::shared_ptr<RequestInput> m_input; ///< Shared retained input for sequential request parsers.
         Clock::time_point m_request_started{}; ///< First nonempty feed time, reset before each request head.
         bool m_started{}; ///< Run is one-shot; accessed only on the connection strand.
         bool m_stopping{}; ///< Stop prevents further requests and response persistence.
+        bool m_reading_head{}; ///< Distinguish an idle header wait from handler/body/response processing.
 
         /**
          * @brief Own validated dependencies before publishing the shared session.
@@ -59,6 +61,7 @@ namespace mhttp::impl {
          * @param remote Owned peer metadata.
          * @param local Owned local metadata.
          * @param observers Owned immutable logger snapshot.
+         * @param admission_closed Optional shared cutoff, otherwise owned by this session alone.
          */
         Session(
             std::shared_ptr<Connection> connection,
@@ -68,12 +71,14 @@ namespace mhttp::impl {
             std::stop_token runtime_stop,
             Endpoint remote,
             Endpoint local,
-            ServerObservers observers
+            ServerObservers observers,
+            std::shared_ptr<std::atomic<bool>> admission_closed
         ) : m_connection{ std::move(connection) }, m_router{ std::move(router) },
             m_options{ std::move(options) }, m_observers{ std::move(observers) },
             m_runtime{ std::move(runtime) }, m_runtime_stop{ runtime_stop },
             m_remote{ std::move(remote) }, m_local{ std::move(local) },
-            m_input{ std::make_shared<RequestInput>(m_connection) } {}
+            m_admission_closed{ admission_closed ? std::move(admission_closed) : std::make_shared<std::atomic<bool>>() },
+            m_input{ std::make_shared<RequestInput>(m_connection, m_admission_closed) } {}
 
     public:
         /**
@@ -84,6 +89,7 @@ namespace mhttp::impl {
          * @param runtime Optional runtime retained for blocking-work dispatch.
          * @param runtime_stop Runtime generation cancellation, captured before session submission.
          * @param observers Owned optional logging callbacks.
+         * @param admission_closed Optional generation cutoff shared with this session's input.
          * @return Owned session, InvalidRequest for invalid options, or Connection for endpoint failure.
          */
         static auto Create(
@@ -92,10 +98,11 @@ namespace mhttp::impl {
             server::ServerOptions options = {},
             std::shared_ptr<RuntimeImpl> runtime = {},
             std::stop_token runtime_stop = {},
-            ServerObservers observers = {}
+            ServerObservers observers = {},
+            std::shared_ptr<std::atomic<bool>> admission_closed = {}
         ) -> Result<std::shared_ptr<Session>> {
             return Create(std::move(connection), router.m_impl, std::move(options), std::move(runtime),
-                runtime_stop, std::move(observers));
+                runtime_stop, std::move(observers), std::move(admission_closed));
         }
 
         /**
@@ -106,6 +113,7 @@ namespace mhttp::impl {
          * @param runtime Optional owned runtime for Offload.
          * @param runtime_stop Runtime generation cancellation.
          * @param observers Owned immutable logging snapshot.
+         * @param admission_closed Optional generation cutoff shared with this session's input.
          * @return Owned session or a configuration/endpoint failure.
          */
         static auto Create(
@@ -114,7 +122,8 @@ namespace mhttp::impl {
             server::ServerOptions options,
             std::shared_ptr<RuntimeImpl> runtime,
             std::stop_token runtime_stop,
-            ServerObservers observers = {}
+            ServerObservers observers = {},
+            std::shared_ptr<std::atomic<bool>> admission_closed = {}
         ) -> Result<std::shared_ptr<Session>> {
             if (!connection || !router || !detail::validate_server_options(options)
                 || connection->MaxWriteSize() < options.max_response_bytes) {
@@ -129,7 +138,7 @@ namespace mhttp::impl {
             return std::shared_ptr<Session>{ new Session{ std::move(connection), std::move(router),
                 std::move(options), std::move(runtime), runtime_stop,
                 { remote.address().to_string(), remote.port() }, { local.address().to_string(), local.port() },
-                std::move(observers) } };
+                std::move(observers), std::move(admission_closed) } };
         }
 
         /**
@@ -151,7 +160,27 @@ namespace mhttp::impl {
             });
         }
 
+        /**
+         * @brief Close admission immediately and retire an idle wait on the connection strand.
+         * @return Completion after the drain command; an already-started request keeps its cancellation token.
+         * @note The owner must await both this command and Run before declaring the session fully drained.
+         */
+        auto Drain() -> asio::awaitable<void> {
+            m_admission_closed->store(true);
+            return asio::co_spawn(m_connection->Executor(), drain(shared_from_this()), asio::use_awaitable);
+        }
+
     private:
+        /**
+         * @brief Close an idle or unstarted session while preserving a begun head, body, handler, or response.
+         * @param self Owned session retained before initial suspension.
+         */
+        static auto drain(std::shared_ptr<Session> self) -> asio::awaitable<void> {
+            if (!self->m_started || (self->m_reading_head && self->m_input->Started() == Clock::time_point{})) {
+                self->Stop();
+            }
+            co_return;
+        }
         /**
          * @brief Own the root frame and close the socket on every completion and exception path.
          * @param self Owned session state, retained before initial suspension.
@@ -229,7 +258,8 @@ namespace mhttp::impl {
             result.failure = outcome.failure;
             if (!outcome.send_response) { result.error = Error::Unknown; co_return false; }
             outcome.close = outcome.close || force_close;
-            detail::ResponseSessionState state{ result.responses + 1, body_complete, m_stopping };
+            detail::ResponseSessionState state{ result.responses + 1, body_complete,
+                m_stopping || m_admission_closed->load() };
             auto wire = detail::serialize_server_response(request, response, m_options, outcome, state);
             if (!wire) {
                 result.error = wire.error();
@@ -246,8 +276,9 @@ namespace mhttp::impl {
             if (wire->streaming && !co_await writeStream(response, *wire, deadline, result)) { co_return false; }
             ++result.responses;
             m_observers.Access(request, response, Clock::now() - m_request_started);
-            if (!keep_alive) { static_cast<void>(co_await m_connection->Shutdown()); }
-            co_return keep_alive;
+            bool const close = !keep_alive || m_stopping || m_admission_closed->load();
+            if (close) { static_cast<void>(co_await m_connection->Shutdown()); }
+            co_return !close;
         }
 
         /**
@@ -320,13 +351,15 @@ namespace mhttp::impl {
          * @param result Root-owned final-response counter and terminal diagnostics.
          */
         auto loop(SessionResult& result) -> asio::awaitable<void> {
-            while (!m_stopping) {
+            while (!m_stopping && !m_admission_closed->load()) {
                 detail::RequestParser parser{ detail::server_parser_limits(m_options) };
                 m_input->BeginRequest();
                 m_request_started = {};
                 bool saw_input{};
                 auto const timeout = result.responses == 0 ? m_options.read_timeout : m_options.keep_alive_timeout;
+                m_reading_head = true;
                 auto event = co_await readEvent(parser, Clock::now() + timeout, saw_input);
+                m_reading_head = false;
                 if (!event) {
                     result.error = event.error();
                     if (event.error() == Error::ConnectionClosed && saw_input) {

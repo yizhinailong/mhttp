@@ -512,6 +512,54 @@ namespace mhttp::test {
     }
 
     /**
+     * @brief Complete one admitted request after drain while rejecting a fully buffered pipelined successor.
+     * @param executor Independent fixture strand.
+     */
+    auto session_drain_pipeline_scenario(asio::any_io_executor executor) -> asio::awaitable<void> {
+        auto pair = co_await make_loopback(executor);
+        server::Router router;
+        std::shared_ptr<impl::Session> session;
+        unsigned calls{};
+        Check(router.Get("/", [&](auto&, auto& response) -> Task<void> {
+            ++calls;
+            co_await impl::ToTask(pair->connection->Executor(), session->Drain());
+            co_await Sleep(2ms);
+            Check(response.SetContent("completed", "text/plain").has_value(), "draining handler remains uncanceled");
+        }).has_value(), "register draining pipeline route");
+        Check(detail::RouterAccess::Freeze(router).has_value(), "freeze draining pipeline route");
+        session = *impl::Session::Create(pair->connection, router);
+        auto complete = spawn_transport(executor, session->Run());
+        std::string const request = "GET / HTTP/1.1\r\nHost: local\r\n\r\n";
+        auto input = request + request;
+        co_await asio::async_write(pair->peer, asio::buffer(input), asio::use_awaitable);
+        auto wire = co_await receive_peer(pair);
+        auto result = co_await complete->Wait();
+        std::size_t offset{};
+        auto response = parse_session_reply(wire, offset);
+        Check(response.head.status == Status::Ok && response.body == "completed", "admitted response completes during drain");
+        CheckEq(response.head.headers.Get("Connection"), std::string_view{ "close" }, "draining response closes persistence");
+        Check(offset == wire.size() && calls == 1 && result.responses == 1, "buffered successor never reaches middleware or handler");
+        Check(detail::RouterAccess::Thaw(router).has_value(), "drained route lease released");
+    }
+
+    /**
+     * @brief Retire an idle or not-yet-started session without waiting for its ordinary header timeout.
+     * @param executor Independent fixture strand.
+     */
+    auto session_idle_drain_scenario(asio::any_io_executor executor) -> asio::awaitable<void> {
+        server::Router router;
+        auto pair = co_await make_loopback(executor);
+        Check(detail::RouterAccess::Freeze(router).has_value(), "freeze idle drain router");
+        auto session = *impl::Session::Create(pair->connection, router);
+        auto complete = spawn_transport(executor, session->Run());
+        co_await session->Drain();
+        Check((co_await receive_peer(pair)).empty(), "idle drain emits no synthetic error response");
+        auto result = co_await complete->Wait();
+        CheckEq(result.responses, std::size_t{}, "idle drain completes without requests");
+        Check(detail::RouterAccess::Thaw(router).has_value(), "idle drain releases session ownership");
+    }
+
+    /**
      * @brief Run one session scenario with a fresh multithreaded runtime.
      * @param scenario Factory borrowing only the runtime executor.
      */
@@ -544,6 +592,8 @@ export namespace mhttp::test {
     auto RunSessionTests(int argc, char* argv[]) -> int {
         return RunTests(argc, argv, {
             { "session pipeline", [] { run_session_scenario(session_pipeline_scenario); } },
+            { "session draining pipeline", [] { run_session_scenario(session_drain_pipeline_scenario); } },
+            { "session idle drain", [] { run_session_scenario(session_idle_drain_scenario); } },
             { "session chunked", [] { run_session_scenario(session_chunked_scenario); } },
             { "session parser errors", [] { run_session_scenario(session_errors_scenario); } },
             { "session early rejection", [] { run_session_scenario(session_early_scenario); } },
