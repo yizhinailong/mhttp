@@ -79,3 +79,7 @@ if (!configured) { throw std::runtime_error{ "cannot configure error handler" };
 覆盖空对象、数组、约 33 KiB 数据、15 轮随机 JSON、媒体类型、深度、无效输入和序列化失败。
 该工程的配置及自动生成锁文件保存在 tests/json；根目录锁文件保留默认无 JSON 的解析结果。
 依赖变更后使用 `python tools/check_json.py --update-lock` 由 mcpp 重新生成消费者锁文件。
+
+同一消费者套件的 rest_crud_test 验证用户资源的创建、查询、替换、局部更新与删除，
+包含 201/Location、204、404、405/Allow、类型化路径错误、分页与过滤。
+应用示例状态由 fixture 自己的 mutex 保护，路由返回独立快照；这些测试业务类型不属于库 API。

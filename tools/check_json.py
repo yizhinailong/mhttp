@@ -22,7 +22,10 @@ def main() -> int:
             shutil.copy2(root / "tests/json/mcpp.lock", project / "mcpp.lock")
         (project / "tests").mkdir()
         (project / "support").mkdir()
-        shutil.copy2(root / "tests/json/json_test.cpp", project / "tests/json.cpp")
+        for source in (root / "tests/json").glob("*.cpp"):
+            shutil.copy2(source, project / "tests" / source.name)
+        for source in (root / "tests/json").glob("*.hpp"):
+            shutil.copy2(source, project / "tests" / source.name)
         shutil.copy2(root / "tests/support/test_support.hpp", project / "support/test_support.hpp")
         config = tomllib.loads((root / "mcpp.toml").read_text(encoding="utf-8"))
         command = ["mcpp", "test", "--toolchain", config["toolchain"]["default"], "--timeout", "30"]
