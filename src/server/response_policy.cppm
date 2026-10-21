@@ -64,14 +64,16 @@ export namespace mhttp::detail {
             if (!response.Headers().Has(name)) { static_cast<void>(head.headers.Add(name, value)); }
         }
         if (!head.headers.Has("Date")) { static_cast<void>(head.headers.Add("Date", FormatHttpDate(now))); }
-        bool const keep_alive = request.KeepAlive() && !routing.close && session.body_complete
+        bool const streaming = response.IsStreaming();
+        bool const closing_stream = streaming && request.Version() == Version::Http10
+            && response.Status() != Status::NoContent && response.Status() != Status::NotModified;
+        bool const keep_alive = !closing_stream && request.KeepAlive() && !routing.close && session.body_complete
             && !session.stopping && session.completed_requests < options.keep_alive_max_requests;
         if (keep_alive && request.Version() == Version::Http10
             && !has_header_token(head.headers, "Connection", "close")
             && !has_header_token(head.headers, "Connection", "keep-alive")) {
             static_cast<void>(head.headers.Add("Connection", "keep-alive"));
         }
-        bool const streaming = response.IsStreaming();
         auto serialized = serialize_response_head(head, request.Method().value_or(Method::Get),
             { .body_bytes = response.Body().size(), .chunked = streaming && request.Version() == Version::Http11,
                 .keep_alive = keep_alive, .close_delimited = streaming && request.Version() == Version::Http10 });

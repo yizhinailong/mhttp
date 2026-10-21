@@ -213,6 +213,9 @@ auto response_stream_framing() -> void {
             CheckEq(wire->body_kind, version == mhttp::Version::Http11
                 ? mhttp::detail::BodyKind::Chunked : mhttp::detail::BodyKind::UntilEof, "wire-version streaming mode");
             CheckEq(wire->keep_alive, version == mhttp::Version::Http11, "only chunked streams may persist");
+            if (version == mhttp::Version::Http10) {
+                Check(!wire->bytes.contains("Connection: keep-alive\r\n"), "EOF stream never auto-advertises persistence");
+            }
             CheckEq(wire->bytes.contains("Transfer-Encoding: chunked\r\n"), version == mhttp::Version::Http11,
                 "chunked coding is exclusive to HTTP/1.1");
             mhttp::server::ServerOptions exact{ .max_response_bytes = wire->bytes.size() };
@@ -228,6 +231,12 @@ auto response_stream_framing() -> void {
         auto wire = serialize_server_response(request, response, {});
         Check(wire && !wire->streaming && wire->body_kind == mhttp::detail::BodyKind::None
             && !wire->bytes.contains("Transfer-Encoding:"), "bodyless status skips provider and terminal framing");
+        mhttp::detail::RequestHead old_head{ .version = mhttp::Version::Http10 };
+        Check(old_head.headers.Add("Connection", "keep-alive").has_value(), "HTTP/1.0 bodyless persistence request");
+        auto old_request = ServerRequestAccess::Create(std::move(old_head));
+        auto old = serialize_server_response(old_request, response, {});
+        Check(old && old->keep_alive && !old->streaming && old->bytes.contains("Connection: keep-alive\r\n"),
+            "HTTP/1.0 bodyless responses still permit explicit persistence without running the provider");
     }
     Check(!mhttp::detail::validate_server_options({ .stream_chunk_bytes = 0 }), "zero chunk bound rejected before bind");
 }
