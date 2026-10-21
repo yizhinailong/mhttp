@@ -77,6 +77,65 @@ export namespace mhttp::server {
         }
 
         /**
+         * @brief Replace the custom 404 handler, with optional ordered route aspects.
+         * @tparam F Synchronous void or Task<void> callback.
+         * @tparam Aspects Eligible Before/After aspect types.
+         * @param handler Callback copied or moved into stable storage.
+         * @param aspects Aspects copied or moved in registration order.
+         * @return Success, AlreadyRunning while frozen, or Busy while requests are prepared.
+         * @note Called once inside global aspects if route execution produces 404; the default 404
+         *       status is already set. Pre-routing interception skips this handler and route aspects.
+         */
+        template <typename F, typename... Aspects>
+            requires detail::HttpHandlerFunction<std::decay_t<F>> && (detail::HttpAspect<std::decay_t<Aspects>> && ...)
+        [[nodiscard]] auto SetNotFoundHandler(F&& handler, Aspects&&... aspects) -> Result<void> {
+            return m_impl->SetNotFoundHandler(
+                detail::make_http_handler(std::forward<F>(handler), std::forward<Aspects>(aspects)...));
+        }
+
+        /**
+         * @brief Replace the error response transformer, called once when status is at least 400.
+         * @tparam F Synchronous void or Task<void> callback.
+         * @param handler Owned callback accepting Request& and Response&.
+         * @return Success, AlreadyRunning, or Busy.
+         * @note Runs after global aspects and before post-routing; changing status does not recurse.
+         */
+        template <typename F>
+            requires detail::HttpHandlerFunction<std::decay_t<F>>
+        [[nodiscard]] auto SetErrorHandler(F&& handler) -> Result<void> {
+            return m_impl->SetErrorHandler(detail::make_http_handler(std::forward<F>(handler)));
+        }
+
+        /**
+         * @brief Replace interception before route matching and body consumption.
+         * @tparam F Callback returning bool or Task<bool>.
+         * @param handler Owned callback accepting Request& and Response&.
+         * @return Success, AlreadyRunning, or Busy.
+         * @note True means handled: skip matching and all route/global aspects, preserve the response,
+         *       then run error and post-routing hooks. False continues routing. Path captures and body
+         *       are not populated yet; a session must close when interception leaves a body unread.
+         */
+        template <typename F>
+            requires detail::HttpDecisionFunction<std::decay_t<F>>
+        [[nodiscard]] auto SetPreRoutingHandler(F&& handler) -> Result<void> {
+            return m_impl->SetPreRoutingHandler(detail::make_http_decision(std::forward<F>(handler)));
+        }
+
+        /**
+         * @brief Replace the final response hook, invoked once after aspects and error transformation.
+         * @tparam F Synchronous void or Task<void> callback.
+         * @param handler Owned callback accepting Request& and Response&.
+         * @return Success, AlreadyRunning, or Busy.
+         * @note Applies to intercepted, missing, and matched requests. Exceptions propagate without
+         *       invoking post-routing again; serialization recomputes framing after this hook returns.
+         */
+        template <typename F>
+            requires detail::HttpHandlerFunction<std::decay_t<F>>
+        [[nodiscard]] auto SetPostRoutingHandler(F&& handler) -> Result<void> {
+            return m_impl->SetPostRoutingHandler(detail::make_http_handler(std::forward<F>(handler)));
+        }
+
+        /**
          * @brief Register or replace one method-specific handler with optional ordered aspects.
          * @tparam F Synchronous void or Task<void> callable accepting Request& and Response&.
          * @tparam Aspects Owned Before/After objects returning bool or Task<bool>.

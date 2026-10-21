@@ -108,9 +108,31 @@ Before 返回 false 时跳过后续 Before 与 handler，保留已写入的响�
 全局 Before false 跳过余下全局 Before 和整个路由层，再执行全部全局 After；
 路由 Before false 仍会执行路由 After 与全局 After。
 路由 After false 仅跳过余下路由 After，之后仍执行全局 After。
-任意阶段抛异常都会跳过所有后续阶段，包括外层 After；路由钩子待后续组合。
+任意阶段抛异常都会跳过所有后续 aspect，包括外层 After。
 Use 遵循与路由注册相同的冻结和配置使用权守卫，传入的一批 aspect 作为一次配置变更发布。
 
+## 路由钩子
+
+`SetPreRoutingHandler` 接受返回 bool 或 Task<bool> 的处理器，在路径匹配和读取 body 前调用，
+此时没有路径捕获。返回 true 表示已处理请求，跳过匹配、body 读取及全部全局/路由 aspect，
+保留处理器写入的响应；返回 false 继续路由。若提前处理留下未读 body，会话必须关闭连接。
+这与 aspect Before 的 true 表示继续有不同含义。
+
+`SetNotFoundHandler(handler, aspects...)` 接受与普通路由相同的处理器和可选 aspect。
+正常路由执行结果为 404 时调用一次，包括路径未命中和 handler 自己生成的 404；
+它的 aspect 在一次全局 Before/After 之间执行。默认 404 状态已设置，SetContent 保留此状态。
+405 和 pre-routing 已处理的请求跳过这个处理器。
+
+`SetErrorHandler` 在最终状态至少为 400 时调用一次，位置在全局 After 之后；
+它可以修改状态、头部和 body，修改状态不会递归调用错误处理器。
+`SetPostRoutingHandler` 在错误处理器之后调用一次，可给正常、错误和提前处理的响应统一加头。
+二者支持同步 void 和 Task<void>，序列化在所有响应修改完成后重新计算分帧。
+钩子抛出的异常目前传播到会话边界，不会重复调用 post-routing；异常响应处理将在下一步接入。
+
+以上 setter 都替换先前的对应钩子，旧资源在配置锁外释放，遵循相同的冻结/使用权守卫。
+钩子可拥有只可移动的对象；异步调用仍遵循 Request、Response 和引用捕获的借用生命周期约束。
+
 对应独立测试为 `tests/server/request_test.cpp`、`response_test.cpp`、
-`request_data_test.cpp`、`handler_test.cpp`、`middleware_test.cpp` 和 `router_test.cpp`，覆盖数据所有权、错误拒绝、分帧衔接、
+`request_data_test.cpp`、`handler_test.cpp`、`middleware_test.cpp`、`router_test.cpp` 和
+`routing_hooks_test.cpp`，覆盖数据所有权、错误拒绝、分帧衔接、
 类型化参数、并发上下文、调用顺序、短路、异常、注册替换、配置冻结、惰性所有权与取消清理。

@@ -42,6 +42,10 @@ namespace mhttp::impl {
         detail::RouteTree m_tree; ///< Immutable while frozen or any configuration reader exists.
         std::unordered_map<std::size_t, std::shared_ptr<detail::HttpHandler const>> m_handlers; ///< Owned bindings.
         std::vector<detail::HttpMiddleware> m_middleware; ///< Global aspects, immutable while readers exist.
+        std::shared_ptr<detail::HttpHandler const> m_not_found; ///< Optional 404 handler with its own aspects.
+        std::shared_ptr<detail::HttpHandler const> m_error_handler; ///< Optional final error response transformation.
+        std::shared_ptr<detail::HttpDecision const> m_pre_routing; ///< Optional interception before path selection.
+        std::shared_ptr<detail::HttpHandler const> m_post_routing; ///< Optional final response mutation hook.
         std::size_t m_next_id{}; ///< Next opaque binding identifier.
         std::size_t m_readers{}; ///< Prepared operations, including Tasks not yet started.
         bool m_frozen{}; ///< Server lifecycle rejects mutation until all sessions drain and thaw succeeds.
@@ -65,6 +69,42 @@ namespace mhttp::impl {
             m_middleware.reserve(m_middleware.size() + incoming.size());
             for (auto& middleware : incoming) { m_middleware.push_back(std::move(middleware)); }
             return {};
+        }
+
+        /**
+         * @brief Replace the custom handler for a route result with status 404.
+         * @param handler Owned callback and optional aspects.
+         * @return Success, AlreadyRunning, or Busy.
+         */
+        auto SetNotFoundHandler(detail::HttpHandler handler) -> Result<void> {
+            return replaceCallback(m_not_found, std::move(handler));
+        }
+
+        /**
+         * @brief Replace the response transformer run once when status is at least 400.
+         * @param handler Owned callback.
+         * @return Success, AlreadyRunning, or Busy.
+         */
+        auto SetErrorHandler(detail::HttpHandler handler) -> Result<void> {
+            return replaceCallback(m_error_handler, std::move(handler));
+        }
+
+        /**
+         * @brief Replace interception before matching and body consumption.
+         * @param handler Owned callback returning true when it handled the request.
+         * @return Success, AlreadyRunning, or Busy.
+         */
+        auto SetPreRoutingHandler(detail::HttpDecision handler) -> Result<void> {
+            return replaceCallback(m_pre_routing, std::move(handler));
+        }
+
+        /**
+         * @brief Replace the final response hook, run once after error response transformation.
+         * @param handler Owned callback.
+         * @return Success, AlreadyRunning, or Busy.
+         */
+        auto SetPostRoutingHandler(detail::HttpHandler handler) -> Result<void> {
+            return replaceCallback(m_post_routing, std::move(handler));
         }
 
         /**
@@ -131,10 +171,13 @@ namespace mhttp::impl {
         /**
          * @brief Retain configuration ownership before returning a lazy preparation Task.
          * @param request Borrowed initialized request, alive through preparation and execution.
-         * @param response Borrowed response for future pre-routing interception.
+         * @param response Borrowed response for pre-routing interception.
          * @return Lazy preparation Task; it already prevents configuration mutation before initial suspension.
          */
-        auto Prepare(server::Request& request, server::Response& response) -> Task<detail::PreparedRoute> {
+        auto Prepare(
+            server::Request& request,
+            server::Response& response
+        ) -> Task<detail::PreparedRoute> {
             auto lease = std::make_shared<Lease>(shared_from_this());
             {
                 std::lock_guard lock{ m_mutex };
@@ -158,22 +201,31 @@ namespace mhttp::impl {
             server::Response& response
         ) -> Task<void> {
             auto& owner = *std::static_pointer_cast<Lease>(route.lifetime)->owner;
-            bool proceed{ true };
-            for (auto const& middleware : owner.m_middleware) {
-                if (!co_await middleware.before(request, response)) { proceed = false; break; }
-            }
-            if (proceed) {
-                if (route.handler) { co_await (*route.handler)(request, response); }
-                else {
-                    static_cast<void>(response.SetError(route.match.status));
-                    if (!route.match.allow.empty()) {
-                        static_cast<void>(response.Headers().Set("Allow", route.match.allow));
+            if (!route.handled) {
+                bool proceed{ true };
+                for (auto const& middleware : owner.m_middleware) {
+                    if (!co_await middleware.before(request, response)) { proceed = false; break; }
+                }
+                if (proceed) {
+                    if (route.handler) { co_await (*route.handler)(request, response); }
+                    else {
+                        static_cast<void>(response.SetError(route.match.status));
+                        if (!route.match.allow.empty()) {
+                            static_cast<void>(response.Headers().Set("Allow", route.match.allow));
+                        }
+                    }
+                    if (response.Status() == Status::NotFound && owner.m_not_found) {
+                        co_await (*owner.m_not_found)(request, response);
                     }
                 }
+                for (auto const& middleware : owner.m_middleware) {
+                    if (!co_await middleware.after(request, response)) { break; }
+                }
             }
-            for (auto const& middleware : owner.m_middleware) {
-                if (!co_await middleware.after(request, response)) { break; }
+            if (static_cast<unsigned>(response.Status()) >= 400 && owner.m_error_handler) {
+                co_await (*owner.m_error_handler)(request, response);
             }
+            if (owner.m_post_routing) { co_await (*owner.m_post_routing)(request, response); }
         }
 
         /**
@@ -193,10 +245,28 @@ namespace mhttp::impl {
 
     private:
         /**
+         * @brief Replace callback ownership while retiring user resources after releasing the mutex.
+         * @tparam F Type-erased callback type.
+         * @param slot Configuration member protected by this router's lifecycle guard.
+         * @param handler Owned incoming callback, constructed before acquiring the mutex.
+         * @return Success, AlreadyRunning, or Busy.
+         */
+        template <typename F>
+        auto replaceCallback(std::shared_ptr<F const>& slot, F handler) -> Result<void> {
+            auto incoming = std::make_shared<F const>(std::move(handler));
+            std::shared_ptr<F const> retired;
+            std::lock_guard lock{ m_mutex };
+            if (m_frozen) { return std::unexpected{ Error::AlreadyRunning }; }
+            if (m_readers != 0) { return std::unexpected{ Error::Busy }; }
+            retired = std::exchange(slot, std::move(incoming));
+            return {};
+        }
+
+        /**
          * @brief Match immutable state after reader acquisition, then publish request-owned captures.
          * @param lease Owned registered configuration reader.
          * @param request Borrowed initialized request.
-         * @param response Reserved borrowed response for pre-routing interception.
+         * @param response Borrowed response for pre-routing interception before body intake.
          * @return Prepared callback and lease, independent of the public Router object's lifetime.
          */
         static auto prepare(
@@ -205,6 +275,10 @@ namespace mhttp::impl {
             server::Response& response
         ) -> Task<detail::PreparedRoute> {
             auto& owner = *lease->owner;
+            detail::ServerRequestAccess::SetPathParams(request, {});
+            if (owner.m_pre_routing && co_await (*owner.m_pre_routing)(request, response)) {
+                co_return detail::PreparedRoute{ .lifetime = std::move(lease), .handled = true };
+            }
             auto match = owner.m_tree.Match(request.MethodString(), detail::ServerRequestAccess::EncodedPath(request));
             std::shared_ptr<detail::HttpHandler const> handler;
             if (match.handler) { handler = std::as_const(owner.m_handlers).at(*match.handler); }

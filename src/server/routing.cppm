@@ -6,7 +6,7 @@ export module mhttp:server.routing;
 
 import std;
 export import :server.route_tree;
-export import :server.middleware;
+export import :server.hooks;
 
 export namespace mhttp::detail {
 
@@ -20,6 +20,7 @@ export namespace mhttp::detail {
         RouteMatch match; ///< Method/path outcome; captures have been transferred into Request.
         std::shared_ptr<HttpHandler const> handler; ///< Stable selected callback, absent for 404/405.
         std::shared_ptr<void> lifetime; ///< Type-erased configuration lease, also owning the router state.
+        bool handled{}; ///< Pre-routing produced the response; skip matching, body intake, and route aspects.
     };
 
 } // namespace mhttp::detail
