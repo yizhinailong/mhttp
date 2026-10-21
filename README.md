@@ -50,6 +50,7 @@ python tools/check_module_boundary.py
 python tools/check_transport.py
 python tools/check_session.py
 python tools/check_server.py
+python tools/check_client.py
 python tools/check_test_support.py
 ```
 

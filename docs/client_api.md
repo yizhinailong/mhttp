@@ -81,3 +81,5 @@ Content-Length 或 chunked 尚未完成就断开时返回 ConnectionClosed。
 `tests/client/request_policy_test.cpp` 覆盖配置校验、构造 host、查询拼接、默认头优先级、分帧和发送边界。
 `tests/client/client_basic_test.cpp` 通过真实服务端验证常用方法、默认字段、端点、4 MiB 二进制往返、
 Busy、四个客户端的跨线程 Stop、读超时、空闲/在途 Runtime 取消与重启，以及消息在网络状态销毁后的所有权。
+`python tools/check_client.py` 使用隔离工程中的原始 TCP 对端验证 CL / chunked / EOF、trailer、
+HEAD / 204 / 304 / 404、截断、字段和 body 上限、编码错误、连接拒绝、真实 body 读超时和上传写超时。
