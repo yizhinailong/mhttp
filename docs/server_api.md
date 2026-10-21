@@ -83,6 +83,25 @@ body 与状态只描述表示内容。协议序列化器会按实际 body 大小
 HEAD 发送与 GET 相同的表示头但不发送 body；1xx、204、304 同样按协议抑制 body 和分帧头。
 内部 `ServerResponseAccess::Head` 返回独立的协议元数据快照，后续响应修改不会改变它。
 
+## 服务端配置与响应准备
+
+ServerOptions 定义会话的读写超时、keep-alive 空闲超时和最大请求数，
+以及 URI、头部字节数、字段数、请求 body 和整份响应的大小上限。
+默认请求限制沿用协议核心；整份缓冲响应默认最多 16 MiB，含实际发送的头部和 body。
+超时和除 body 外的上限必须为正，body 上限可以设为零以拒绝有内容的请求。
+内部选项校验会在建立服务器资源前拒绝无效值和无法安全转换的超时；监听器接入尚待完成。
+
+default_headers 保存回退响应头，应用显式设置同名字段时，整组默认值被覆盖；
+否则保留该默认字段的全部重复值。Date 缺失时自动按 GMT 补齐。
+响应准备仅修改独立的头部快照，不向应用 Response 回写自动字段。
+
+内部 `serialize_server_response` 根据请求版本生成一份拥有完整 wire 字节的缓冲，
+在连接开始写入前检查输出上限；HEAD、204、304 的 body 不进入这份缓冲。
+请求/响应 Connection、未读 body、停机状态、异常关闭策略和最大请求数共同决定是否继续复用；
+计数包含当前请求，达到上限的这次响应带关闭策略。
+HTTP/1.0 请求显式允许复用且应用未要求关闭时，响应也明确发送 keep-alive。
+1xx 不能单独作为最终缓冲响应，临时 100 响应由后续会话逻辑单独发送。
+
 ## 上下文与处理器
 
 `Request::Data()` 提供当前请求的 RequestData。`Store(value)` 和 `Store(tag, value)`
@@ -150,5 +169,5 @@ Error::Canceled 保持为取消控制流，不转成 500，也不会继续调用
 
 对应独立测试为 `tests/server/request_test.cpp`、`response_test.cpp`、
 `request_data_test.cpp`、`handler_test.cpp`、`middleware_test.cpp`、`router_test.cpp`、
-`routing_hooks_test.cpp` 和 `exception_test.cpp`，覆盖数据所有权、错误拒绝、分帧衔接、
+`routing_hooks_test.cpp`、`exception_test.cpp` 和 `response_policy_test.cpp`，覆盖数据所有权、错误拒绝、分帧衔接、
 类型化参数、并发上下文、调用顺序、短路、异常、注册替换、配置冻结、惰性所有权与取消清理。

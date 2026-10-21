@@ -24,6 +24,8 @@ export import :server.response;
 export import :server.request;
 export import :server.handler;
 export import :server.router;
+export import :server.options;
+export import :server.response_policy;
 
 export import :utils.string;
 export import :utils.percent;
