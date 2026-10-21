@@ -38,6 +38,7 @@ export import :server.request;
 export import :server.handler;
 export import :server.auth;
 export import :server.cors;
+export import :server.rate_limit;
 export import :server.router;
 export import :server.options;
 export import :server.response_policy;
