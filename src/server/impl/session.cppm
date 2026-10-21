@@ -173,6 +173,12 @@ namespace mhttp::impl {
                 result.failure = std::current_exception();
             }
             self->m_connection->Close();
+            bool const expected_close = result.error == Error::Canceled
+                || (result.error == Error::ConnectionClosed && self->m_request_started == Clock::time_point{});
+            if (!expected_close && (result.error || result.failure)) {
+                self->m_observers.Log(server::LogEvent::SessionFailure, result.error.value_or(Error::Unknown), {},
+                    result.failure, &self->m_remote, &self->m_local);
+            }
             co_return result;
         }
 

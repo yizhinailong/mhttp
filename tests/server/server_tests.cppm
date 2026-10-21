@@ -285,6 +285,10 @@ namespace mhttp::test {
         server::HttpServer server{ runtime };
         std::latch entered{ 1 }, release{ 1 };
         std::atomic<int> active{};
+        std::atomic<int> diagnostics{}, accesses{};
+        Check(server.SetLogger([&](auto const&) { ++diagnostics; }).has_value(), "observe offload cancellation");
+        Check(server.SetAccessLogger([&](auto const&, auto const&, auto) { ++accesses; }).has_value(),
+            "observe canceled response writes");
         Check(server.Get("/", [&](auto& request, auto&) -> Task<void> {
             ActiveHandler owner{ active };
             co_await Offload([&] {
@@ -309,6 +313,8 @@ namespace mhttp::test {
         release.count_down();
         stopper.join();
         Check(drained && active == 0, "AsyncStop finishes after worker and handler cleanup");
+        CheckEq(diagnostics.load(), 0, "explicit cancellation is not a session diagnostic");
+        CheckEq(accesses.load(), 0, "canceled handler never completes a response for access observation");
         Check(server.Get("/after", [](auto&, auto&) {}).has_value(), "Offload drain releases route readers");
     }
 
@@ -455,6 +461,16 @@ namespace mhttp::test {
         Check(runtime.Start(4).has_value(), "start capacity runtime");
         server::HttpServer server{ runtime, { .max_connections = 1 } };
         std::atomic<int> handlers{};
+        std::atomic<int> rejected{};
+        Check(server.SetLogger([&](auto const& record) {
+            Check(Runtime::IsIoThread(), "rejection diagnostics execute on the server strand");
+            CheckEq(record.event, server::LogEvent::ConnectionRejected, "only surplus sockets produce diagnostics");
+            CheckEq(record.error, Error::Busy, "capacity diagnostic reason");
+            Check(record.remote && record.remote->port != 0 && record.local && record.local->port != 0,
+                "rejection includes both established endpoints");
+            Check(!record.native_error && !record.exception, "capacity rejection has no native or callback failure");
+            ++rejected;
+        }).has_value(), "observe capacity rejections");
         Check(server.Get("/", [&](auto&, auto& response) {
             ++handlers;
             Check(response.SetContent("capacity", "text/plain").has_value(), "capacity response");
@@ -467,6 +483,7 @@ namespace mhttp::test {
             Check(server.Stop().has_value(), "drain limited listener");
         }
         CheckEq(handlers.load(), 6, "only admitted requests execute handlers");
+        Check(rejected.load() >= 6, "all deliberate surplus peers are diagnosed across restart");
     }
 
     /**
@@ -706,11 +723,19 @@ namespace mhttp::test {
         Check(runtime.Start(4).has_value(), "start throwing observer runtime");
         server::HttpServer server{ runtime };
         std::atomic<int> calls{};
+        std::atomic<int> failures{};
         Check(server.Get("/", [](auto&, auto& response) {
             Check(response.SetContent("observed", "text/plain").has_value(), "observed response");
         }).has_value(), "register observed route");
         Check(server.SetAccessLogger([&](auto const&, auto const&, auto) { ++calls; throw 42; }).has_value(),
             "configure throwing observer");
+        Check(server.SetLogger([&](auto const& record) {
+            CheckEq(record.event, server::LogEvent::AccessLoggerFailure, "access exceptions reach diagnostics");
+            CheckEq(record.error, Error::Unknown, "callback diagnostic category");
+            Check(record.exception && record.remote && record.local, "callback diagnostic retains exception and endpoints");
+            ++failures;
+            throw 7;
+        }).has_value(), "configure a diagnostic callback that also throws");
         Check(server.BindToAnyPort("127.0.0.1").has_value(), "bind throwing observer listener");
         Check(server.Start().has_value(), "start throwing observer listener");
         TransportRuntime peers;
@@ -718,6 +743,114 @@ namespace mhttp::test {
         Check(server.IsRunning(), "observer exception does not stop listener");
         Check(server.Stop().has_value(), "drain throwing observers");
         CheckEq(calls.load(), 2, "throwing access observer runs once per complete final response");
+        CheckEq(failures.load(), 2, "throwing diagnostics are contained without recursive calls");
+    }
+
+    /**
+     * @brief Exercise terminal faults and normal closes without depending on public network services.
+     * @param executor Independent fixture strand.
+     * @param endpoint Owned listener endpoint.
+     */
+    auto server_diagnostic_scenario(
+        asio::any_io_executor executor,
+        Endpoint endpoint
+    ) -> asio::awaitable<void> {
+        for (auto path : { "/throw", "/post-fail", "/large", "/access-fail", "/ok" }) {
+            auto wire = co_await server_exchange(executor, endpoint,
+                std::format("GET {} HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n", path));
+            if (path == std::string_view{ "/post-fail" }) {
+                Check(wire.empty(), "failed post hook produces no response");
+                continue;
+            }
+            std::size_t offset{};
+            auto const expected = path == std::string_view{ "/throw" } || path == std::string_view{ "/large" }
+                ? Status::InternalServerError : Status::Ok;
+            CheckEq(parse_session_reply(wire, offset).head.status, expected, "diagnostics preserve HTTP fault policy");
+        }
+        auto wire = co_await server_exchange(executor, endpoint, "GET / HTTP/1.2\r\nHost: local\r\n\r\n");
+        std::size_t offset{};
+        CheckEq(parse_session_reply(wire, offset).head.status, Status::HttpVersionNotSupported, "logged protocol rejection");
+        auto truncated = co_await server_peer(executor, endpoint);
+        std::string const input = "POST /body HTTP/1.1\r\nHost: local\r\nContent-Length: 3\r\n\r\na";
+        co_await asio::async_write(*truncated, asio::buffer(input), asio::use_awaitable);
+        truncated->shutdown(asio::socket_base::shutdown_send);
+        wire = co_await receive_server(std::move(truncated));
+        offset = 0;
+        CheckEq(parse_session_reply(wire, offset).head.status, Status::BadRequest, "logged truncated body rejection");
+        auto idle = co_await server_peer(executor, endpoint);
+        idle->shutdown(asio::socket_base::shutdown_send);
+        Check((co_await receive_server(std::move(idle))).empty(), "normal idle EOF has no response or diagnostic");
+        auto timed = co_await server_peer(executor, endpoint);
+        Check((co_await receive_server(std::move(timed))).empty(), "idle read deadline closes without HTTP output");
+    }
+
+    /**
+     * @brief Verify diagnostic records own their metadata and distinguish protocol, transport, and callback faults.
+     */
+    auto server_diagnostic_observation() -> void {
+        Runtime runtime;
+        Check(runtime.Start(4).has_value(), "start diagnostic observation runtime");
+        server::HttpServer server{ runtime, { .read_timeout = 250ms, .max_response_bytes = 512 } };
+        Check(server.Get("/throw", [](auto&, auto&) { throw std::runtime_error{ "private diagnostic detail" }; }).has_value(),
+            "register diagnosed handler fault");
+        Check(server.Get("/large", [](auto&, auto& response) {
+            Check(response.SetContent(std::string(2048, 'x'), "text/plain").has_value(), "oversized diagnostic response");
+        }).has_value(), "register diagnosed output bound");
+        Check(server.Get("/ok", [](auto&, auto& response) {
+            Check(response.SetContent("ok", "text/plain").has_value(), "healthy diagnostic sentinel");
+        }).has_value(), "register healthy diagnostic sentinel");
+        Check(server.Get("/access-fail", [](auto&, auto&) {}).has_value(), "register failing access observer route");
+        Check(server.Post("/body", [](auto&, auto&) {}).has_value(), "register truncated upload route");
+        Check(server.SetPostRoutingHandler([](auto& request, auto&) {
+            if (request.Path() == "/post-fail") { throw 7; }
+        }).has_value(), "register diagnosed post failure");
+        Check(server.SetAccessLogger([](auto const& request, auto const&, auto) {
+            if (request.Path() == "/access-fail") { throw 42; }
+        }).has_value(), "diagnose a selected access callback failure");
+        std::mutex mutex;
+        std::vector<server::LogRecord> records;
+        Check(server.SetLogger([&](auto const& record) {
+            Check(Runtime::IsIoThread(), "session diagnostics execute on I/O execution");
+            Check(server.LocalEndpoint().has_value(), "diagnostic callbacks may read configuration outside its mutex");
+            CheckEq(server.SetLogger({}).error(), Error::AlreadyRunning, "active diagnostic callback identity is frozen");
+            std::lock_guard lock{ mutex };
+            records.push_back(record);
+        }).has_value(), "copy owned diagnostic records for inspection after drain");
+        Check(server.BindToAnyPort("127.0.0.1").has_value(), "bind diagnostic listener");
+        auto const local = *server.LocalEndpoint();
+        Check(server.Start().has_value(), "start diagnostic listener");
+        TransportRuntime peers;
+        peers.Run(server_diagnostic_scenario(peers.Executor(), local));
+        Check(server.Stop().has_value(), "drain diagnostics before inspection");
+        Check(server.SetLogger({}).has_value(), "release configured diagnostics before inspecting owned records");
+        CheckEq(records.size(), std::size_t{ 7 }, "only terminal faults and access failure are diagnosed");
+        std::size_t protocol{}, truncated{}, timeout{}, output{}, callbacks{}, accesses{};
+        bool handler_exception{}, post_exception{}, access_exception{};
+        for (auto const& record : records) {
+            CheckEq(record.local, std::optional{ local }, "record retains endpoint after listener teardown");
+            Check(record.remote && record.remote->address == "127.0.0.1" && record.remote->port != 0,
+                "session record owns established peer endpoint");
+            Check(!record.native_error, "portable session operations do not fabricate a native error");
+            if (record.event == server::LogEvent::AccessLoggerFailure) { ++accesses; }
+            else { CheckEq(record.event, server::LogEvent::SessionFailure, "terminal session diagnostic context"); }
+            switch (record.error) {
+            case Error::ProtocolError: ++protocol; break;
+            case Error::ConnectionClosed: ++truncated; break;
+            case Error::ReadTimeout: ++timeout; break;
+            case Error::BodyTooLarge: ++output; break;
+            case Error::Unknown: ++callbacks; break;
+            default: Check(false, "unexpected diagnostic reason"); break;
+            }
+            if (record.exception) {
+                try { std::rethrow_exception(record.exception); }
+                catch (std::runtime_error const& error) { handler_exception = error.what() == std::string_view{ "private diagnostic detail" }; }
+                catch (int value) { post_exception = post_exception || value == 7; access_exception = access_exception || value == 42; }
+                catch (...) { Check(false, "unexpected retained callback exception"); }
+            }
+        }
+        Check(protocol == 1 && truncated == 1 && timeout == 1 && output == 1 && callbacks == 3 && accesses == 1,
+            "typed records distinguish every exercised fault without duplicate session logging");
+        Check(handler_exception && post_exception && access_exception, "owned exception pointers retain original callback failures");
     }
 
 } // namespace mhttp::test
@@ -744,6 +877,7 @@ export namespace mhttp::test {
             { "listener IPv6 dual stack", server_ipv6_and_dual_stack },
             { "listener access observation", server_access_observation },
             { "listener access exception isolation", server_access_exception_isolation },
+            { "listener diagnostic observation", server_diagnostic_observation },
         });
     }
 

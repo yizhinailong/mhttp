@@ -158,20 +158,24 @@ auto server_blocking_listen() -> void {
 /**
  * @brief Reenter server configuration when a retired callback releases its unique capture.
  */
-struct AccessRetirement {
+struct ObserverRetirement {
     mhttp::server::HttpServer& server; ///< Borrowed server, alive through explicit callback replacement.
+    bool diagnostic; ///< Select which callback is replaced from its capture's destructor.
 
     /**
      * @brief Borrow an idle server for the retirement check.
-     * @param owner Server whose access callback will be retired.
+     * @param owner Server whose callback will be retired.
+     * @param is_diagnostic Whether to replace its diagnostic callback.
      */
-    explicit AccessRetirement(mhttp::server::HttpServer& owner) : server{ owner } {}
+    explicit ObserverRetirement(mhttp::server::HttpServer& owner, bool is_diagnostic = false) :
+        server{ owner }, diagnostic{ is_diagnostic } {}
 
     /**
      * @brief Confirm callback destruction takes place outside the API mutex.
      */
-    ~AccessRetirement() {
-        Check(server.SetAccessLogger({}).has_value(), "retired callback may reenter configuration without deadlock");
+    ~ObserverRetirement() {
+        auto result = diagnostic ? server.SetLogger({}) : server.SetAccessLogger({});
+        Check(result.has_value(), "retired callback may reenter configuration without deadlock");
     }
 };
 
@@ -194,12 +198,60 @@ auto server_access_logger_configuration() -> void {
     Check(server.Stop().has_value(), "drain access configuration listener");
     Check(server.SetAccessLogger({}).has_value(), "clear access callback after stop");
     Check(lifetime.expired(), "clearing after drain releases callback captures");
-    auto reentrant = std::make_unique<AccessRetirement>(server);
+    auto reentrant = std::make_unique<ObserverRetirement>(server);
     Check(server.SetAccessLogger([owner = std::move(reentrant)](auto const&, auto const&, auto) {}).has_value(),
         "configure reentrant callback ownership");
     Check(server.SetAccessLogger({}).has_value(), "retire callback outside configuration lock");
     Check(server.SetAccessLogger([owner = std::make_unique<int>(7)](auto const&, auto const&, auto) {}).has_value(),
         "move-only captures are accepted without sharing the callback object itself");
+}
+
+/**
+ * @brief Verify owned bind diagnostics, callback reentry, exception isolation, and startup configuration guards.
+ */
+auto server_diagnostic_logger_configuration() -> void {
+    mhttp::Runtime runtime;
+    mhttp::server::HttpServer blocker{ runtime }, server{ runtime };
+    auto port = blocker.BindToAnyPort("127.0.0.1");
+    if (!Check(port.has_value(), "reserve a local dynamic port for bind diagnostics")) { return; }
+    std::vector<mhttp::server::LogRecord> records;
+    Check(server.SetLogger([owner = std::make_unique<int>(7), &server, &records](auto const& record) {
+        CheckEq(*owner, 7, "diagnostic logger owns its move-only capture");
+        Check(!mhttp::Runtime::IsIoThread(), "bind diagnostics run on the bind caller");
+        Check(!server.LocalEndpoint(), "failed bind publishes no listener before observation");
+        records.push_back(record);
+        Check(server.SetLogger({}).has_value(), "diagnostic callback may clear itself outside the API mutex");
+    }).has_value(), "configure diagnostic callback before binding");
+    CheckEq(server.Bind("127.0.0.1", *port).error(), mhttp::Error::BindIpAddress, "occupied-port bind fails");
+    CheckEq(records.size(), std::size_t{ 1 }, "one bind failure observation");
+    if (!records.empty()) {
+        auto const& record = records.front();
+        CheckEq(record.event, mhttp::server::LogEvent::BindFailure, "typed bind context");
+        CheckEq(record.error, mhttp::Error::BindIpAddress, "portable bind failure reason");
+        Check(static_cast<bool>(record.native_error), "bind diagnostic retains the native failure");
+        Check(!record.exception && !record.remote, "bind has no peer or callback exception");
+        CheckEq(record.local, std::optional{ mhttp::Endpoint{ "127.0.0.1", *port } },
+            "record owns the requested target after the callback was cleared");
+    }
+    int failures{};
+    Check(server.SetLogger([&](auto const&) { ++failures; throw 42; }).has_value(), "configure throwing diagnostics");
+    CheckEq(server.Bind("127.0.0.1", *port).error(), mhttp::Error::BindIpAddress,
+        "throwing logger preserves the original bind failure");
+    CheckEq(failures, 1, "logger failures never recursively log");
+    auto owned = std::make_shared<int>(7);
+    std::weak_ptr<int> lifetime = owned;
+    Check(server.SetLogger([value = std::move(owned)](auto const&) {}).has_value(), "retain diagnostic capture");
+    Check(runtime.Start(4).has_value(), "start diagnostic configuration runtime");
+    Check(server.BindToAnyPort("127.0.0.1").has_value(), "valid bind after observer failure");
+    Check(server.Start().has_value(), "start diagnostic configuration listener");
+    CheckEq(server.SetLogger({}).error(), mhttp::Error::AlreadyRunning, "active diagnostic configuration is frozen");
+    Check(server.Stop().has_value(), "drain diagnostic configuration listener");
+    Check(!lifetime.expired(), "configuration retains logger until explicitly replaced");
+    Check(server.SetLogger({}).has_value(), "clear diagnostics after stop");
+    Check(lifetime.expired(), "drain and replacement release every diagnostic snapshot");
+    Check(server.SetLogger([owner = std::make_unique<ObserverRetirement>(server, true)](auto const&) {}).has_value(),
+        "own a callback whose destructor reenters diagnostic configuration");
+    Check(server.SetLogger({}).has_value(), "retire diagnostics outside configuration lock");
 }
 
 /**
@@ -217,5 +269,6 @@ auto main(int argc, char* argv[]) -> int {
         { "server configuration and destruction", server_configuration_and_destruction },
         { "server blocking Listen", server_blocking_listen },
         { "server access logger configuration", server_access_logger_configuration },
+        { "server diagnostic logger configuration", server_diagnostic_logger_configuration },
     });
 }

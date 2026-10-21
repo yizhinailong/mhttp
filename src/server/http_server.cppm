@@ -48,6 +48,18 @@ export namespace mhttp::server {
         }
 
         /**
+         * @brief Replace the diagnostic observer before startup, or clear it with an empty callback.
+         * @param logger Owned synchronous callback receiving retainable failure metadata.
+         * @return Success or AlreadyRunning until listener/session drain completes.
+         * @note Calls run outside configuration locks and may overlap across sessions. Keep them short,
+         *       synchronize shared state, and copy the record if retained. Exceptions never escape or
+         *       recursively invoke the logger. Normal idle EOF and explicit cancellation are omitted.
+         */
+        [[nodiscard]] auto SetLogger(Logger logger) -> Result<void> {
+            return m_impl->SetLogger(std::move(logger));
+        }
+
+        /**
          * @brief Replace the synchronous access observer before startup; an empty callback disables it.
          * @param logger Owned callback, including move-only captures, invoked after each complete final write.
          * @return Success or AlreadyRunning until stop drains all sessions and observers.
@@ -66,7 +78,8 @@ export namespace mhttp::server {
          * @return Bound port or a bind/configuration/lifecycle failure.
          */
         [[nodiscard]] auto Bind(std::string const& host, std::uint16_t port) -> Result<std::uint16_t> {
-            return m_impl->Bind(host, port);
+            auto implementation = m_impl;
+            return implementation->Bind(host, port);
         }
 
         /**

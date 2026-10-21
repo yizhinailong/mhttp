@@ -15,7 +15,34 @@ namespace mhttp::impl {
      *       and shared by multiple sessions; applications must provide their own synchronization.
      */
     struct ServerObservers {
+        std::shared_ptr<server::Logger> logger; ///< Optional owned diagnostic observer.
         std::shared_ptr<server::AccessLogger> access_logger; ///< Optional owned access observer.
+
+        /**
+         * @brief Construct owned diagnostic metadata and contain every observer/allocation failure.
+         * @param event Operation context.
+         * @param error Backend-independent reason.
+         * @param native_error Optional native platform failure.
+         * @param exception Optional contained callback failure.
+         * @param remote Borrowed endpoint copied into the record if present.
+         * @param local Borrowed endpoint copied into the record if present.
+         */
+        auto Log(
+            server::LogEvent event,
+            Error error,
+            std::error_code native_error = {},
+            std::exception_ptr exception = {},
+            Endpoint const* remote = nullptr,
+            Endpoint const* local = nullptr
+        ) const noexcept -> void {
+            if (!logger) { return; }
+            try {
+                server::LogRecord record{ event, error, native_error, std::move(exception) };
+                if (remote) { record.remote = *remote; }
+                if (local) { record.local = *local; }
+                (*logger)(record);
+            } catch (...) {} // Never recursively log a logger failure.
+        }
 
         /**
          * @brief Observe one complete final write without changing response or connection policy on failure.
@@ -30,7 +57,10 @@ namespace mhttp::impl {
         ) const noexcept -> void {
             if (!access_logger) { return; }
             try { (*access_logger)(request, response, elapsed); }
-            catch (...) {} // Observers cannot alter a completed HTTP response or escape an I/O callback.
+            catch (...) {
+                Log(server::LogEvent::AccessLoggerFailure, Error::Unknown, {}, std::current_exception(),
+                    &request.RemoteEndpoint(), &request.LocalEndpoint());
+            }
         }
     };
 

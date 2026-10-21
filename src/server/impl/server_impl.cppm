@@ -36,6 +36,8 @@ namespace mhttp::impl {
             std::unique_ptr<std::stop_callback<std::function<void()>>> runtime_stop; ///< Owned cancellation link.
             std::stop_token token; ///< Runtime generation cancellation for each accepted session.
             ServerObservers observers; ///< Owned callback snapshot, immutable after submission.
+            Endpoint local; ///< Immutable bound address snapshot for diagnostics.
+            asio::error_code accept_error; ///< Server-strand native accept failure, if any.
             bool stop_runtime{}; ///< Immutable: Listen owns this inline runtime generation.
             std::size_t next_id{}; ///< Server-strand session identity.
             bool stopping{}; ///< Server-strand stop guard.
@@ -70,6 +72,22 @@ namespace mhttp::impl {
             m_executor{ asio::make_strand(m_runtime->Context()) } {}
 
         /**
+         * @brief Replace diagnostic callback ownership while no generation is active.
+         * @param logger Owned callback; empty disables diagnostics.
+         * @return Success or AlreadyRunning, retiring callback resources outside the API mutex.
+         */
+        auto SetLogger(server::Logger logger) -> Result<void> {
+            auto incoming = logger ? std::make_shared<server::Logger>(std::move(logger)) : nullptr;
+            std::shared_ptr<server::Logger> retired;
+            std::lock_guard lock{ m_mutex };
+            if (m_state == State::Running || m_state == State::Stopping) {
+                return std::unexpected{ Error::AlreadyRunning };
+            }
+            retired = std::exchange(m_observers.logger, std::move(incoming));
+            return {};
+        }
+
+        /**
          * @brief Replace the owned access callback before startup, retiring old state outside the API mutex.
          * @param logger Owned synchronous callback; empty disables observation.
          * @return Success, or AlreadyRunning until the active generation drains.
@@ -93,35 +111,24 @@ namespace mhttp::impl {
          */
         auto Bind(std::string const& host, std::uint16_t port) -> Result<std::uint16_t> {
             if (RuntimeImpl::IsIoThread()) { return std::unexpected{ Error::Busy }; }
-            std::lock_guard lock{ m_mutex };
-            if (m_state == State::Running || m_state == State::Stopping) {
-                return std::unexpected{ Error::AlreadyRunning };
-            }
-            if (auto valid = detail::validate_server_options(m_options); !valid) {
-                return std::unexpected{ valid.error() };
-            }
             asio::error_code error;
-            asio::ip::tcp::resolver resolver{ m_executor };
-            auto endpoints = resolver.resolve(host, std::to_string(port), error);
-            if (error || endpoints.empty()) { return std::unexpected{ Error::BindIpAddress }; }
-            for (auto const& entry : endpoints) {
-                auto acceptor = std::make_shared<asio::ip::tcp::acceptor>(m_executor);
-                acceptor->open(entry.endpoint().protocol(), error);
-                if (error) { continue; }
-                error = configure_listener_socket(*acceptor, entry.endpoint().protocol(), m_options);
-                if (error) { continue; }
-                acceptor->bind(entry.endpoint(), error);
-                if (error) { continue; }
-                acceptor->listen(asio::socket_base::max_listen_connections, error);
-                if (error) { continue; }
-                auto local = acceptor->local_endpoint(error);
-                if (error) { continue; }
-                m_bound = std::move(acceptor);
-                m_local = Endpoint{ local.address().to_string(), local.port() };
-                m_state = State::Bound;
-                return local.port();
+            Result<std::uint16_t> result;
+            ServerObservers observers;
+            {
+                std::lock_guard lock{ m_mutex };
+                if (m_state == State::Running || m_state == State::Stopping) {
+                    return std::unexpected{ Error::AlreadyRunning };
+                }
+                observers = m_observers;
+                result = bind(host, port, error);
             }
-            return std::unexpected{ Error::BindIpAddress };
+            if (!result) {
+                try {
+                    Endpoint target{ host, port };
+                    observers.Log(server::LogEvent::BindFailure, result.error(), error, {}, nullptr, &target);
+                } catch (...) {} // Diagnostic allocation must not change the bind result.
+            }
+            return result;
         }
 
         /**
@@ -138,6 +145,7 @@ namespace mhttp::impl {
             auto generation = std::make_shared<Generation>();
             generation->acceptor = m_bound;
             generation->observers = m_observers;
+            generation->local = *m_local;
             generation->stop_runtime = stop_runtime;
             auto operation = [self = shared_from_this(), generation](std::stop_token token) {
                 asio::post(self->m_executor, [self, generation, token] {
@@ -148,6 +156,8 @@ namespace mhttp::impl {
                             std::lock_guard lock{ self->m_mutex };
                             generation->error = Error::Unknown;
                         }
+                        generation->observers.Log(server::LogEvent::AcceptFailure, Error::Unknown, {},
+                            std::current_exception(), nullptr, &generation->local);
                         self->stopGeneration(generation);
                     }
                 });
@@ -268,6 +278,45 @@ namespace mhttp::impl {
 
     private:
         /**
+         * @brief Configure and bind a new socket while the API mutex excludes submission and replacement.
+         * @param host Requested bind hostname or numeric address.
+         * @param port Requested port, possibly zero.
+         * @param error Native failure retained for diagnostics, clear for configuration rejection.
+         * @return Bound port or failure, preserving any previous bound socket on rejection.
+         */
+        auto bind(
+            std::string const& host,
+            std::uint16_t port,
+            asio::error_code& error
+        ) -> Result<std::uint16_t> {
+            if (auto valid = detail::validate_server_options(m_options); !valid) {
+                return std::unexpected{ valid.error() };
+            }
+            asio::ip::tcp::resolver resolver{ m_executor };
+            auto endpoints = resolver.resolve(host, std::to_string(port), error);
+            if (error || endpoints.empty()) { return std::unexpected{ Error::BindIpAddress }; }
+            for (auto const& entry : endpoints) {
+                auto acceptor = std::make_shared<asio::ip::tcp::acceptor>(m_executor);
+                acceptor->open(entry.endpoint().protocol(), error);
+                if (error) { continue; }
+                error = configure_listener_socket(*acceptor, entry.endpoint().protocol(), m_options);
+                if (error) { continue; }
+                acceptor->bind(entry.endpoint(), error);
+                if (error) { continue; }
+                acceptor->listen(asio::socket_base::max_listen_connections, error);
+                if (error) { continue; }
+                auto local = acceptor->local_endpoint(error);
+                if (error) { continue; }
+                Endpoint snapshot{ local.address().to_string(), local.port() };
+                m_bound = std::move(acceptor);
+                m_local = std::move(snapshot);
+                m_state = State::Bound;
+                return local.port();
+            }
+            return std::unexpected{ Error::BindIpAddress };
+        }
+
+        /**
          * @brief Publish stopping before posting strand-owned cancellation; close unsubmitted sockets directly.
          * @return Owned active generation, or empty if no asynchronous drain is needed.
          */
@@ -311,8 +360,13 @@ namespace mhttp::impl {
                 [self = shared_from_this(), generation](std::exception_ptr failure, Result<void> result) {
                     generation->accept_done = true;
                     if (failure || !result) {
-                        std::lock_guard lock{ self->m_mutex };
-                        generation->error = failure ? Error::Unknown : result.error();
+                        auto const error = failure ? Error::Unknown : result.error();
+                        {
+                            std::lock_guard lock{ self->m_mutex };
+                            generation->error = error;
+                        }
+                        generation->observers.Log(server::LogEvent::AcceptFailure, error, generation->accept_error,
+                            failure, nullptr, &generation->local);
                     }
                     self->stopGeneration(generation);
                 });
@@ -340,24 +394,34 @@ namespace mhttp::impl {
                 auto [error] = co_await generation->acceptor->async_accept((*connection)->SocketForInitialization(),
                     asio::as_tuple(asio::use_awaitable));
                 if (generation->stopping) { (*connection)->Close(); break; }
-                if (error) { co_return std::unexpected{ Error::Connection }; }
+                if (error) { generation->accept_error = error; co_return std::unexpected{ Error::Connection }; }
                 if (generation->sessions.size() >= self->m_options.max_connections) {
+                    self->logRejected(*generation, **connection, Error::Busy);
                     (*connection)->Close();
                     continue;
                 }
-                if (configure_session_socket((*connection)->SocketForInitialization(), self->m_options)) {
+                if (auto configured = configure_session_socket((*connection)->SocketForInitialization(), self->m_options)) {
+                    self->logRejected(*generation, **connection, Error::Connection, configured);
                     (*connection)->Close();
                     continue;
                 }
                 auto session = Session::Create(*connection, self->m_router, self->m_options,
                     self->m_runtime, generation->token, generation->observers);
-                if (!session) { (*connection)->Close(); continue; }
+                if (!session) {
+                    self->logRejected(*generation, **connection, session.error());
+                    (*connection)->Close();
+                    continue;
+                }
                 auto const id = generation->next_id++;
                 generation->sessions.emplace(id, *session);
                 try {
                     asio::co_spawn(self->m_executor, (*session)->Run(),
                         [self, generation, id, owner = *session](std::exception_ptr failure, SessionResult) mutable {
-                            if (failure) { owner->Stop(); }
+                            if (failure) {
+                                owner->Stop();
+                                generation->observers.Log(server::LogEvent::SessionFailure, Error::Unknown, {}, failure,
+                                    nullptr, &generation->local);
+                            }
                             generation->sessions.erase(id);
                             owner.reset();
                             self->finishGeneration(generation);
@@ -369,6 +433,30 @@ namespace mhttp::impl {
                 }
             }
             co_return Result<void>{};
+        }
+
+        /**
+         * @brief Observe an accepted socket rejection without exposing endpoint/observer failures to accept.
+         * @param generation Immutable logger/local endpoint snapshot.
+         * @param connection Initialized socket, before any connection-strand I/O.
+         * @param error Rejection reason.
+         * @param native_error Optional platform initialization failure.
+         */
+        auto logRejected(
+            Generation const& generation,
+            Connection& connection,
+            Error error,
+            asio::error_code native_error = {}
+        ) const noexcept -> void {
+            if (!generation.observers.logger) { return; }
+            try {
+                asio::error_code endpoint_error;
+                auto endpoint = connection.SocketForInitialization().remote_endpoint(endpoint_error);
+                std::optional<Endpoint> remote;
+                if (!endpoint_error) { remote = Endpoint{ endpoint.address().to_string(), endpoint.port() }; }
+                generation.observers.Log(server::LogEvent::ConnectionRejected, error, native_error, {},
+                    remote ? &*remote : nullptr, &generation.local);
+            } catch (...) {} // Rejection must still close the socket if diagnostics cannot be constructed.
         }
 
         /**

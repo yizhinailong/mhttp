@@ -248,7 +248,22 @@ SetAccessLogger 接受同步的 `void(Request const&, Response const&, steady_cl
 耗时从首个请求字节进入解析器开始，到完整写操作完成为止，排除 keep-alive 空闲时间及日志回调自身。
 引用只在同步回调期间有效，需要保留的数据必须拷贝。不同会话的回调可并发执行，应用负责同步，
 并避免在 I/O 线程阻塞。观察器异常被隔离，不改写响应、不关闭原本可复用的连接。
-当前尚未提供诊断日志钩子。
+访问日志抛出的异常通过诊断日志报告；未设置诊断回调时直接隔离。
+
+SetLogger 接受同步的 `void(LogRecord const&)` 回调，同样支持只可移动的捕获、空回调清除，
+并在启动后直到停止完成期间禁止替换。LogRecord 可拷贝并保留，拥有本地/远端 Endpoint、
+可选的原始 exception_ptr，以及 Error 和可用时的原始 std::error_code。
+当前传输层返回可移植 Error，因此会话记录的 native_error 为空；绑定和 socket 初始化保留原生错误。
+LogEvent 区分 BindFailure、AcceptFailure、ConnectionRejected、SessionFailure 和 AccessLoggerFailure，
+分别报告绑定配置/解析/监听失败、监听循环失败、容量或初始化拒绝、终止会话的故障以及访问日志异常。
+BindFailure 的 local 是请求的绑定目标，其他记录尽可能携带已建立的端点。
+正常空闲 EOF、显式停止取消及成功响应不产生故障诊断；空闲读取超时仍记录 ReadTimeout。
+日志不改变 HTTP 错误策略，诊断回调自身抛出的异常被隔离且不递归记录。
+
+绑定失败的回调在 Bind 调用线程执行，连接拒绝在服务端 strand，会话与访问日志在连接 strand。
+所有用户日志回调均在配置锁之外调用，停止完成时监听器和会话的回调已排空；不同会话的调用可以重叠。
+Bind 的同步回调由调用 Bind 的线程完成，其生命周期不依赖运行中的服务端代次。
+回调应短小且避免阻塞 I/O 线程，共享状态需自行同步，借用的记录引用只在回调内有效。
 
 对应独立测试为 `tests/server/request_test.cpp`、`response_test.cpp`、
 `request_data_test.cpp`、`handler_test.cpp`、`middleware_test.cpp`、`router_test.cpp`、
