@@ -42,3 +42,26 @@ Content-Disposition 必须是 form-data 并含 name；支持 quoted-pair，转�
 
 格式依据 [RFC 7578](https://www.rfc-editor.org/rfc/rfc7578.html) 和
 [RFC 2046 §5.1.1](https://www.rfc-editor.org/rfc/rfc2046.html#section-5.1.1)。
+
+客户端通过 FormData::Add(FormPart) 按顺序构造字段和文件，再同步调用 Request::SetMultipart：
+
+```cpp
+mhttp::FormData form;
+form.Add({ .name = "title", .content = "example" });
+form.Add({ .name = "upload", .content = file_bytes, .filename = "data.bin" });
+mhttp::client::Request request{ mhttp::Method::Post, "/upload" };
+if (auto encoded = request.SetMultipart(form); !encoded) {
+    throw std::runtime_error{ "cannot encode multipart request" };
+}
+auto response = co_await client.Send(std::move(request));
+```
+
+SetMultipart 完成后，原表单和文件字节无需存活到 Send 完成。文件分段缺少媒体类型时使用
+application/octet-stream，普通字段不推断 Content-Type。构造失败时保留原请求 body 和字段。
+也可调用 FormData::Encode(boundary, limits)，直接取得独立拥有的 body / content_type。
+编码器执行同样的字段数、单段、整体输出和分段头部限制，整体限制包含分隔符与头部。
+
+空 boundary 参数生成独立候选并检查实际内容，无需阻塞随机源；显式 boundary 无效或出现在内容行开头
+时返回 InvalidRequest。名称和文件名的双引号、CR/LF 及其他控制字节编码为 %HH，
+反斜杠使用 quoted-pair；现有百分号序列保持原样。接收端不自动反解这些百分号序列。
+每个 MIME 参数声明还最多允许 32 个参数、64 KiB 文本，避免歧义与不受限的参数分配。

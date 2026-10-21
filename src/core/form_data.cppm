@@ -32,6 +32,14 @@ export namespace mhttp {
         std::size_t part_header_fields{ 32 }; ///< Header count per part, including ignored fields and duplicates.
     };
 
+    /**
+     * @brief Own a complete encoded multipart representation and its matching Content-Type declaration.
+     */
+    struct MultipartBody {
+        std::string body; ///< Complete binary representation, independent of the original form.
+        std::string content_type; ///< Matching media type with an explicitly quoted boundary.
+    };
+
 } // namespace mhttp
 
 namespace mhttp::detail {
@@ -285,6 +293,145 @@ namespace mhttp::detail {
         return parts;
     }
 
+    /**
+     * @brief Escape quoted metadata without allowing controls or quotes to create extra MIME headers.
+     * @param value Borrowed field name or filename, including arbitrary control bytes.
+     * @param limit Maximum encoded parameter bytes before allocating further output.
+     * @return Owned safe parameter text or InvalidHeaders for excessive encoded metadata.
+     * @note Quotes/controls use literal percent escapes; backslashes use MIME quoted-pairs.
+     */
+    auto quote_multipart_parameter(
+        std::string_view value,
+        std::size_t limit
+    ) -> Result<std::string> {
+        if (value.size() > limit) { return std::unexpected{ Error::InvalidHeaders }; }
+        constexpr std::string_view HEX{ "0123456789ABCDEF" };
+        std::string result;
+        for (unsigned char byte : value) {
+            auto count = byte == '"' || byte < 0x20 || byte == 0x7f ? 3U : byte == '\\' ? 2U : 1U;
+            if (count > limit - result.size()) { return std::unexpected{ Error::InvalidHeaders }; }
+            if (count == 3) { result += '%'; result += HEX[byte >> 4]; result += HEX[byte & 15]; }
+            else { if (byte == '\\') { result += '\\'; } result += static_cast<char>(byte); }
+        }
+        return result;
+    }
+
+    /**
+     * @brief Own validated disposition/media headers while admitting their full encoded size and field count.
+     * @param part Borrowed field/file metadata, never retained.
+     * @param limits Header allocation and count bounds.
+     * @return Complete header block or InvalidHeaders for invalid/oversized metadata.
+     */
+    auto encode_multipart_headers(
+        FormPart const& part,
+        MultipartLimits limits
+    ) -> Result<std::string> {
+        auto name = quote_multipart_parameter(part.name, limits.part_header_bytes);
+        if (!name) { return std::unexpected{ name.error() }; }
+        std::string headers = "Content-Disposition: form-data; name=\"" + *name + '"';
+        if (part.filename) {
+            auto filename = quote_multipart_parameter(*part.filename, limits.part_header_bytes);
+            if (!filename) { return std::unexpected{ filename.error() }; }
+            headers += "; filename=\"" + *filename + '"';
+        }
+        headers += "\r\n";
+        std::string_view type = part.content_type;
+        if (type.empty() && part.filename) { type = "application/octet-stream"; }
+        if (!type.empty()) {
+            if (type.size() > limits.part_header_bytes || !utils::is_field_value(type)) {
+                return std::unexpected{ Error::InvalidHeaders };
+            }
+            headers += "Content-Type: " + std::string{ type } + "\r\n";
+        }
+        headers += "\r\n";
+        if (headers.size() > limits.part_header_bytes) { return std::unexpected{ Error::InvalidHeaders }; }
+        auto valid = parse_multipart_part(std::string_view{ headers }.substr(0, headers.size() - 4), limits);
+        if (!valid) { return std::unexpected{ valid.error() }; }
+        return headers;
+    }
+
+    /**
+     * @brief Refuse a boundary token at the beginning of any content line, including ambiguous token prefixes.
+     * @param parts Borrowed admitted binary parts.
+     * @param boundary Borrowed valid candidate.
+     * @return Whether any part could be confused with this candidate's delimiter.
+     */
+    auto multipart_boundary_conflicts(
+        std::vector<FormPart> const& parts,
+        std::string_view boundary
+    ) -> bool {
+        auto token = "--" + std::string{ boundary };
+        auto marker = "\r\n" + token;
+        for (auto const& part : parts) {
+            if (part.content.starts_with(token) || part.content.contains(marker)) { return true; }
+        }
+        return false;
+    }
+
+    /**
+     * @brief Generate a process-local candidate without blocking entropy sources; content checks establish safety.
+     * @return ASCII boundary containing a steady-clock count and a synchronized monotonic sequence.
+     */
+    auto make_multipart_boundary() -> std::string {
+        static std::atomic<std::uint64_t> s_sequence{};
+        auto ticks = static_cast<std::uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+        return std::format("mhttp-{:016x}-{:016x}", ticks, s_sequence.fetch_add(1, std::memory_order_relaxed));
+    }
+
+    /**
+     * @brief Materialize one bounded multipart body before changing a message or issuing asynchronous work.
+     * @param parts Borrowed owned form values, consumed synchronously.
+     * @param requested_boundary Empty selects a checked generated candidate; explicit conflicts are errors.
+     * @param limits Complete output, part, count, and metadata admission bounds.
+     * @return Owned encoded body/media type or a recoverable metadata, boundary, or size error.
+     */
+    auto encode_multipart_parts(
+        std::vector<FormPart> const& parts,
+        std::string_view requested_boundary,
+        MultipartLimits limits
+    ) -> Result<MultipartBody> {
+        if (!requested_boundary.empty() && !valid_multipart_boundary(requested_boundary)) {
+            return std::unexpected{ Error::InvalidRequest };
+        }
+        if (parts.size() > limits.max_parts) { return std::unexpected{ Error::BodyTooLarge }; }
+        std::size_t content_bytes{};
+        std::vector<std::string> headers;
+        for (auto const& part : parts) {
+            if (part.content.size() > limits.part_bytes || part.content.size() > limits.body_bytes - content_bytes) {
+                return std::unexpected{ Error::BodyTooLarge };
+            }
+            content_bytes += part.content.size();
+            auto encoded = encode_multipart_headers(part, limits);
+            if (!encoded) { return std::unexpected{ encoded.error() }; }
+            headers.push_back(std::move(*encoded));
+        }
+        std::string boundary{ requested_boundary };
+        if (!boundary.empty()) {
+            if (multipart_boundary_conflicts(parts, boundary)) {
+                return std::unexpected{ Error::InvalidRequest };
+            }
+        } else {
+            for (unsigned attempt{}; attempt < 16; ++attempt) {
+                boundary = make_multipart_boundary();
+                if (!multipart_boundary_conflicts(parts, boundary)) { break; }
+                boundary.clear();
+            }
+            if (boundary.empty()) { return std::unexpected{ Error::InvalidRequest }; }
+        }
+        MultipartBody result{ .content_type = "multipart/form-data; boundary=\"" + boundary + '"' };
+        auto append = [&](std::string_view bytes) {
+            if (bytes.size() > limits.body_bytes - result.body.size()) { return false; }
+            result.body.append(bytes);
+            return true;
+        };
+        for (std::size_t index{}; index < parts.size(); ++index) {
+            if (!append("--" + boundary + "\r\n") || !append(headers[index])
+                || !append(parts[index].content) || !append("\r\n")) { return std::unexpected{ Error::BodyTooLarge }; }
+        }
+        if (!append("--" + boundary + "--\r\n")) { return std::unexpected{ Error::BodyTooLarge }; }
+        return result;
+    }
+
 } // namespace mhttp::detail
 
 export namespace mhttp {
@@ -329,6 +476,22 @@ export namespace mhttp {
             std::string_view content_type
         ) -> Result<std::string> {
             return detail::parse_multipart_boundary(content_type);
+        }
+
+        /**
+         * @brief Encode owned binary parts with matching metadata and a conflict-checked boundary.
+         * @param boundary Optional explicit boundary; empty generates a candidate checked against every content line.
+         * @param limits Output/count/content/header bounds applied before returning any bytes.
+         * @return Complete owned representation, InvalidRequest for invalid/conflicting boundaries,
+         *         InvalidHeaders for invalid/excessive metadata, or BodyTooLarge for output/part/count bounds.
+         * @note Input is consumed synchronously, allocation failures propagate, and file parts without a type
+         *       use application/octet-stream. Metadata percent escapes remain literal when parsed again.
+         */
+        [[nodiscard]] auto Encode(
+            std::string_view boundary = {},
+            MultipartLimits limits = {}
+        ) const -> Result<MultipartBody> {
+            return detail::encode_multipart_parts(m_parts, boundary, limits);
         }
 
         /**

@@ -9,6 +9,7 @@ import :client.impl.request;
 export import :core.message;
 export import :core.query;
 export import :core.json_support;
+export import :core.form_data;
 
 namespace mhttp::impl {
 
@@ -151,6 +152,23 @@ export namespace mhttp::client {
          * @return Bytes owned by this request.
          */
         [[nodiscard]] auto Body() const noexcept -> std::string const& { return m_impl->body; }
+
+        /**
+         * @brief Own a complete multipart representation and set its matching Content-Type synchronously.
+         * @param form Borrowed fields/files; no references survive this call.
+         * @param boundary Optional explicit boundary; empty generates one checked against all part content.
+         * @param limits Complete output, part, count, and metadata bounds.
+         * @return Success or a recoverable encoding error preserving the prior body and fields.
+         */
+        [[nodiscard]] auto SetMultipart(
+            FormData const& form,
+            std::string_view boundary = {},
+            MultipartLimits limits = {}
+        ) -> Result<void> {
+            auto encoded = form.Encode(boundary, limits);
+            if (!encoded) { return std::unexpected{ encoded.error() }; }
+            return SetContent(std::move(encoded->body), encoded->content_type);
+        }
 
         /**
          * @brief Serialize an optional JSON value into owned request content with application/json.
