@@ -20,14 +20,14 @@ export namespace mhttp::detail {
      * @internal
      */
     template <typename HeadType>
-        requires std::same_as<HeadType, RequestHead>
+        requires (std::same_as<HeadType, RequestHead> || std::same_as<HeadType, ResponseHead>)
     class MessageParser {
     private:
         /**
          * @brief Track the next expected wire element.
          */
         enum class State {
-            StartLine, Headers, FixedBody, ChunkSize, ChunkData, ChunkCr, ChunkLf, Trailers,
+            StartLine, Headers, FixedBody, UntilEof, ChunkSize, ChunkData, ChunkCr, ChunkLf, Trailers,
             Complete, Failed
         };
 
@@ -44,6 +44,8 @@ export namespace mhttp::detail {
         unsigned m_start_part{}; ///< Method, target, or version part while reading the start line.
         std::uint64_t m_remaining{}; ///< Remaining fixed-body or current chunk bytes.
         std::uint64_t m_body_bytes{}; ///< Decoded body bytes delivered to the caller.
+        Method m_response_to{ Method::Get }; ///< Request method determining response body semantics.
+        std::size_t m_interim_responses{}; ///< Informational responses skipped before the final response.
         std::optional<ProtocolFailure> m_failure; ///< Stable terminal failure until Reset.
 
     public:
@@ -52,6 +54,17 @@ export namespace mhttp::detail {
          * @param limits Bounds applied to each message.
          */
         explicit MessageParser(ParserLimits limits = {}) : m_limits{ limits } {}
+
+        /**
+         * @brief Construct a response parser with the originating request's method.
+         * @param response_to Method that caused the response; HEAD never carries a wire body.
+         * @param limits Bounds applied to each message, with a separate informational-response limit.
+         */
+        explicit MessageParser(
+            Method response_to,
+            ParserLimits limits = {}
+        ) requires std::same_as<HeadType, ResponseHead> :
+            m_limits{ limits }, m_response_to{ response_to } {}
 
         /**
          * @brief Feed input until one observable event or input exhaustion.
@@ -66,15 +79,21 @@ export namespace mhttp::detail {
                     return { ParseEvent::Failed, consumed, {}, m_failure };
                 }
                 if (m_state == State::Complete) { return { ParseEvent::Complete, consumed }; }
-                if (m_state == State::FixedBody || m_state == State::ChunkData) {
+                if (m_state == State::FixedBody || m_state == State::ChunkData || m_state == State::UntilEof) {
                     if (consumed == input.size()) { return { ParseEvent::NeedMore, consumed }; }
+                    bool const until_eof = m_state == State::UntilEof;
+                    auto const available = until_eof ? m_limits.body_bytes - m_body_bytes : m_remaining;
+                    if (until_eof && available == 0) {
+                        fail({ Error::BodyTooLarge, Status::ContentTooLarge });
+                        continue;
+                    }
                     auto const count = static_cast<std::size_t>(std::min<std::uint64_t>(
-                        m_remaining, input.size() - consumed));
+                        available, input.size() - consumed));
                     auto const data = input.subspan(consumed, count);
-                    m_remaining -= count;
+                    if (!until_eof) { m_remaining -= count; }
                     m_body_bytes += count;
                     consumed += count;
-                    if (m_remaining == 0) {
+                    if (!until_eof && m_remaining == 0) {
                         m_state = m_state == State::FixedBody ? State::Complete : State::ChunkCr;
                     }
                     return { ParseEvent::Body, consumed, data };
@@ -105,15 +124,17 @@ export namespace mhttp::detail {
                 }
                 if (byte == '\n') { fail({}); continue; }
                 if (byte == '\r') { m_saw_cr = true; continue; }
-                if (m_state == State::StartLine) {
-                    if (byte == ' ') {
-                        if (m_start_part < 2) { ++m_start_part; }
-                    } else if (m_start_part == 1) {
-                        if (m_target_bytes == m_limits.uri_bytes) {
-                            fail({ Error::InvalidRequest, Status::UriTooLong });
-                            continue;
+                if constexpr (std::same_as<HeadType, RequestHead>) {
+                    if (m_state == State::StartLine) {
+                        if (byte == ' ') {
+                            if (m_start_part < 2) { ++m_start_part; }
+                        } else if (m_start_part == 1) {
+                            if (m_target_bytes == m_limits.uri_bytes) {
+                                fail({ Error::InvalidRequest, Status::UriTooLong });
+                                continue;
+                            }
+                            ++m_target_bytes;
                         }
-                        ++m_target_bytes;
                     }
                 }
                 auto const line_limit = field_line ? m_limits.header_line_bytes
@@ -129,9 +150,10 @@ export namespace mhttp::detail {
 
         /**
          * @brief Signal that the peer closed the input stream.
-         * @return Completion if the message already ended, otherwise a stable ConnectionClosed failure.
+         * @return Completion for an ended or EOF-delimited message, otherwise ConnectionClosed failure.
          */
         [[nodiscard]] auto Finish() -> ParseStep {
+            if (m_state == State::UntilEof) { m_state = State::Complete; }
             if (m_state != State::Complete && m_state != State::Failed) {
                 fail({ Error::ConnectionClosed, Status::BadRequest });
             }
@@ -156,6 +178,7 @@ export namespace mhttp::detail {
             m_start_part = 0;
             m_remaining = 0;
             m_body_bytes = 0;
+            m_interim_responses = 0;
             m_failure.reset();
         }
 
@@ -194,10 +217,22 @@ export namespace mhttp::detail {
         }
 
         /**
+         * @brief Dispatch start-line validation according to the message metadata type.
+         * @return Success or a fatal start-line error.
+         */
+        auto parseStartLine() -> ProtocolResult<void> {
+            if constexpr (std::same_as<HeadType, ResponseHead>) {
+                return parseResponseStartLine();
+            } else {
+                return parseRequestStartLine();
+            }
+        }
+
+        /**
          * @brief Validate and own a complete, strictly SP-separated request line.
          * @return Success or the fatal request-line error.
          */
-        auto parseStartLine() -> ProtocolResult<void> {
+        auto parseRequestStartLine() -> ProtocolResult<void> {
             auto const bad = std::unexpected{ ProtocolFailure{} };
             std::string_view const line{ m_line };
             if (line == "PRI * HTTP/2.0") { return bad; }
@@ -232,6 +267,32 @@ export namespace mhttp::detail {
                 m_head.target = url->Target();
                 m_head.absolute_authority = MakeHostValue(url->Host(), url->Port(), url->Scheme());
             }
+            return {};
+        }
+
+        /**
+         * @brief Validate an HTTP status line with a three-digit code and optional reason.
+         * @return Success or a fatal status-line error.
+         */
+        auto parseResponseStartLine() -> ProtocolResult<void> {
+            auto const bad = std::unexpected{ ProtocolFailure{} };
+            std::string_view const line{ m_line };
+            auto const space = line.find(' ');
+            if (space == std::string_view::npos) { return bad; }
+            auto const version = line.substr(0, space);
+            if (version == "HTTP/1.1") { m_head.version = Version::Http11; }
+            else if (version == "HTTP/1.0") { m_head.version = Version::Http10; }
+            else { return bad; }
+            auto const status = line.substr(space + 1);
+            if (status.size() < 3 || status[0] < '1' || status[0] > '9'
+                || status[1] < '0' || status[1] > '9' || status[2] < '0' || status[2] > '9'
+                || (status.size() > 3 && status[3] != ' ')) { return bad; }
+            auto const reason = status.size() > 3 ? status.substr(4) : std::string_view{};
+            if (!std::ranges::all_of(reason, [](unsigned char byte) {
+                return byte == '\t' || (byte >= 0x20 && byte != 0x7f);
+            })) { return bad; }
+            m_head.status = static_cast<Status>((status[0] - '0') * 100 + (status[1] - '0') * 10 + status[2] - '0');
+            m_head.reason = reason;
             return {};
         }
 
@@ -288,20 +349,41 @@ export namespace mhttp::detail {
          */
         auto handleLine() -> std::optional<ParseEvent> {
             if (m_state == State::StartLine) {
-                if (m_line.empty()) { return std::nullopt; }
+                if constexpr (std::same_as<HeadType, RequestHead>) {
+                    if (m_line.empty()) { return std::nullopt; }
+                }
                 auto const parsed = parseStartLine();
                 if (!parsed) { fail(parsed.error()); }
                 else { m_state = State::Headers; }
             } else if (m_state == State::Headers && m_line.empty()) {
-                auto const framing = analyze_framing(m_head.version, m_head.headers, m_limits);
+                constexpr bool RESPONSE = std::same_as<HeadType, ResponseHead>;
+                bool bodyless{};
+                if constexpr (RESPONSE) {
+                    bodyless = m_response_to == Method::Head || IsInformational(m_head.status)
+                        || m_head.status == Status::NoContent || m_head.status == Status::NotModified;
+                }
+                auto const framing = analyze_framing(m_head.version, m_head.headers, m_limits, RESPONSE, bodyless);
                 if (!framing) { fail(framing.error()); return std::nullopt; }
-                if (m_head.absolute_authority) {
-                    static_cast<void>(m_head.headers.Set("Host", *m_head.absolute_authority));
+                if constexpr (RESPONSE) {
+                    if (IsInformational(m_head.status)) {
+                        if (m_interim_responses == m_limits.interim_responses) { fail({}); return std::nullopt; }
+                        ++m_interim_responses;
+                        m_head = HeadType{};
+                        m_state = State::StartLine;
+                        m_header_bytes = 0;
+                        m_field_count = 0;
+                        return std::nullopt;
+                    }
+                } else {
+                    if (m_head.absolute_authority) {
+                        static_cast<void>(m_head.headers.Set("Host", *m_head.absolute_authority));
+                    }
                 }
                 m_framing = *framing;
                 m_remaining = m_framing.content_length;
                 m_state = m_framing.kind == BodyKind::Chunked ? State::ChunkSize
-                    : m_framing.kind == BodyKind::ContentLength ? State::FixedBody : State::Complete;
+                    : m_framing.kind == BodyKind::ContentLength ? State::FixedBody
+                    : m_framing.kind == BodyKind::UntilEof ? State::UntilEof : State::Complete;
                 return ParseEvent::HeadersComplete;
             } else if (m_state == State::Trailers && m_line.empty()) {
                 m_state = State::Complete;
@@ -320,5 +402,11 @@ export namespace mhttp::detail {
      * @internal
      */
     using RequestParser = MessageParser<RequestHead>;
+
+    /**
+     * @brief Parse a final HTTP response, skipping a bounded number of informational responses.
+     * @internal
+     */
+    using ResponseParser = MessageParser<ResponseHead>;
 
 } // namespace mhttp::detail

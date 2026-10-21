@@ -101,6 +101,12 @@ namespace mhttp::test {
             auto const step = parser.Finish();
             result.complete = step.event == detail::ParseEvent::Complete;
             result.failure = step.failure;
+            if (result.complete) {
+                result.head = parser.Head();
+                result.trailers = parser.Trailers();
+                CheckEq(parser.BodyBytes(), static_cast<std::uint64_t>(result.body.size()),
+                    "EOF-delimited body counter matches delivered bytes");
+            }
         }
         return result;
     }
