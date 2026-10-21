@@ -81,20 +81,28 @@ export namespace mhttp::detail {
          * @param method Supported method; invalid enum values are rejected.
          * @param path Decoded route pattern; validated completely before insertion.
          * @param handler Opaque identifier whose lifetime is managed by the caller.
-         * @return Success or InvalidRequest, preserving existing registrations on invalid input.
+         * @return Replaced identifier, an empty optional for a new binding, or InvalidRequest.
+         * @note Invalid input preserves existing registrations. The caller may retire a replaced handler
+         *       after retaining any ownership required by previously prepared requests.
          */
         [[nodiscard]] auto Insert(
             Method method,
             std::string_view path,
             std::size_t handler
-        ) -> Result<void> {
+        ) -> Result<std::optional<std::size_t>> {
             if (ToString(method).empty()) { return std::unexpected{ Error::InvalidRequest }; }
             auto segments = parse_route_pattern(path, m_limits);
             if (!segments) { return std::unexpected{ segments.error() }; }
             std::size_t node{};
             for (auto& segment : *segments) { node = findOrInsert(node, std::move(segment)); }
-            m_nodes[node].handlers.insert_or_assign(method, handler);
-            return {};
+            auto& handlers = m_nodes[node].handlers;
+            if (auto found = handlers.find(method); found != handlers.end()) {
+                auto const previous = found->second;
+                found->second = handler;
+                return previous;
+            }
+            handlers.emplace(method, handler);
+            return std::optional<std::size_t>{};
         }
 
         /**

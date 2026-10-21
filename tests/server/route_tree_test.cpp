@@ -74,8 +74,11 @@ auto branch_backtracking() -> void {
     Check(ordered.Insert(Get, "/{first:[a-z]+}", 10).has_value(), "first overlapping regex");
     Check(ordered.Insert(Get, "/{second:.*}", 11).has_value(), "second overlapping regex");
     CheckEq(ordered.Match(Get, "/abc").handler, std::optional<std::size_t>{ 10 }, "registration order breaks regex ties");
-    Check(ordered.Insert(Get, "/{first:[a-z]+}", 12).has_value(), "replace identical registration");
+    auto replaced = ordered.Insert(Get, "/{first:[a-z]+}", 12);
+    Check(replaced && *replaced == 10, "replacement returns the retired handler identifier");
     CheckEq(ordered.Match(Get, "/abc").handler, std::optional<std::size_t>{ 12 }, "replacement keeps original priority");
+    auto added = ordered.Insert(Post, "/{first:[a-z]+}", 13);
+    Check(added && !*added, "a new method has no retired handler identifier");
 }
 
 /**
