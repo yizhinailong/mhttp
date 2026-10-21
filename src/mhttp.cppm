@@ -30,6 +30,7 @@ export import :client.http_client;
 export import :server.route_pattern;
 export import :server.route_tree;
 export import :server.request_data;
+export import :server.trusted_proxies;
 export import :server.response;
 export import :server.request;
 export import :server.handler;
