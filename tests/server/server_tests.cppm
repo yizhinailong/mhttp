@@ -14,6 +14,7 @@ import :test.session;
 import :test.server_peer;
 import :test.server_routes;
 import :test.server_handlers;
+import :test.server_messages;
 
 namespace mhttp::test {
 
@@ -829,6 +830,8 @@ export namespace mhttp::test {
             { "listener route methods", server_route_methods },
             { "listener handler order", server_handler_order },
             { "listener exception concurrency", server_exception_concurrency },
+            { "listener request metadata", server_request_metadata },
+            { "listener request bodies", server_request_bodies },
             { "listener in-flight stop", server_inflight_stop },
             { "listener Offload drain", server_offload_drain },
             { "listener callback isolation", server_callback_isolation },
