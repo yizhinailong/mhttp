@@ -8,6 +8,7 @@ import mhttp;
 #include "../support/test_support.hpp"
 
 using mhttp::test::CheckEq;
+using mhttp::test::Check;
 using namespace std::chrono;
 
 /**
@@ -61,6 +62,27 @@ auto concurrent_http_dates() -> void {
 }
 
 /**
+ * @brief Accept all HTTP date formats and reject partial, localized, and invalid calendar input.
+ */
+auto parsed_http_dates() -> void {
+    auto const reference = sys_days{ 2026y / January / 1 };
+    auto const expected = sys_days{ 1994y / November / 6 } + 8h + 49min + 37s;
+    for (auto text : { "Sun, 06 Nov 1994 08:49:37 GMT", "Sunday, 06-Nov-94 08:49:37 GMT",
+        "Sun Nov  6 08:49:37 1994", "Sun Nov 06 08:49:37 1994" }) {
+        CheckEq(mhttp::ParseHttpDate(text, reference), std::optional<sys_seconds>{ expected }, "three HTTP date formats agree");
+    }
+    for (auto text : { "", "Sun, 06 Nov 1994 08:49:37 UTC", "Sun, 06 Nov 1994 08:49:37 GMT extra",
+        "Mon, 06 Nov 1994 08:49:37 GMT", "Sun, 31 Feb 1994 08:49:37 GMT", "Sun, 06 Nov 1994 24:00:00 GMT",
+        "Sun, 06 Nov 1994 08:60:00 GMT", "Sun, 06 Nov 1994 08:49:99 GMT", "Sunday, 06-Nov-94 08:49:37",
+        "Sun, 06 Nov 1994 08-49:37 GMT", "Sun Nov  0 08:49:37 1994" }) {
+        Check(!mhttp::ParseHttpDate(text, reference), "malformed date is not a cache validator");
+    }
+    for (auto day : { sys_days{ 1969y / December / 31 }, sys_days{ 2000y / February / 29 }, sys_days{ 2100y / March / 1 } }) {
+        CheckEq(mhttp::ParseHttpDate(mhttp::FormatHttpDate(day)), std::optional<sys_seconds>{ day }, "calendar date round trip");
+    }
+}
+
+/**
  * @brief Run HTTP date cases.
  * @param argc Argument count.
  * @param argv Case filters.
@@ -71,5 +93,6 @@ auto main(int argc, char* argv[]) -> int {
         { "fixed HTTP dates", fixed_http_dates },
         { "calendar names", calendar_names },
         { "concurrent HTTP dates", concurrent_http_dates },
+        { "parse HTTP dates", parsed_http_dates },
     });
 }
