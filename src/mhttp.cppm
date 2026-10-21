@@ -19,6 +19,7 @@ export import :core.runtime;
 
 export import :server.route_pattern;
 export import :server.route_tree;
+export import :server.request_data;
 
 export import :utils.string;
 export import :utils.percent;
