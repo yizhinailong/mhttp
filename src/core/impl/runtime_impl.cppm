@@ -156,6 +156,16 @@ namespace mhttp::impl {
         [[nodiscard]] auto Context() noexcept -> asio::io_context& { return m_context; }
 
         /**
+         * @brief Snapshot cancellation for the currently accepting generation without submitting work.
+         * @return Stable generation token, or NotRunning for idle/stopping execution.
+         */
+        [[nodiscard]] auto StopToken() const -> Result<std::stop_token> {
+            std::lock_guard lock{ m_mutex };
+            if (m_state != State::Running) { return std::unexpected{ Error::NotRunning }; }
+            return m_stop_source.get_token();
+        }
+
+        /**
          * @brief Lazily create a bounded pool for blocking application work.
          * @return Executor owned until this runtime's final destruction, after all roots drain.
          * @note Root work guards keep I/O runners alive while worker completions are outstanding.

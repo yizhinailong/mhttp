@@ -13,6 +13,7 @@ export import :core.task;
 namespace mhttp::impl {
 
     class ServerImpl;
+    class ClientImpl;
 
 } // namespace mhttp::impl
 
@@ -35,6 +36,7 @@ export namespace mhttp {
         std::shared_ptr<impl::RuntimeImpl> m_impl; ///< Owned context and thread lifecycle.
         friend struct detail::RuntimeAccess;
         friend class impl::ServerImpl;
+        friend class impl::ClientImpl;
 
     public:
         /**

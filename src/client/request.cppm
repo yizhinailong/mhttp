@@ -9,6 +9,12 @@ import :client.impl.request;
 export import :core.message;
 export import :core.query;
 
+namespace mhttp::impl {
+
+    class ClientImpl;
+
+} // namespace mhttp::impl
+
 export namespace mhttp::client {
 
     /**
@@ -21,6 +27,7 @@ export namespace mhttp::client {
     class Request {
     private:
         std::shared_ptr<impl::ClientRequestImpl> m_impl; ///< Unique public ownership of outgoing state.
+        friend class impl::ClientImpl;
 
     public:
         /**
