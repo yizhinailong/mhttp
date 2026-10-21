@@ -4,6 +4,9 @@
  */
 export module mhttp;
 
+export import :core.error;
+export import :core.endpoint;
+
 export import :utils.string;
 export import :utils.percent;
 export import :utils.base64;
