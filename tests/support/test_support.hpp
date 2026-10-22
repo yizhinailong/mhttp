@@ -8,6 +8,7 @@
 namespace mhttp::test {
 
     inline std::atomic<std::size_t> g_failures{}; ///< Assertion failures across all test threads.
+    inline std::mutex g_diagnostics_mutex; ///< Keeps concurrent failure diagnostics on separate lines.
 
     /**
      * @brief Record an expectation, including failures raised by a handler thread.
@@ -23,8 +24,8 @@ namespace mhttp::test {
     ) -> bool {
         if (!condition) {
             g_failures.fetch_add(1, std::memory_order_relaxed);
-            std::osyncstream{ std::cerr } << location.file_name() << ':' << location.line()
-                                        << ": " << message << '\n';
+            std::scoped_lock lock{ g_diagnostics_mutex };
+            std::cerr << location.file_name() << ':' << location.line() << ": " << message << '\n';
         }
         return condition;
     }
