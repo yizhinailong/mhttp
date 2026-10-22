@@ -10,6 +10,7 @@ import mhttp;
 using mhttp::test::CheckEq;
 using mhttp::test::Check;
 using namespace std::chrono;
+using namespace std::chrono_literals;
 
 /**
  * @brief Verify a known HTTP timestamp, the epoch, leap day, and second flooring.
