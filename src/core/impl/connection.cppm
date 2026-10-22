@@ -243,14 +243,15 @@ namespace mhttp::impl {
             auto deadline = std::make_shared<Deadline>(self->m_executor, false);
             ActiveOperation active{ self->m_reading, deadline };
             active.forwarded_cancellation = cancellation.slot();
-            if (active.forwarded_cancellation.is_connected()) {
-                active.forwarded_cancellation.assign([deadline](asio::cancellation_type type) {
-                    deadline->read_cancellation.emit(type);
-                });
-            }
             self->armDeadline(deadline, timeout);
             if (deadline->expired) { co_return std::unexpected{ Error::ReadTimeout }; }
             for (;;) {
+                // Asio clears the coroutine's slot whenever an awaited operation resumes it; forward to every wait.
+                if (active.forwarded_cancellation.is_connected()) {
+                    active.forwarded_cancellation.assign([deadline](asio::cancellation_type type) {
+                        deadline->read_cancellation.emit(type);
+                    });
+                }
                 auto const [error] = co_await self->m_socket.async_wait(
                     asio::ip::tcp::socket::wait_read,
                     asio::bind_cancellation_slot(deadline->read_cancellation.slot(), asio::as_tuple(asio::use_awaitable)));

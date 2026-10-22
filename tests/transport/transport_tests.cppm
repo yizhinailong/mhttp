@@ -319,11 +319,46 @@ namespace mhttp::test {
     }
 
     /**
-     * @brief Deliver readiness collected for already consumed bytes to a later idle wait.
+     * @brief Consume a queued byte directly, then start an idle wait that receives its already recorded readiness.
      * @param executor Single-threaded context executor; FIFO handler order fixes the reactor interleaving.
-     * @param weak Observe ownership after the context drains.
+     * @param pair Connected pair retained by the posted consumer.
+     * @param timeout Deadline of the idle wait.
+     * @param cancel Parent cancellation bound to the idle wait; it must outlive the returned join state.
+     * @return Join state of the idle wait.
      * @note The byte is queued synchronously so the posted consumer runs after the next reactor poll
      *       records its edge but before that edge is dispatched to the newly queued wait.
+     */
+    auto start_stale_wait(
+        asio::any_io_executor executor,
+        std::shared_ptr<LoopbackPair> pair,
+        std::chrono::steady_clock::duration timeout,
+        asio::cancellation_signal& cancel
+    ) -> std::shared_ptr<TransportResult<Result<void>>> {
+        auto& socket = pair->connection->SocketForInitialization();
+        asio::write(pair->peer, asio::buffer("x", 1));
+        auto const visible_until = std::chrono::steady_clock::now() + 1s;
+        while (socket.available() == 0 && std::chrono::steady_clock::now() < visible_until) { std::this_thread::yield(); }
+        Check(socket.available() == 1, "loopback byte is queued before the reactor polls");
+        auto waited = std::make_shared<TransportResult<Result<void>>>(executor);
+        asio::post(pair->connection->Executor(), [executor, pair, waited, timeout, slot = cancel.slot()] {
+            char byte{};
+            asio::error_code error;
+            static_cast<void>(pair->connection->SocketForInitialization().receive(asio::buffer(&byte, 1), 0, error));
+            Check(!error && byte == 'x', "direct receive consumes the byte whose readiness is already recorded");
+            asio::co_spawn(executor, pair->connection->WaitForPeerData(timeout), asio::bind_cancellation_slot(slot,
+                [waited](std::exception_ptr failure, Result<void> result) {
+                    waited->failure = failure;
+                    if (!failure) { waited->value.emplace(std::move(result)); }
+                    static_cast<void>(waited->done.try_send(asio::error_code{}));
+                }));
+        });
+        return waited;
+    }
+
+    /**
+     * @brief Deliver readiness collected for already consumed bytes to a later idle wait.
+     * @param executor Single-threaded context executor.
+     * @param weak Observe ownership after the context drains.
      */
     auto stale_readiness_scenario(
         asio::any_io_executor executor,
@@ -331,25 +366,8 @@ namespace mhttp::test {
     ) -> asio::awaitable<void> {
         auto pair = co_await make_loopback(executor);
         weak = pair->connection;
-        auto& socket = pair->connection->SocketForInitialization();
-        asio::write(pair->peer, asio::buffer("x", 1));
-        auto const visible_until = std::chrono::steady_clock::now() + 1s;
-        while (socket.available() == 0 && std::chrono::steady_clock::now() < visible_until) { std::this_thread::yield(); }
-        Check(socket.available() == 1, "loopback byte is queued before the reactor polls");
-        auto waited = std::make_shared<TransportResult<Result<void>>>(executor);
-        asio::post(pair->connection->Executor(), [executor, pair, waited] {
-            char byte{};
-            asio::error_code error;
-            static_cast<void>(pair->connection->SocketForInitialization().receive(asio::buffer(&byte, 1), 0, error));
-            Check(!error && byte == 'x', "direct receive consumes the byte whose readiness is already recorded");
-            asio::co_spawn(executor, pair->connection->WaitForPeerData(50ms),
-                [waited](std::exception_ptr failure, Result<void> result) {
-                    waited->failure = failure;
-                    if (!failure) { waited->value.emplace(std::move(result)); }
-                    static_cast<void>(waited->done.try_send(asio::error_code{}));
-                });
-        });
-        auto stale = co_await waited->Wait();
+        asio::cancellation_signal never_emitted;
+        auto stale = co_await start_stale_wait(executor, pair, 50ms, never_emitted)->Wait();
         Check(!stale && stale.error() == Error::ReadTimeout, "stale readiness without peer input is not reported");
         co_await asio::async_write(pair->peer, asio::buffer("y", 1), asio::use_awaitable);
         Check((co_await pair->connection->WaitForPeerData(1s)).has_value(), "confirmed peer bytes still produce readiness");
@@ -361,21 +379,49 @@ namespace mhttp::test {
     }
 
     /**
-     * @brief Reject stale readiness deterministically on one thread and release the connection after drain.
+     * @brief Cancel an idle wait after stale readiness re-armed it, preserving the socket for later bytes.
+     * @param executor Single-threaded context executor.
+     * @param weak Observe ownership after the context drains.
+     * @note The deadline only bounds a regression: a parent cancellation lost by the re-armed wait reports ReadTimeout.
+     */
+    auto stale_cancellation_scenario(
+        asio::any_io_executor executor,
+        std::weak_ptr<impl::Connection>& weak
+    ) -> asio::awaitable<void> {
+        auto pair = co_await make_loopback(executor);
+        weak = pair->connection;
+        asio::cancellation_signal cancel;
+        auto waited = start_stale_wait(executor, pair, 1s, cancel);
+        asio::steady_timer rearmed{ executor };
+        rearmed.expires_after(20ms);
+        co_await rearmed.async_wait(asio::use_awaitable);
+        cancel.emit(asio::cancellation_type::all);
+        auto canceled = co_await waited->Wait();
+        Check(!canceled && canceled.error() == Error::Canceled, "parent cancellation reaches a wait re-armed after stale readiness");
+        co_await asio::async_write(pair->peer, asio::buffer("y", 1), asio::use_awaitable);
+        auto data = co_await pair->connection->ReadSome(1s);
+        Check(data && *data == "y", "canceled re-armed wait preserves the socket for later reads");
+        pair->connection->Close();
+    }
+
+    /**
+     * @brief Reject stale readiness and cancel re-armed waits deterministically on one thread, releasing each connection.
      */
     auto connection_stale_readiness() -> void {
-        std::weak_ptr<impl::Connection> weak;
-        {
-            asio::io_context context{ 1 };
-            std::exception_ptr failure;
-            bool finished{};
-            asio::co_spawn(context, stale_readiness_scenario(context.get_executor(), weak),
-                [&failure, &finished](std::exception_ptr error) { failure = error; finished = true; });
-            context.run();
-            Check(finished, "stale readiness scenario completes before its context drains");
-            if (failure) { std::rethrow_exception(failure); }
+        for (auto scenario : { stale_readiness_scenario, stale_cancellation_scenario }) {
+            std::weak_ptr<impl::Connection> weak;
+            {
+                asio::io_context context{ 1 };
+                std::exception_ptr failure;
+                bool finished{};
+                asio::co_spawn(context, scenario(context.get_executor(), weak),
+                    [&failure, &finished](std::exception_ptr error) { failure = error; finished = true; });
+                context.run();
+                Check(finished, "stale readiness scenario completes before its context drains");
+                if (failure) { std::rethrow_exception(failure); }
+            }
+            Check(weak.expired(), "stale readiness rechecks release the connection after drain");
         }
-        Check(weak.expired(), "stale readiness rechecks release the connection after drain");
     }
 
     /**
