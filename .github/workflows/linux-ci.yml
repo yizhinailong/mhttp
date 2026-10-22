@@ -95,6 +95,9 @@ jobs:
       - name: Test optional JSON consumers
         run: python3 tools/check_json.py
 
+      - name: Test optional SOCI consumers
+        run: python3 tools/check_soci.py
+
       - name: Test REST examples
         run: python3 tools/check_examples.py
 

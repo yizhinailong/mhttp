@@ -20,9 +20,13 @@ asio = "1.38.1"
 [features]
 default = []
 json = { sources = ["src/core/json.cppm"] }
+soci = { sources = ["src/db/soci.cppm"] }
 
 [feature-deps.json]
 nlohmann.json = "3.12.0"
 
+[feature-deps.soci]
+compat.soci = "4.1.4"
+
 [test]
-discover = ["tests/**/*.cpp", "!tests/json/**/*.cpp"]
+discover = ["tests/**/*.cpp", "!tests/json/**/*.cpp", "!tests/soci/**/*.cpp"]

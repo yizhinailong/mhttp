@@ -5,7 +5,7 @@
 
 服务端支持同步/协程 handler、路径与查询参数、正则和通配路由、HEAD 回落、
 404 / 405、路由 aspect、Basic / Bearer 认证、CORS 和有界的按客户端 IP 限速。请求与响应拥有数据，
-支持 URL 编码表单、multipart 文件与字段，以及可选的 JSON 适配。
+支持 URL 编码表单、multipart 文件与字段，以及可选的 JSON 适配和 SOCI 数据库会话池。
 协议处理支持有界增量解析、分块、trailer、keep-alive、超时、取消和错误响应后关闭连接。
 服务端支持带截止时间的优雅停机：先完成已开始的请求，到期后取消并等待资源清理。
 
@@ -111,6 +111,7 @@ mcpp run rest_client -- http://127.0.0.1:8080
 和错误状态处理。服务端在主线程收到回车或 stdin EOF 后停止；传入端口 0 可分配动态端口。
 
 JSON 的 feature、独立 `import mhttp.json;` 与读写接口见 [JSON 适配](docs/json.md)；
+SOCI 的 feature、独立 `import mhttp.soci;` 与会话池见 [SOCI 数据库](docs/soci.md)；
 文件和普通字段的构造、解析与大小限制见 [multipart](docs/multipart.md)。
 
 ## 压测示例
@@ -159,6 +160,7 @@ python tools/check_session.py
 python tools/check_server.py
 python tools/check_client.py
 python tools/check_json.py
+python tools/check_soci.py
 python tools/check_examples.py
 python tools/check_stress.py
 python tools/check_test_support.py
