@@ -21,6 +21,21 @@ auto registered = router.Get("/users/:id", [](auto& request, auto& response) {
 ```
 
 处理器与可选 aspect 被复制或移动到稳定存储，支持只可移动的对象。
+也支持通过模板参数指定一个或多个方法：
+
+```cpp
+auto registered = router.set_http_handler<mhttp::method::Post, mhttp::method::Put>(
+    "/users/:id", [](auto& request, auto& response) {
+        response.SetContent(request.Body(), "text/plain").value();
+    });
+```
+
+`mhttp::method` 是 `mhttp::Method` 的类型别名，两种拼写可混用。
+`set_http_handler` 至少指定一个方法，返回 `Result<void>`，同样支持同步 `void`、协程 `Task<void>`
+处理器及尾随的路由 aspect；`HttpServer` 继承此接口。
+一次注册只复制或移动一份处理器和 aspect，所有指定方法共享这些对象，支持只可移动的捕获。
+重复方法只保留一个绑定；非法方法或路径不改变已有绑定。
+
 成员函数可以用 `std::bind_front(&Service::Handle, service)` 作为处理器，同步和 Task 版本均可。
 绑定 shared_ptr 会共同持有对象，保证异步成员函数挂起期间 this 仍有效；
 使用 `std::ref` 或裸指针绑定时，调用方必须保留对象直到所有请求及其清理完成。

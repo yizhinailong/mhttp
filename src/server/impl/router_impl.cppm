@@ -191,28 +191,52 @@ namespace mhttp::impl {
             detail::HttpHandler handler,
             bool lazy = false
         ) -> Result<void> {
+            return Register(std::span<Method const>{ &method, 1 }, path, std::move(handler), lazy);
+        }
+
+        /**
+         * @brief Publish method bindings under one configuration guard, sharing owned callback state.
+         * @param methods Nonempty borrowed method list, validated before any binding is changed.
+         * @param path Borrowed decoded pattern, validated before its first binding is inserted.
+         * @param handler Owned callable adapter shared by every listed method.
+         * @param lazy Whether the routes pull their bodies after head admission.
+         * @return Success, AlreadyRunning, Busy, or InvalidRequest without changing existing bindings.
+         * @note Replaced callback state is destroyed after releasing the configuration mutex.
+         */
+        auto Register(
+            std::span<Method const> methods,
+            std::string_view path,
+            detail::HttpHandler handler,
+            bool lazy = false
+        ) -> Result<void> {
             auto incoming = std::make_shared<RouteHandler const>(RouteHandler{ std::move(handler), lazy });
-            std::shared_ptr<RouteHandler const> retired;
+            std::vector<std::shared_ptr<RouteHandler const>> retired;
+            retired.reserve(methods.size());
             std::lock_guard lock{ m_mutex };
             if (m_frozen) { return std::unexpected{ Error::AlreadyRunning }; }
             if (m_readers != 0) { return std::unexpected{ Error::Busy }; }
-            auto const id = m_next_id;
-            m_handlers.emplace(id, incoming);
-            try {
-                auto binding = m_tree.Insert(method, path, id);
-                if (!binding) {
+            for (auto selected_method : methods) {
+                if (ToString(selected_method).empty()) { return std::unexpected{ Error::InvalidRequest }; }
+            }
+            for (auto selected_method : methods) {
+                auto const id = m_next_id;
+                m_handlers.emplace(id, incoming);
+                try {
+                    auto binding = m_tree.Insert(selected_method, path, id);
+                    if (!binding) {
+                        m_handlers.erase(id);
+                        return std::unexpected{ binding.error() };
+                    }
+                    if (binding->has_value()) {
+                        auto previous = m_handlers.find(**binding);
+                        retired.push_back(std::move(previous->second));
+                        m_handlers.erase(previous);
+                    }
+                    ++m_next_id;
+                } catch (...) {
                     m_handlers.erase(id);
-                    return std::unexpected{ binding.error() };
+                    throw;
                 }
-                if (binding->has_value()) {
-                    auto previous = m_handlers.find(**binding);
-                    retired = std::move(previous->second);
-                    m_handlers.erase(previous);
-                }
-                ++m_next_id;
-            } catch (...) {
-                m_handlers.erase(id);
-                throw;
             }
             return {};
         }

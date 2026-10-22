@@ -206,6 +206,30 @@ export namespace mhttp::server {
         }
 
         /**
+         * @brief Register one owned handler and aspect sequence for one or more compile-time methods.
+         * @tparam METHODS Nonempty list of supported HTTP methods; duplicates replace the same binding.
+         * @tparam F Synchronous void or Task<void> callable accepting Request& and Response&.
+         * @tparam Aspects Owned Before/After objects returning bool or Task<bool>.
+         * @param path Decoded route pattern, copied during registration.
+         * @param handler Callable copied or moved once into stable storage shared by all listed methods.
+         * @param aspects Aspects copied or moved once into the same shared storage.
+         * @return Success, InvalidRequest, AlreadyRunning while frozen, or Busy while requests are prepared.
+         * @note Captured references must outlive requests. Shared callback state may run concurrently.
+         */
+        template <mhttp::Method... METHODS, typename F, typename... Aspects>
+            requires (sizeof...(METHODS) > 0) && detail::HttpHandlerFunction<std::decay_t<F>>
+                && (detail::HttpAspect<std::decay_t<Aspects>> && ...)
+        [[nodiscard]] auto set_http_handler(
+            std::string_view path,
+            F&& handler,
+            Aspects&&... aspects
+        ) -> Result<void> {
+            constexpr std::array methods{ METHODS... };
+            return m_impl->Register(methods, path,
+                detail::make_http_handler(std::forward<F>(handler), std::forward<Aspects>(aspects)...));
+        }
+
+        /**
          * @brief Register a handler that may pull bounded request chunks before the full upload arrives.
          * @tparam F Synchronous void or Task<void> callable accepting Request& and Response&.
          * @tparam Aspects Owned ordered Before/After objects; global middleware still wraps the route.

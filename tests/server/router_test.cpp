@@ -71,6 +71,116 @@ auto router_methods() -> void {
 }
 
 /**
+ * @brief Detect a missing method argument without instantiating an invalid registration body.
+ * @tparam Router Public router or server type.
+ */
+template <typename Router>
+concept AcceptsEmptyHttpMethods = requires(Router& router) {
+    router.set_http_handler("/empty", [](auto&, auto&) {});
+};
+
+/**
+ * @brief Own move-only state shared by every method in a template route registration.
+ */
+struct TemplateRouteAspect {
+    std::unique_ptr<unsigned> calls{ std::make_unique<unsigned>() }; ///< Shared sequential invocation count.
+
+    /**
+     * @brief Attach the shared invocation count to the current request.
+     * @param request Borrowed until the handler chain completes.
+     * @param response Unused current response.
+     * @return True to continue to the route handler.
+     */
+    auto Before(mhttp::server::Request& request, mhttp::server::Response& response) -> bool {
+        request.Data().Store(++*calls);
+        return true;
+    }
+};
+
+/**
+ * @brief Dispatch template registrations, preserving move-only callbacks across methods and replacements.
+ */
+auto router_template_methods() -> void {
+    static_assert(std::same_as<mhttp::method, mhttp::Method>);
+    static_assert(!AcceptsEmptyHttpMethods<mhttp::server::Router>);
+    static_assert(!AcceptsEmptyHttpMethods<mhttp::server::HttpServer>);
+    mhttp::Runtime runtime;
+    Check(runtime.Start(2).has_value(), "start template routing runtime");
+    mhttp::server::HttpServer router{ runtime };
+    Check(router.set_http_handler<mhttp::method::Post>("/single/:id", [](auto& request, auto& response) {
+        Check(response.SetContent(std::string{ request.PathParam("id") }, "text/plain").has_value(),
+            "template handler sees path capture");
+    }).has_value(), "server inherits single-method registration");
+    CheckEq(dispatch(runtime, router, "POST", "/single/42").Body(), "42"sv, "single template method dispatch");
+    CheckEq(dispatch(runtime, router, "GET", "/single/42").Header("Allow"), "POST"sv,
+        "single template method restricts dispatch");
+
+    auto lifetime = std::make_shared<int>(42);
+    std::weak_ptr<int> weak{ lifetime };
+    Check(router.set_http_handler<mhttp::method::Post, mhttp::Method::Put, mhttp::method::Post>("/shared",
+        [value = std::make_unique<std::string>("owned-"), lifetime = std::move(lifetime)]
+        (auto& request, auto& response) -> mhttp::Task<void> {
+            co_await mhttp::Sleep(1ms);
+            CheckEq(*lifetime, 42, "template callback capture survives suspension");
+            auto const count = request.Data().template Fetch<unsigned>().value_or(0);
+            Check(response.SetContent(*value + std::string{ request.MethodString() } + ":" + std::to_string(count),
+                "text/plain").has_value(), "template coroutine response");
+        }, TemplateRouteAspect{}).has_value(), "multiple methods share move-only handler and aspect");
+    CheckEq(dispatch(runtime, router, "POST", "/shared").Body(), "owned-POST:1"sv, "first method has owned state");
+    CheckEq(dispatch(runtime, router, "PUT", "/shared").Body(), "owned-PUT:2"sv, "second method shares aspect state");
+    CheckEq(dispatch(runtime, router, "POST", "/shared").Body(), "owned-POST:3"sv, "duplicate method has one binding");
+    CheckEq(dispatch(runtime, router, "GET", "/shared").Header("Allow"), "POST, PUT"sv,
+        "multiple template methods produce sorted unique Allow");
+
+    auto replacement = [](auto&, auto& response) {
+        Check(response.SetContent("replacement", "text/plain").has_value(), "template replacement response");
+    };
+    Check(router.Post("/shared", replacement).has_value(), "replace one shared method through existing API");
+    Check(!weak.expired(), "other method retains shared callback state");
+    CheckEq(dispatch(runtime, router, "PUT", "/shared").Body(), "owned-PUT:4"sv,
+        "replacing one method preserves another method and its aspect");
+    Check(router.set_http_handler<mhttp::method::Post, mhttp::method::Put>("/shared", replacement).has_value(),
+        "replace every shared method through template API");
+    Check(weak.expired(), "last replacement releases shared callback captures");
+    CheckEq(dispatch(runtime, router, "PUT", "/shared").Body(), "replacement"sv, "template replacement dispatch");
+
+    Check(router.set_http_handler<mhttp::method::Get, mhttp::method::Post>("/head", replacement).has_value(),
+        "register template GET with another method");
+    CheckEq(dispatch(runtime, router, "HEAD", "/head").Body(), "replacement"sv, "template GET supports HEAD fallback");
+    CheckEq(dispatch(runtime, router, "DELETE", "/head").Header("Allow"), "GET, HEAD, POST"sv,
+        "template GET adds implicit HEAD to Allow");
+}
+
+/**
+ * @brief Reject invalid method packs and paths before modifying any existing method binding.
+ */
+auto router_template_validation() -> void {
+    mhttp::Runtime runtime;
+    Check(runtime.Start().has_value(), "start template validation runtime");
+    mhttp::server::Router router;
+    auto original = [](auto&, auto& response) {
+        Check(response.SetContent("original", "text/plain").has_value(), "original template response");
+    };
+    auto replacement = [](auto&, auto& response) {
+        Check(response.SetContent("changed", "text/plain").has_value(), "changed template response");
+    };
+    Check(router.Post("/validated", original).has_value(), "register original template validation binding");
+    auto invalid = router.set_http_handler<mhttp::method::Post, static_cast<mhttp::Method>(999), mhttp::method::Put>(
+        "/validated", replacement);
+    Check(!invalid && invalid.error() == mhttp::Error::InvalidRequest, "invalid template method rejects entire pack");
+    CheckEq(dispatch(runtime, router, "POST", "/validated").Body(), "original"sv,
+        "invalid pack preserves earlier method binding");
+    CheckEq(dispatch(runtime, router, "PUT", "/validated").Status(), mhttp::Status::MethodNotAllowed,
+        "invalid pack adds no later method binding");
+    for (auto path : { "relative", "/duplicate/:id/:id", "/regex/{id:[}" }) {
+        auto result = router.set_http_handler<mhttp::method::Post, mhttp::method::Put>(path, replacement);
+        Check(!result && result.error() == mhttp::Error::InvalidRequest, "invalid template path rejected");
+    }
+    CheckEq(dispatch(runtime, router, "GET", "/duplicate/1/2").Status(), mhttp::Status::NotFound,
+        "invalid template path creates no route");
+}
+
+/**
  * @brief Populate request-owned captures after encoded-segment matching and preserve path priority.
  */
 auto router_paths() -> void {
@@ -213,6 +323,8 @@ auto router_guards() -> void {
         auto pending = RouterAccess::Prepare(router, request, response);
         auto result = router.Get("/later", handler);
         Check(!result && result.error() == mhttp::Error::Busy, "unstarted Task prevents mutation");
+        auto template_result = router.set_http_handler<mhttp::method::Post, mhttp::method::Put>("/later", handler);
+        Check(!template_result && template_result.error() == mhttp::Error::Busy, "prepared Task rejects template pack");
         auto frozen = RouterAccess::Freeze(router);
         Check(!frozen && frozen.error() == mhttp::Error::Busy, "unstarted Task prevents freezing");
     }
@@ -222,6 +334,9 @@ auto router_guards() -> void {
     Check(!repeated && repeated.error() == mhttp::Error::AlreadyRunning, "duplicate freeze rejected");
     auto rejected = router.Get("/blocked", handler);
     Check(!rejected && rejected.error() == mhttp::Error::AlreadyRunning, "frozen mutation rejected");
+    auto template_rejected = router.set_http_handler<mhttp::method::Post, mhttp::method::Put>("/blocked", handler);
+    Check(!template_rejected && template_rejected.error() == mhttp::Error::AlreadyRunning,
+        "frozen configuration rejects template pack");
     {
         auto prepared = mhttp::SyncWait(runtime, RouterAccess::Prepare(router, request, response));
         Check(request.PathParam("id").empty(), "capture state initialized");
@@ -400,6 +515,8 @@ auto router_member_handlers() -> void {
 auto main(int argc, char** argv) -> int {
     return mhttp::test::RunTests(argc, argv, {
         { "router method dispatch", router_methods },
+        { "router template method dispatch and ownership", router_template_methods },
+        { "router template method validation", router_template_validation },
         { "router encoded paths and captures", router_paths },
         { "router HEAD fallback and framing", router_head },
         { "router registration validation", router_validation },

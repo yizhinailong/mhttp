@@ -48,6 +48,11 @@ export namespace mhttp {
     };
 
     /**
+     * @brief Name HTTP methods in template route registrations, using the same values as Method.
+     */
+    using method = Method;
+
+    /**
      * @brief Obtain a method's canonical wire spelling.
      * @param method Method to describe.
      * @return Static method name, or an empty view for an out-of-range value.
