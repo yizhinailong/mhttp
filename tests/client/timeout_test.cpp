@@ -22,22 +22,23 @@ auto redirect_deadlines() -> void {
     auto second_port = second.BindToAnyPort("127.0.0.1");
     Check(first_port && second_port, "bind redirect budget peers");
     Check(first.Get("/one", [second_port](auto&, auto& response) -> mhttp::Task<void> {
-        co_await mhttp::Sleep(70ms);
+        co_await mhttp::Sleep(100ms);
         Check(response.SetRedirect("http://127.0.0.1:" + std::to_string(*second_port) + "/two").has_value(), "first delayed redirect");
     }).has_value(), "register first budget hop");
     Check(second.Get("/two", [first_port](auto&, auto& response) -> mhttp::Task<void> {
-        co_await mhttp::Sleep(70ms);
+        co_await mhttp::Sleep(100ms);
         Check(response.SetRedirect("http://127.0.0.1:" + std::to_string(*first_port) + "/three").has_value(), "second delayed redirect");
     }).has_value(), "register second budget hop");
     Check(first.Get("/three", [](auto&, auto& response) -> mhttp::Task<void> {
-        co_await mhttp::Sleep(70ms);
+        co_await mhttp::Sleep(100ms);
         Check(response.SetContent("complete", "text/plain").has_value(), "final delayed response");
     }).has_value(), "register final budget hop");
     Check(first.Start() && second.Start() && first.WaitUntilReady() && second.WaitUntilReady(), "start budget listeners");
     for (auto policy : { mhttp::client::TimeoutPolicy::Overall, mhttp::client::TimeoutPolicy::Step,
                          mhttp::client::TimeoutPolicy::Phase, mhttp::client::TimeoutPolicy::Never }) {
-        mhttp::client::ClientOptions options{ .read_timeout = 150ms, .max_redirects = 2,
-            .timeout_policy = policy, .timeout = 150ms };
+        // The overall deadline expires mid-way through the third hop's read, clear of the reconnect before it.
+        mhttp::client::ClientOptions options{ .read_timeout = 200ms, .max_redirects = 2,
+            .timeout_policy = policy, .timeout = 250ms };
         if (policy == mhttp::client::TimeoutPolicy::Phase) { options.timeout = 1ms; }
         if (policy == mhttp::client::TimeoutPolicy::Never) {
             options.connect_timeout = 1ms;
@@ -51,9 +52,9 @@ auto redirect_deadlines() -> void {
         auto const elapsed = std::chrono::steady_clock::now() - started;
         if (policy == mhttp::client::TimeoutPolicy::Overall) {
             Check(!response && response.error() == mhttp::Error::ReadTimeout && !client.IsOpen(), "one overall deadline spans three hops and two origin changes");
-            Check(elapsed >= 140ms && elapsed < 300ms, "redirect connections do not reset the overall budget");
+            Check(elapsed >= 240ms && elapsed < 400ms, "redirect connections do not reset the overall budget");
         } else {
-            Check(response && response->Body() == "complete" && elapsed >= 200ms, "Phase and Step restart their own budgets; Never waits for completion");
+            Check(response && response->Body() == "complete" && elapsed >= 290ms, "Phase and Step restart their own budgets; Never waits for completion");
         }
     }
 }
