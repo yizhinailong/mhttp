@@ -7,6 +7,7 @@ export module mhttp:client.content_provider;
 import std;
 export import :core.task;
 export import :core.error;
+export import :core.function;
 
 export namespace mhttp::client {
 
@@ -20,6 +21,6 @@ export namespace mhttp::client {
      *       Capture owned state; temporary coroutine lambda captures and borrowed handler locals must
      *       not escape their lifetime. Stop, cancellation, and write budgets apply to every provider await.
      */
-    using ContentProvider = std::move_only_function<Task<Result<std::string>>(std::uint64_t, std::size_t)>;
+    using ContentProvider = MoveOnlyFunction<Task<Result<std::string>>(std::uint64_t, std::size_t)>;
 
 } // namespace mhttp::client

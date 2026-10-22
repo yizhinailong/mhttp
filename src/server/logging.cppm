@@ -5,6 +5,7 @@
 export module mhttp:server.logging;
 
 import std;
+export import :core.function;
 export import :server.request;
 export import :server.response;
 
@@ -39,7 +40,7 @@ export namespace mhttp::server {
      *       can be shared by concurrent sessions, so synchronize it and avoid blocking I/O execution.
      *       Move-only captures are supported. Logger exceptions are swallowed without recursive logging.
      */
-    using Logger = std::move_only_function<void(LogRecord const&)>;
+    using Logger = MoveOnlyFunction<void(LogRecord const&)>;
 
     /**
      * @brief Observe a successfully written final response with the elapsed request duration.
@@ -50,7 +51,7 @@ export namespace mhttp::server {
      *       Calls on different sessions can overlap. Keep callbacks short, synchronize shared state,
      *       and copy any metadata retained after return. Move-only callback captures are supported.
      */
-    using AccessLogger = std::move_only_function<
+    using AccessLogger = MoveOnlyFunction<
         void(Request const&, Response const&, std::chrono::steady_clock::duration)>;
 
 } // namespace mhttp::server

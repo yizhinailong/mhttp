@@ -8,6 +8,7 @@ import std;
 import :server.impl.stream_writer;
 import :core.impl.bridge;
 export import :core.task;
+export import :core.function;
 export import :core.headers;
 
 export namespace mhttp::detail {
@@ -84,7 +85,7 @@ export namespace mhttp::server {
      *       Response metadata is already committed and must not be mutated by provider code.
      *       The session adds an empty terminator on success if Finish was not explicitly awaited.
      */
-    using ContentProvider = std::move_only_function<Task<Result<void>>(StreamWriter&)>;
+    using ContentProvider = MoveOnlyFunction<Task<Result<void>>(StreamWriter&)>;
 
 } // namespace mhttp::server
 

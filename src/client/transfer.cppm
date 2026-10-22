@@ -6,6 +6,7 @@ export module mhttp:client.transfer;
 
 import std;
 export import :core.task;
+export import :core.function;
 export import :client.response;
 
 export namespace mhttp::client {
@@ -38,9 +39,9 @@ export namespace mhttp::client {
      *       metadata owns its validated trailers; a headers snapshot has no body/trailers or reuse permission.
      */
     struct TransferCallbacks {
-        std::move_only_function<Task<Result<void>>(Response const&)> on_headers; ///< Borrowed snapshot through this await only.
-        std::move_only_function<Task<Result<void>>(std::string)> on_body; ///< Owned nonempty decoded chunk; presence disables body buffering.
-        std::move_only_function<Task<Result<void>>(TransferProgress)> on_progress; ///< Initial, segment, and completed samples; return an error to cancel.
+        MoveOnlyFunction<Task<Result<void>>(Response const&)> on_headers; ///< Borrowed snapshot through this await only.
+        MoveOnlyFunction<Task<Result<void>>(std::string)> on_body; ///< Owned nonempty decoded chunk; presence disables body buffering.
+        MoveOnlyFunction<Task<Result<void>>(TransferProgress)> on_progress; ///< Initial, segment, and completed samples; return an error to cancel.
     };
 
 } // namespace mhttp::client
