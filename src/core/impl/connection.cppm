@@ -170,7 +170,7 @@ namespace mhttp::impl {
          * @param timeout Optional wait deadline; nullopt disables it, nonpositive durations expire immediately.
          * @return Success for readability, Busy for an active receive, or a classified wait failure.
          * @note Wait cancellation and ReadTimeout preserve the socket and every unread byte; Close still aborts it.
-         *       Join completion before beginning another read or write phase.
+         *       Stale reactor readiness is re-checked and keeps waiting. Join completion before another phase.
          */
         [[nodiscard]] auto WaitForPeerData(
             std::optional<Duration> timeout = std::nullopt
@@ -250,16 +250,33 @@ namespace mhttp::impl {
             }
             self->armDeadline(deadline, timeout);
             if (deadline->expired) { co_return std::unexpected{ Error::ReadTimeout }; }
-            auto const [error] = co_await self->m_socket.async_wait(
-                asio::ip::tcp::socket::wait_read,
-                asio::bind_cancellation_slot(deadline->read_cancellation.slot(), asio::as_tuple(asio::use_awaitable)));
-            if (self->m_closed) { co_return std::unexpected{ Error::Canceled }; }
-            if (deadline->expired) { co_return std::unexpected{ Error::ReadTimeout }; }
-            if (auto failure = map_io_error(error, IoOperation::Read)) {
-                if (*failure != Error::Canceled) { self->close(); }
-                co_return std::unexpected{ *failure };
+            for (;;) {
+                auto const [error] = co_await self->m_socket.async_wait(
+                    asio::ip::tcp::socket::wait_read,
+                    asio::bind_cancellation_slot(deadline->read_cancellation.slot(), asio::as_tuple(asio::use_awaitable)));
+                if (self->m_closed) { co_return std::unexpected{ Error::Canceled }; }
+                if (deadline->expired) { co_return std::unexpected{ Error::ReadTimeout }; }
+                if (auto failure = map_io_error(error, IoOperation::Read)) {
+                    if (*failure != Error::Canceled) { self->close(); }
+                    co_return std::unexpected{ *failure };
+                }
+                if (self->isReadable()) { co_return Result<void>{}; }
+                // Cancellation forwarded while the stale completion was queued found no pending wait.
+                if (cancellation.cancelled() != asio::cancellation_type::none) { co_return std::unexpected{ Error::Canceled }; }
             }
-            co_return Result<void>{};
+        }
+
+        /**
+         * @brief Confirm reactor readiness against current socket state without consuming any byte.
+         * @return True for queued bytes, peer FIN, or a pending error; false for a stale notification.
+         * @note Edge-triggered reactors can report readiness for bytes that a speculative read already
+         *       consumed. Non-blocking mode only affects synchronous calls; transfers here stay asynchronous.
+         */
+        auto isReadable() noexcept -> bool {
+            asio::error_code error;
+            if (!m_socket.non_blocking()) { m_socket.non_blocking(true, error); }
+            if (!error) { m_socket.wait(asio::socket_base::wait_read, error); }
+            return error != asio::error::would_block;
         }
 
         /**

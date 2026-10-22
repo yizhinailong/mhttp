@@ -319,6 +319,66 @@ namespace mhttp::test {
     }
 
     /**
+     * @brief Deliver readiness collected for already consumed bytes to a later idle wait.
+     * @param executor Single-threaded context executor; FIFO handler order fixes the reactor interleaving.
+     * @param weak Observe ownership after the context drains.
+     * @note The byte is queued synchronously so the posted consumer runs after the next reactor poll
+     *       records its edge but before that edge is dispatched to the newly queued wait.
+     */
+    auto stale_readiness_scenario(
+        asio::any_io_executor executor,
+        std::weak_ptr<impl::Connection>& weak
+    ) -> asio::awaitable<void> {
+        auto pair = co_await make_loopback(executor);
+        weak = pair->connection;
+        auto& socket = pair->connection->SocketForInitialization();
+        asio::write(pair->peer, asio::buffer("x", 1));
+        auto const visible_until = std::chrono::steady_clock::now() + 1s;
+        while (socket.available() == 0 && std::chrono::steady_clock::now() < visible_until) { std::this_thread::yield(); }
+        Check(socket.available() == 1, "loopback byte is queued before the reactor polls");
+        auto waited = std::make_shared<TransportResult<Result<void>>>(executor);
+        asio::post(pair->connection->Executor(), [executor, pair, waited] {
+            char byte{};
+            asio::error_code error;
+            static_cast<void>(pair->connection->SocketForInitialization().receive(asio::buffer(&byte, 1), 0, error));
+            Check(!error && byte == 'x', "direct receive consumes the byte whose readiness is already recorded");
+            asio::co_spawn(executor, pair->connection->WaitForPeerData(50ms),
+                [waited](std::exception_ptr failure, Result<void> result) {
+                    waited->failure = failure;
+                    if (!failure) { waited->value.emplace(std::move(result)); }
+                    static_cast<void>(waited->done.try_send(asio::error_code{}));
+                });
+        });
+        auto stale = co_await waited->Wait();
+        Check(!stale && stale.error() == Error::ReadTimeout, "stale readiness without peer input is not reported");
+        co_await asio::async_write(pair->peer, asio::buffer("y", 1), asio::use_awaitable);
+        Check((co_await pair->connection->WaitForPeerData(1s)).has_value(), "confirmed peer bytes still produce readiness");
+        auto data = co_await pair->connection->ReadSome(1s);
+        Check(data && *data == "y", "readiness confirmation leaves later bytes to asynchronous reads");
+        pair->peer.shutdown(asio::socket_base::shutdown_send);
+        Check((co_await pair->connection->WaitForPeerData(1s)).has_value(), "confirmed peer FIN still produces readiness");
+        pair->connection->Close();
+    }
+
+    /**
+     * @brief Reject stale readiness deterministically on one thread and release the connection after drain.
+     */
+    auto connection_stale_readiness() -> void {
+        std::weak_ptr<impl::Connection> weak;
+        {
+            asio::io_context context{ 1 };
+            std::exception_ptr failure;
+            bool finished{};
+            asio::co_spawn(context, stale_readiness_scenario(context.get_executor(), weak),
+                [&failure, &finished](std::exception_ptr error) { failure = error; finished = true; });
+            context.run();
+            Check(finished, "stale readiness scenario completes before its context drains");
+            if (failure) { std::rethrow_exception(failure); }
+        }
+        Check(weak.expired(), "stale readiness rechecks release the connection after drain");
+    }
+
+    /**
      * @brief Reset a raw peer after observing enough bytes to ensure a composed write completed a prefix.
      * @param pair Owned pair retained until the peer has received and reset its socket.
      * @return Success after receiving the expected prefix.
@@ -930,6 +990,7 @@ export namespace mhttp::test {
             { "connection limits", connection_limits },
             { "connection transfers", connection_transfers },
             { "connection idle readiness", connection_idle_readiness },
+            { "connection stale readiness", connection_stale_readiness },
             { "connection readiness deadlines", connection_readiness_deadlines },
             { "connection write progress", connection_write_progress },
             { "connection read deadlines", connection_read_deadlines },
