@@ -2,14 +2,14 @@ name: Documentation
 
 on:
   push:
-    branches: [master]
+    branches: [main]
     paths:
-      - 'src/**'
-      - 'docs/**'
-      - 'README.md'
-      - 'AGENTS.md'
-      - 'Doxyfile'
-      - '.github/workflows/docs.yml'
+      - "src/**"
+      - "docs/**"
+      - "README.md"
+      - "AGENTS.md"
+      - "Doxyfile"
+      - ".github/workflows/docs.yml"
   workflow_dispatch:
 
 permissions:
@@ -32,8 +32,8 @@ jobs:
 
       - name: Install Doxygen
         env:
-          DOXYGEN_VERSION: '1.18.0'
-          DOXYGEN_SHA256: '14fa81bdc34171edb5f1f02b1d60e74802f0439b77fa44e592565d517d72df90'
+          DOXYGEN_VERSION: "1.18.0"
+          DOXYGEN_SHA256: "14fa81bdc34171edb5f1f02b1d60e74802f0439b77fa44e592565d517d72df90"
         run: |
           doxygen_archive="$RUNNER_TEMP/doxygen-$DOXYGEN_VERSION.linux.bin.tar.gz"
           curl --fail --location --retry 3 \
