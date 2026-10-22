@@ -82,7 +82,8 @@ Runtime 必须活得比服务端、客户端及其 Task 更久。一个 HttpClie
 
 ## REST 示例
 
-在两个终端的仓库根目录分别执行：
+示例是独立的 mcpp 项目，[examples/mcpp.toml](examples/mcpp.toml) 通过路径依赖使用仓库中的 mhttp，
+构建使用 mcpp 的默认工具链。在两个终端的 `examples` 目录分别执行：
 
 ```text
 mcpp run rest_server -- 8080
@@ -114,7 +115,7 @@ JSON 的 feature、独立 `import mhttp.json;` 与读写接口见 [JSON 适配](
 
 ## 压测示例
 
-启动上述 rest_server 后，可以对其健康检查接口发起固定总量或固定时长的请求：
+启动上述 rest_server 后，在 `examples` 目录对其健康检查接口发起固定总量或固定时长的请求：
 
 ```text
 mcpp run stress_test -- http://127.0.0.1:8080/health --requests 1000 --connections 16 --threads 2

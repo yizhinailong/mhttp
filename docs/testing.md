@@ -34,5 +34,6 @@ TestServer 在构造时启动 Runtime，调用 `Server()` 注册测试所需的�
 该地址应由测试环境控制。普通验收不连接公网 HTTP 服务。
 
 运行 `python tools/check_test_support.py` 可独立验证故意失败、异常、无匹配过滤和看门狗的退出行为。
-`check_examples.py` 验证两个 REST 示例，`check_stress.py` 使用动态回环服务检查负载计数、复用、
+`check_examples.py` 在独立的 `examples` 项目中构建并验证两个 REST 示例，
+`check_stress.py` 使用动态回环服务检查负载计数、复用、
 单 I/O 线程并发和失败处理。Linux 上使用 python3 执行相同脚本；本地 Windows 验证与远端 CI 结果分别报告。

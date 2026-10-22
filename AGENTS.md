@@ -27,7 +27,7 @@ doxygen Doxyfile
 按 `mcpp.toml` 中指定的版本准备 LLVM 工具链后即可构建；
 项目通过 `[toolchain].default` 选择编译器。
 添加 `tests/**/*.cpp` 后，使用 `mcpp test --timeout 30` 运行测试。
-库本身没有可运行入口；新增可执行目标后再使用 `mcpp run <target>`。
+库本身没有可运行入口；示例程序在 `examples/` 目录中通过 `mcpp run <target>` 运行。
 
 ## 目录与模块
 
@@ -35,7 +35,9 @@ doxygen Doxyfile
 - `src/**/*.cppm`：后续库组件，声明和实现放在同一个模块接口文件中。
 - 按职责组织目录；需要拆分时使用 `mhttp:component` 分区，由主模块导出公共分区。
 - `tests/**/*.cpp`：后续独立测试程序，每个程序提供 `main()`，以退出码表示成败。
-- `target/` 和 `compile_commands.json` 为生成文件，不提交。
+- `examples/`：独立的 mcpp 示例项目，`examples/mcpp.toml` 通过路径依赖使用 mhttp
+  并声明示例可执行目标；不在根 `mcpp.toml` 中添加示例目标。
+- `target/` 和 `compile_commands.json`（包括 `examples/` 下的同名产物）为生成文件，不提交。
 - `Doxyfile`：Doxygen 配置，解析项目说明和 `src/`，包含 `.cppm` 模块文件，
   输出 HTML 到 `target/doxygen/html/`，由现有文档工作流发布至 GitHub Pages。
 - `.github/workflows/` 已有工作流草稿；其中 TLS、压缩和消费者示例

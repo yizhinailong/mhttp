@@ -1,4 +1,6 @@
 /target/
 /compile_commands.json
+/examples/target/
+/examples/compile_commands.json
 /TODO.md
 mcpp.lock

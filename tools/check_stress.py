@@ -2,7 +2,6 @@
 
 from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 import re
 import socket
 import subprocess
@@ -12,7 +11,7 @@ import time
 
 # Reuse artifact discovery without creating generated files in the source directory.
 sys.dont_write_bytecode = True
-from check_examples import executable
+from check_examples import build, executable
 
 
 class Peer(ThreadingHTTPServer):
@@ -119,9 +118,8 @@ def require_counts(output, attempts, responses, http=0, transport=0, body=None):
 
 
 def main():
-    root = Path(__file__).resolve().parent.parent
-    subprocess.run(["mcpp", "build", "--locked"], cwd=root, check=True)
-    binary = executable(root, "stress_test")
+    build()
+    binary = executable("stress_test")
     if "usage: stress_test" not in run(binary, ["--help"]):
         raise RuntimeError("Missing stress example usage")
     invalid_options = [[], ["https://127.0.0.1/"], ["relative"],

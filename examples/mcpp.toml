@@ -1,0 +1,20 @@
+[package]
+name = "mhttp-examples"
+version = "0.1.0"
+standard = "c++23"
+description = "Runnable REST and stress examples built on mhttp"
+
+[dependencies]
+mhttp = { path = ".." }
+
+[targets.rest_server]
+kind = "bin"
+main = "rest_server/main.cpp"
+
+[targets.rest_client]
+kind = "bin"
+main = "rest_client/main.cpp"
+
+[targets.stress_test]
+kind = "bin"
+main = "stress_test/main.cpp"
