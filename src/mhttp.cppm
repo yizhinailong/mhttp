@@ -44,6 +44,7 @@ export import :server.router;
 export import :server.options;
 export import :server.response_policy;
 export import :server.http_server;
+export import :server.app;
 export import :server.logging;
 
 export import :utils.string;

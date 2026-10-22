@@ -584,6 +584,51 @@ BindFailure 的 local 是请求的绑定目标，其他记录尽可能携带已�
 Bind 的同步回调由调用 Bind 的线程完成，其生命周期不依赖运行中的服务端代次。
 回调应短小且避免阻塞 I/O 线程，共享状态需自行同步，借用的记录引用只在回调内有效。
 
+## 应用入口
+
+`mhttp::app()` 参照 drogon 的 `drogon::app()`，返回首次调用时构造的进程级 `mhttp::App&`。
+App 继承 Router，路由、aspect 和钩子照常通过 `set_http_handler` 等接口注册；
+它自己拥有一个 Runtime 和一个监听器，配置接口返回 `App&` 以便链式调用：
+
+```cpp
+import std;
+import mhttp;
+
+auto main() -> int {
+    mhttp::app().set_http_handler<mhttp::method::Get>("/hello", [](auto&, auto& response) {
+        static_cast<void>(response.SetContent("hello", "text/plain"));
+    });
+    auto result = mhttp::app()
+        .SetListener("0.0.0.0", 8080)
+        .SetThreadNum(4)
+        .Run(); // 阻塞到 Quit、Ctrl+C 或监听失败
+    return result ? 0 : 1;
+}
+```
+
+- `SetListener(host, port)`：唯一的监听地址，再次调用会覆盖；端口 0 动态分配，运行期间由 `LocalEndpoint()` 读取。
+- `SetThreadNum(n)`：I/O 线程数，默认 1；0 表示 `std::thread::hardware_concurrency()`，未知时取 1。
+- `SetServerOptions`、`SetLogger`、`SetAccessLogger`：与 HttpServer 的选项和日志回调语义相同。
+- `SetShutdownTimeout(d)`：Quit 后允许已开始请求完成的时间，默认 5 秒。
+- `DisableSignalHandling()`：不再把 SIGINT/SIGTERM 转为 Quit，由应用自行处理信号。
+
+配置接口可在任意线程调用且不返回错误；Run 开始时复制并校验一份快照，运行期间的修改在下一次 Run 生效。
+Run 在非 I/O 线程上阻塞：绑定地址、启动 I/O 线程和监听器，直到 Quit、信号或监听失败，
+然后排空会话并停止、Join Runtime。自然排空返回成功；宽限到期后强制取消返回 ShutdownTimeout；
+未设置监听地址、服务端选项或宽限时间非法返回 InvalidRequest；绑定、accept 和 Runtime 故障原样返回；
+另一次 Run 进行中返回 AlreadyRunning，在 I/O 线程调用返回 Busy。运行期间路由冻结，Run 返回后可修改并再次 Run。
+
+Quit 不阻塞，可在任意线程调用，包括本应用自己的 handler；未运行时没有效果。
+默认在 Run 期间用 Asio `signal_set` 监听 SIGINT/SIGTERM 并调用 Quit，返回前恢复默认信号处理。
+WaitUntilReady 等待当前或下一次 Run 开始接受连接，适合在其他线程调用 Run 的场景；
+IsRunning 和 LocalEndpoint 反映正在接受连接的监听器。`GetRuntime()` 借出 App 拥有的 Runtime，
+运行期间可用于创建客户端或调用 SyncWait、Offload；Runtime 由 Run 启停，不要自行 Start 或 Stop。
+App 必须在非 I/O 线程析构，析构会 Quit 并等待进行中的 Run 返回；单例在静态析构阶段销毁，
+应在 main 返回前让 Run 结束。需要多个监听器或与其他组件共享 Runtime 时，直接使用 HttpServer。
+
+`tests/server/app_test.cpp` 覆盖配置错误、日志转发、I/O 线程拒绝、服务与重启、
+handler 内 Quit、宽限超时和 SIGINT 退出。
+
 对应独立测试为 `tests/server/request_test.cpp`、`response_test.cpp`、
 `request_data_test.cpp`、`handler_test.cpp`、`middleware_test.cpp`、`router_test.cpp`、
 `routing_hooks_test.cpp`、`exception_test.cpp` 和 `response_policy_test.cpp`，覆盖数据所有权、错误拒绝、分帧衔接、

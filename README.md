@@ -8,6 +8,7 @@
 支持 URL 编码表单、multipart 文件与字段，以及可选的 JSON 适配和 SOCI 数据库会话池。
 协议处理支持有界增量解析、分块、trailer、keep-alive、超时、取消和错误响应后关闭连接。
 服务端支持带截止时间的优雅停机：先完成已开始的请求，到期后取消并等待资源清理。
+也可以使用 drogon 风格的 `mhttp::app()` 单例链式配置监听地址和线程数，`Run()` 阻塞运行并在 Ctrl+C 时优雅退出。
 
 客户端提供 Get / Head / Post / Put / Patch / Delete / Options、连接复用、
 有界重定向、默认头部与认证、分阶段或整体超时，以及按目标限额的异步连接池。`Task<T>`、`Runtime`、`Sleep`、

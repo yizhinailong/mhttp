@@ -309,6 +309,36 @@ namespace mhttp::impl {
          */
         auto AsyncStop(Clock::duration grace) -> Task<Result<void>> { return gracefulStopTask(shared_from_this(), grace); }
 
+        /**
+         * @brief Close admission and schedule drain without waiting, so I/O threads may call it.
+         * @param grace Graceful budget beginning now, or absent to cancel every session immediately.
+         * @return Success, or InvalidRequest for an invalid grace before changing lifecycle state.
+         */
+        auto RequestStop(std::optional<Clock::duration> grace) -> Result<void> {
+            std::optional<Clock::time_point> deadline;
+            if (grace) {
+                auto valid = shutdownDeadline(*grace);
+                if (!valid) { return std::unexpected{ valid.error() }; }
+                deadline = *valid;
+            }
+            static_cast<void>(requestStop(deadline));
+            return {};
+        }
+
+        /**
+         * @brief Block a non-I/O caller until one started generation stops on request or by failure.
+         * @param generation Owned generation returned by Start.
+         * @return Start/accept failure, forced shutdown cause, or success after natural drain.
+         */
+        auto WaitUntilStopped(std::shared_ptr<Generation> const& generation) -> Result<void> {
+            if (RuntimeImpl::IsIoThread()) { return std::unexpected{ Error::Busy }; }
+            {
+                std::unique_lock lock{ m_mutex };
+                m_changed.wait(lock, [&] { return generation->completed; });
+            }
+            return shutdownResult(generation);
+        }
+
     private:
         /**
          * @brief Validate and own an absolute shutdown deadline without mutating lifecycle state.
