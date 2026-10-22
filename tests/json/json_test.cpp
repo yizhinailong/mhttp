@@ -89,7 +89,7 @@ auto json_http_round_trips() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(4).has_value(), "start JSON integration runtime");
     mhttp::server::HttpServer server{ runtime };
-    Check(server.Post("/json", [](auto& request, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Post>("/json", [](auto& request, auto& response) {
         auto value = request.Json();
         if (!value) {
             Check(response.SetError(value.error() == mhttp::Error::BodyTooLarge
@@ -140,18 +140,17 @@ auto json_client_shortcuts() -> void {
     Check(runtime.Start(4).has_value(), "start JSON shortcut runtime");
     mhttp::server::HttpServer server{ runtime };
     std::atomic<unsigned> calls{};
-    for (auto method : { mhttp::Method::Get, mhttp::Method::Head, mhttp::Method::Post, mhttp::Method::Put,
-                         mhttp::Method::Patch, mhttp::Method::Delete, mhttp::Method::Options }) {
-        Check(server.Route(method, "/shortcut", [&calls](auto& request, auto& response) {
-            ++calls;
-            Check(response.Headers().Set("X-Method", request.MethodString()).has_value(), "echo JSON method");
-            Check(response.Headers().Set("X-Type", request.ContentType()).has_value(), "echo JSON request media type");
-            Check(response.Headers().Set("X-Target", request.Target()).has_value(), "echo JSON request target");
-            Check(response.Headers().Set("X-Body-Bytes", std::to_string(request.Body().size())).has_value(), "echo JSON body size even for HEAD");
-            Check(response.Headers().Set("X-Explicit", request.Header("X-Explicit")).has_value(), "echo explicit JSON fields");
-            Check(response.SetContent(request.Body(), "application/json").has_value(), "echo serialized JSON bytes");
-        }).has_value(), "register JSON shortcut method");
-    }
+    Check(server.set_http_handler<mhttp::method::Get, mhttp::method::Head, mhttp::method::Post, mhttp::method::Put,
+                                  mhttp::method::Patch, mhttp::method::Delete, mhttp::method::Options>(
+        "/shortcut", [&calls](auto& request, auto& response) {
+        ++calls;
+        Check(response.Headers().Set("X-Method", request.MethodString()).has_value(), "echo JSON method");
+        Check(response.Headers().Set("X-Type", request.ContentType()).has_value(), "echo JSON request media type");
+        Check(response.Headers().Set("X-Target", request.Target()).has_value(), "echo JSON request target");
+        Check(response.Headers().Set("X-Body-Bytes", std::to_string(request.Body().size())).has_value(), "echo JSON body size even for HEAD");
+        Check(response.Headers().Set("X-Explicit", request.Header("X-Explicit")).has_value(), "echo explicit JSON fields");
+        Check(response.SetContent(request.Body(), "application/json").has_value(), "echo serialized JSON bytes");
+    }).has_value(), "register JSON shortcut method");
     auto port = server.BindToAnyPort("127.0.0.1");
     Check(port && server.Start() && server.WaitUntilReady(), "start JSON shortcut loopback peer");
     mhttp::client::ClientOptions options;
@@ -237,13 +236,13 @@ auto json_error_responses() -> void {
         ++posts;
         Check(response.Headers().Set("X-Final", "once").has_value(), "finalize customized JSON error");
     }).has_value(), "register JSON error finalizer");
-    Check(server.Post("/input", [](auto& request, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Post>("/input", [](auto& request, auto& response) {
         if (!request.Json()) { Check(response.SetError(mhttp::Status::BadRequest).has_value(), "reject malformed JSON request"); }
     }).has_value(), "register JSON validation route");
     auto auth = mhttp::server::BearerAuth::Create("valid-token", "REST");
     Check(auth.has_value(), "create JSON error authentication policy");
-    Check(server.Get("/protected", [](auto&, auto&) { Check(false, "missing Bearer token cannot dispatch"); }, *auth).has_value(), "register JSON authentication rejection");
-    Check(server.Get("/throw", [](auto&, auto&) { throw std::runtime_error{ "private secret" }; }).has_value(), "register JSON exception boundary");
+    Check(server.set_http_handler<mhttp::method::Get>("/protected", [](auto&, auto&) { Check(false, "missing Bearer token cannot dispatch"); }, *auth).has_value(), "register JSON authentication rejection");
+    Check(server.set_http_handler<mhttp::method::Get>("/throw", [](auto&, auto&) { throw std::runtime_error{ "private secret" }; }).has_value(), "register JSON exception boundary");
     auto port = server.BindToAnyPort("127.0.0.1");
     if (!port || !server.Start() || !server.WaitUntilReady()) { throw std::runtime_error{ "cannot start JSON error peer" }; }
     mhttp::client::HttpClient client{ runtime, "127.0.0.1", *port };

@@ -58,7 +58,7 @@ auto persistent_borrowing() -> void {
         mhttp::Runtime runtime;
         Check(runtime.Start(4).has_value(), "start pooled persistence runtime");
         mhttp::server::HttpServer server{ runtime, { .keep_alive_timeout = 40ms } };
-        Check(server.Get("/", [](auto& request, auto& response) {
+        Check(server.set_http_handler<mhttp::method::Get>("/", [](auto& request, auto& response) {
             Check(response.Headers().Set("X-Authorization", request.Header("Authorization")).has_value(), "echo pooled defaults");
             Check(response.SetContent("pooled", "text/plain").has_value(), "pooled response");
         }).has_value(), "register pooled endpoint");
@@ -89,7 +89,7 @@ auto streaming_loan_lifetime() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(4).has_value(), "start streaming pool runtime");
     mhttp::server::HttpServer server{ runtime };
-    Check(server.Get("/", [](auto&, auto& response) { static_cast<void>(response.SetContent("payload", "text/plain")); }).has_value(), "register pooled stream endpoint");
+    Check(server.set_http_handler<mhttp::method::Get>("/", [](auto&, auto& response) { static_cast<void>(response.SetContent("payload", "text/plain")); }).has_value(), "register pooled stream endpoint");
     auto port = start_pool_server(server);
     mhttp::client::ClientPool pool{ runtime, { .max_per_origin = 1 } };
     auto handle = mhttp::SyncWait(runtime, pool.Acquire("127.0.0.1", port));
@@ -128,7 +128,7 @@ auto streaming_shutdown() -> void {
         mhttp::Runtime runtime;
         Check(runtime.Start(4).has_value(), "start pooled receiver stop runtime");
         mhttp::server::HttpServer server{ runtime };
-        Check(server.Get("/", [](auto&, auto& response) { static_cast<void>(response.SetContent("body", "text/plain")); }).has_value(), "register pooled stop endpoint");
+        Check(server.set_http_handler<mhttp::method::Get>("/", [](auto&, auto& response) { static_cast<void>(response.SetContent("body", "text/plain")); }).has_value(), "register pooled stop endpoint");
         auto port = start_pool_server(server);
         mhttp::client::ClientPool pool{ runtime, { .client_options = { .timeout_policy = mhttp::client::TimeoutPolicy::Never } } };
         auto handle = mhttp::SyncWait(runtime, pool.Acquire("127.0.0.1", port));
@@ -165,7 +165,7 @@ auto inherited_acquire_cancellation() -> void {
     auto held = mhttp::SyncWait(runtime, pool.Acquire("localhost", 80));
     std::atomic<bool> canceled{};
     mhttp::server::HttpServer proxy{ runtime };
-    Check(proxy.Get("/", [&](auto&, auto&) -> mhttp::Task<void> {
+    Check(proxy.set_http_handler<mhttp::method::Get>("/", [&](auto&, auto&) -> mhttp::Task<void> {
         auto result = co_await pool.Acquire("localhost", 80, 5s);
         canceled.store(!result && result.error() == mhttp::Error::Canceled);
     }).has_value(), "register queued proxy handler");
@@ -187,8 +187,8 @@ auto timed_out_transfer_return() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(4).has_value(), "start pooled timeout runtime");
     mhttp::server::HttpServer server{ runtime };
-    Check(server.Get("/slow", [](auto&, auto&) -> mhttp::Task<void> { co_await mhttp::Sleep(1s); }).has_value(), "register slow pooled response");
-    Check(server.Get("/ready", [](auto&, auto& response) { static_cast<void>(response.SetContent("ready", "text/plain")); }).has_value(), "register pool recovery route");
+    Check(server.set_http_handler<mhttp::method::Get>("/slow", [](auto&, auto&) -> mhttp::Task<void> { co_await mhttp::Sleep(1s); }).has_value(), "register slow pooled response");
+    Check(server.set_http_handler<mhttp::method::Get>("/ready", [](auto&, auto& response) { static_cast<void>(response.SetContent("ready", "text/plain")); }).has_value(), "register pool recovery route");
     auto port = start_pool_server(server);
     mhttp::client::ClientPool pool{ runtime, { .max_per_origin = 1, .client_options = { .read_timeout = 30ms } } };
     auto first = mhttp::SyncWait(runtime, pool.Acquire("127.0.0.1", port));

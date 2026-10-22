@@ -18,7 +18,7 @@ using namespace std::chrono_literals;
  */
 auto fixture_requests() -> void {
     mhttp::test::TestServer fixture{ 1, { .keep_alive_max_requests = 2 } };
-    Check(fixture.Server().Get("/request-target", [](auto& request, auto& response) {
+    Check(fixture.Server().set_http_handler<mhttp::method::Get>("/request-target", [](auto& request, auto& response) {
         static_cast<void>(response.SetContent(std::string{ request.Target() }, "text/plain"));
     }).has_value(), "configure fixture routes before acceptance");
     auto const port = fixture.Start();
@@ -58,7 +58,7 @@ auto fixture_teardown() -> void {
     std::unique_ptr<mhttp::test::ThreadTask<mhttp::Result<mhttp::client::Response>>> request;
     {
         mhttp::test::TestServer fixture;
-        Check(fixture.Server().Get("/wait", [&](auto&, auto&) -> mhttp::Task<void> {
+        Check(fixture.Server().set_http_handler<mhttp::method::Get>("/wait", [&](auto&, auto&) -> mhttp::Task<void> {
             FixtureFrame frame{ active };
             entered.release();
             co_await mhttp::Sleep(30s);

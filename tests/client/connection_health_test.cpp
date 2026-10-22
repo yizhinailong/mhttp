@@ -30,7 +30,7 @@ auto quiet_connections() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(4).has_value(), "start health runtime");
     mhttp::server::HttpServer server{ runtime };
-    Check(server.Get("/", [](auto&, auto& response) { Check(response.SetContent("ready", "text/plain").has_value(), "health response"); }).has_value(), "register health endpoint");
+    Check(server.set_http_handler<mhttp::method::Get>("/", [](auto&, auto& response) { Check(response.SetContent("ready", "text/plain").has_value(), "health response"); }).has_value(), "register health endpoint");
     auto port = start_health_server(server);
     mhttp::client::HttpClient client{ runtime, "127.0.0.1", port };
     auto lazy = mhttp::SyncWait(runtime, client.IsAlive());
@@ -58,7 +58,7 @@ auto peer_closure() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(4).has_value(), "start peer-close health runtime");
     mhttp::server::HttpServer server{ runtime, { .keep_alive_timeout = 30ms } };
-    Check(server.Get("/", [](auto&, auto& response) { Check(response.SetContent("ready", "text/plain").has_value(), "peer-close content"); }).has_value(), "register peer-close health endpoint");
+    Check(server.set_http_handler<mhttp::method::Get>("/", [](auto&, auto& response) { Check(response.SetContent("ready", "text/plain").has_value(), "peer-close content"); }).has_value(), "register peer-close health endpoint");
     auto port = start_health_server(server);
     mhttp::client::HttpClient client{ runtime, "127.0.0.1", port };
     auto first = mhttp::SyncWait(runtime, client.Get());
@@ -77,7 +77,7 @@ auto busy_connection() -> void {
     Check(runtime.Start(4).has_value(), "start busy-probe runtime");
     std::binary_semaphore entered{ 0 };
     mhttp::server::HttpServer server{ runtime };
-    Check(server.Get("/", [&entered](auto&, auto&) -> mhttp::Task<void> {
+    Check(server.set_http_handler<mhttp::method::Get>("/", [&entered](auto&, auto&) -> mhttp::Task<void> {
         entered.release();
         co_await mhttp::Sleep(5s);
     }).has_value(), "register pending health endpoint");

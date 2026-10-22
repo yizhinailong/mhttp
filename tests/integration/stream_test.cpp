@@ -56,7 +56,7 @@ auto streamed_binary_and_suppression() -> void {
         Check(response.IsStreaming() && response.Body().empty(), "access observer retains streaming mode without aggregate body");
         CheckEq(response.Header("X-Final"), std::string_view{ "yes" }, "access observes final metadata");
     }).has_value(), "observe only complete streamed responses");
-    Check(server.Get("/stream", [&](auto& request, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/stream", [&](auto& request, auto& response) {
         Check(response.Headers().Set("Content-Length", "999").has_value(), "stale user framing");
         Check(response.SetChunkedContentProvider([&, owned = std::make_unique<int>(64)](
             mhttp::server::StreamWriter& writer
@@ -76,7 +76,7 @@ auto streamed_binary_and_suppression() -> void {
             co_return co_await writer.Finish(std::move(trailers));
         }, "application/octet-stream").has_value(), "defer a move-only binary producer");
     }).has_value(), "register bounded stream");
-    Check(server.Get("/empty/:code", [&](auto& request, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/empty/:code", [&](auto& request, auto& response) {
         Check(response.SetStatus(static_cast<mhttp::Status>(*request.template PathParam<unsigned>("code"))).has_value(),
             "select bodyless status");
         Check(response.SetChunkedContentProvider([&](auto&) -> mhttp::Task<mhttp::Result<void>> {
@@ -131,7 +131,7 @@ auto streamed_failures() -> void {
     Check(server.SetLogger([&](auto const& record) { std::lock_guard lock{ logs_mutex }; logs.push_back(record); }).has_value(),
         "retain failed stream diagnostics");
     Check(server.SetAccessLogger([&](auto const&, auto const&, auto) { ++accesses; }).has_value(), "observe only completed responses");
-    Check(server.Get("/fail/:mode", [&](auto& request, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/fail/:mode", [&](auto& request, auto& response) {
         auto mode = std::string{ request.PathParam("mode") };
         Check(response.SetChunkedContentProvider([&, mode = std::move(mode)](auto& writer) -> mhttp::Task<mhttp::Result<void>> {
             ProviderLease lease{ active };
@@ -146,7 +146,7 @@ auto streamed_failures() -> void {
             co_return mhttp::Result<void>{};
         }).has_value(), "configure post-commit failure");
     }).has_value(), "register failed streams");
-    Check(server.Get("/ok", [](auto&, auto& response) { Check(response.SetContent("ok", "text/plain").has_value(), "fresh response"); }).has_value(),
+    Check(server.set_http_handler<mhttp::method::Get>("/ok", [](auto&, auto& response) { Check(response.SetContent("ok", "text/plain").has_value(), "fresh response"); }).has_value(),
         "register reconnect probe");
     mhttp::client::HttpClient client{ runtime, "127.0.0.1", start_stream_server(server),
         { .timeout_policy = mhttp::client::TimeoutPolicy::Overall, .timeout = 2s } };
@@ -177,7 +177,7 @@ auto streamed_shutdown() -> void {
         std::atomic<unsigned> active{}, accesses{};
         std::latch entered{ 1 };
         mhttp::server::HttpServer server{ runtime };
-        Check(server.Get("/wait", [&](auto&, auto& response) {
+        Check(server.set_http_handler<mhttp::method::Get>("/wait", [&](auto&, auto& response) {
             Check(response.SetChunkedContentProvider([&](auto& writer) -> mhttp::Task<mhttp::Result<void>> {
                 ProviderLease lease{ active };
                 auto prefix = co_await writer.Write("prefix");
@@ -208,7 +208,7 @@ auto streamed_retirement() -> void {
     std::optional<mhttp::Task<mhttp::Result<void>>> late_write, dropped_write;
     std::latch accessed{ 1 };
     mhttp::server::HttpServer server{ runtime, { .write_timeout = 100ms } };
-    Check(server.Get("/stream", [&](auto&, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/stream", [&](auto&, auto& response) {
         Check(response.SetChunkedContentProvider([&](auto& writer) -> mhttp::Task<mhttp::Result<void>> {
             late_write.emplace(writer.Write("must not send"));
             dropped_write.emplace(writer.Write("must not start"));
@@ -226,7 +226,7 @@ auto streamed_retirement() -> void {
             co_return mhttp::Result<void>{};
         }).has_value(), "own pending lazy writes");
     }).has_value(), "register retired write scenario");
-    Check(server.Get("/slow", [](auto&, auto& response) -> mhttp::Task<void> {
+    Check(server.set_http_handler<mhttp::method::Get>("/slow", [](auto&, auto& response) -> mhttp::Task<void> {
         co_await mhttp::Sleep(200ms);
         Check(response.SetContent("next", "text/plain").has_value(), "later response after old stream deadline");
     }).has_value(), "register socket reuse after timer retirement");
@@ -255,7 +255,7 @@ auto streamed_fixed_lengths() -> void {
     Check(runtime.Start(2).has_value(), "start fixed stream runtime");
     std::atomic<unsigned> calls{};
     mhttp::server::HttpServer server{ runtime, { .max_response_bytes = 512, .stream_chunk_bytes = 64 } };
-    Check(server.Get("/fixed/:mode", [&](auto& request, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/fixed/:mode", [&](auto& request, auto& response) {
         auto mode = std::string{ request.PathParam("mode") };
         auto const length = mode == "zero" ? 0u : mode == "short" ? 66u : mode == "long" ? 1u : 1024u;
         Check(response.SetContentProvider(length, [&, mode = std::move(mode)](auto& writer) -> mhttp::Task<mhttp::Result<void>> {

@@ -63,7 +63,7 @@ namespace mhttp::test {
         Check(runtime.Start(4).has_value(), "start slow header runtime");
         std::atomic<unsigned> calls{}, accesses{}, timeouts{};
         server::HttpServer server{ runtime, { .read_timeout = 1s } };
-        Check(server.Get("/", [&](auto&, auto&) { ++calls; }).has_value(), "register slow header sentinel");
+        Check(server.set_http_handler<mhttp::method::Get>("/", [&](auto&, auto&) { ++calls; }).has_value(), "register slow header sentinel");
         Check(server.SetAccessLogger([&](auto const&, auto const&, auto) { ++accesses; }).has_value(), "observe incomplete head response output");
         Check(server.SetLogger([&](auto const& record) {
             CheckEq(record.event, server::LogEvent::SessionFailure, "head timeout is a session failure");
@@ -120,7 +120,7 @@ namespace mhttp::test {
         std::atomic<unsigned> accesses{}, timeouts{};
         auto body = std::make_shared<std::string const>(8 * 1024 * 1024, 'x');
         server::HttpServer server{ runtime, { .write_timeout = 100ms } };
-        Check(server.Get("/large", [body = std::move(body)](auto&, auto& response) {
+        Check(server.set_http_handler<mhttp::method::Get>("/large", [body = std::move(body)](auto&, auto& response) {
             Check(response.SetContent(*body, "application/octet-stream").has_value(), "prepare bounded large response");
         }).has_value(), "register response exceeding the nonreading peer window");
         Check(server.SetAccessLogger([&](auto const&, auto const&, auto) { ++accesses; }).has_value(), "observe incomplete large response");
@@ -135,7 +135,7 @@ namespace mhttp::test {
         peers.Run(server_slow_reader_scenario(peers.Executor(), *server.LocalEndpoint(), timeouts));
         Check(server.Stop().has_value(), "drain timed-out response and logger");
         Check(timeouts == 1 && accesses == 0, "incomplete write produces one timeout and no access entry");
-        Check(server.Get("/after", [](auto&, auto&) {}).has_value(), "timed-out response releases routing ownership");
+        Check(server.set_http_handler<mhttp::method::Get>("/after", [](auto&, auto&) {}).has_value(), "timed-out response releases routing ownership");
     }
 
 } // namespace mhttp::test

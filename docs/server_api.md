@@ -5,12 +5,12 @@
 
 ## 路由注册
 
-Router 提供 `Get`、`Head`、`Post`、`Put`、`Patch`、`Delete`、`Options`
-和 `Route(Method, path, handler, aspects...)`。例如：
+Router 只通过 `set_http_handler<METHODS...>(path, handler, aspects...)` 注册路由，
+方法以模板参数给出，至少指定一个。例如：
 
 ```cpp
 mhttp::server::Router router;
-auto registered = router.Get("/users/:id", [](auto& request, auto& response) {
+auto registered = router.set_http_handler<mhttp::method::Get>("/users/:id", [](auto& request, auto& response) {
     auto id = request.template PathParam<unsigned>("id");
     if (!id) {
         static_cast<void>(response.SetError(mhttp::Status::BadRequest));
@@ -21,7 +21,7 @@ auto registered = router.Get("/users/:id", [](auto& request, auto& response) {
 ```
 
 处理器与可选 aspect 被复制或移动到稳定存储，支持只可移动的对象。
-也支持通过模板参数指定一个或多个方法：
+一次注册可以列出多个方法：
 
 ```cpp
 auto registered = router.set_http_handler<mhttp::method::Post, mhttp::method::Put>(
@@ -30,8 +30,9 @@ auto registered = router.set_http_handler<mhttp::method::Post, mhttp::method::Pu
     });
 ```
 
-`mhttp::method` 是 `mhttp::Method` 的类型别名，两种拼写可混用。
-`set_http_handler` 至少指定一个方法，返回 `Result<void>`，同样支持同步 `void`、协程 `Task<void>`
+`mhttp::method` 是 `mhttp::Method` 的类型别名，两种拼写可混用；扩展方法（如 `PROPFIND`）
+同样通过模板参数注册，`OPTIONS` 可注册字面量 `*` 路径。
+`set_http_handler` 返回 `Result<void>`，支持同步 `void`、协程 `Task<void>`
 处理器及尾随的路由 aspect；`HttpServer` 继承此接口。
 一次注册只复制或移动一份处理器和 aspect，所有指定方法共享这些对象，支持只可移动的捕获。
 重复方法只保留一个绑定；非法方法或路径不改变已有绑定。
@@ -124,12 +125,12 @@ IPv4。IPv4 与 IPv6 分别匹配，IPv4 CIDR 不信任 IPv4-mapped IPv6；双�
 
 ## 按需读取请求体
 
-使用 `Router::RouteLazy(method, path, handler, aspects...)` 在请求头通过校验后直接进入中间件和处理器。
-注册规则、路径参数、HEAD 回退和 Before/After 顺序与 `Route` 相同；替换路由时同时替换正文读取方式。
+使用 `Router::set_lazy_http_handler<METHODS...>(path, handler, aspects...)` 在请求头通过校验后直接进入中间件和处理器。
+方法列表、路径参数、HEAD 回退和 Before/After 顺序与 `set_http_handler` 相同；替换路由时同时替换正文读取方式。
 普通路由仍会在执行处理器前完整缓冲正文。
 
 ```cpp
-server.RouteLazy(mhttp::Method::Post, "/upload", [](auto& request, auto& response) -> mhttp::Task<void> {
+server.set_lazy_http_handler<mhttp::method::Post>("/upload", [](auto& request, auto& response) -> mhttp::Task<void> {
     std::uint64_t size{};
     for (;;) {
         auto chunk = co_await request.ReadBody();
@@ -170,7 +171,7 @@ lazy 路由的 `100 Continue` 推迟到第一次读取时发送，因此鉴权�
 `IsStreaming()` 标识这种表示，`Body()` 为空，不聚合整个响应。
 
 ```cpp
-server.Get("/stream", [](auto&, auto& response) {
+server.set_http_handler<mhttp::method::Get>("/stream", [](auto&, auto& response) {
     response.SetChunkedContentProvider([](mhttp::server::StreamWriter& writer)
         -> mhttp::Task<mhttp::Result<void>> {
         for (unsigned index{}; index != 10; ++index) {
@@ -335,7 +336,7 @@ max_requests、window 和 max_tracked_clients 必须为正，非法配置返回 
 每个客户端的第一条请求开始窗口，达到额度后返回 429，handler 不执行。
 Retry-After 是向上取整且至少为一秒的重试提示，已记录客户端按原窗口的剩余时间计算；
 拒绝请求更新访问顺序和空闲时间，但不会延长原窗口或增加已用额度。
-RouteLazy 可在请求头阶段拒绝；未读取正文时沿用关闭连接的策略，显式 Expect 协商可避免客户端启动上传来源。
+`set_lazy_http_handler` 路由可在请求头阶段拒绝；未读取正文时沿用关闭连接的策略，显式 Expect 协商可避免客户端启动上传来源。
 
 idle_expiration 缺省使用 window，零禁用空闲回收；每次请求先按访问顺序回收过期桶，不另起线程或定时器。
 较短的 idle_expiration 可在原额度窗口结束前重置长期空闲客户端的计数。
@@ -504,7 +505,7 @@ WaitUntilReady 默认最多等待五秒，未启动或已停止时立即返回 N
 mhttp::Runtime runtime;
 if (!runtime.Start(4)) { return 1; }
 mhttp::server::HttpServer server{ runtime };
-if (!server.Get("/hello", [](auto&, auto& response) {
+if (!server.set_http_handler<mhttp::method::Get>("/hello", [](auto&, auto& response) {
     static_cast<void>(response.SetContent("hello", "text/plain"));
 })) { return 1; }
 auto port = server.BindToAnyPort("127.0.0.1");

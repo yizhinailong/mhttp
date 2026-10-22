@@ -124,7 +124,7 @@ export namespace mhttp::server {
         [[nodiscard]] auto Body() const noexcept -> std::string const& { return m_impl->body; }
 
         /**
-         * @brief Pull one owned nonempty decoded body chunk during a RouteLazy handler or its middleware/aspects.
+         * @brief Pull one owned nonempty decoded body chunk during a set_lazy_http_handler route or its middleware/aspects.
          * @return Chunk up to request_chunk_bytes, nullopt at end, or an error; await every read sequentially.
          * @note Body() stays empty. Read through nullopt to permit persistence and publish Trailers().
          *       Framing that declares an empty body needs no read. Unread bytes force connection closure.

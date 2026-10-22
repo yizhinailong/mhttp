@@ -18,16 +18,16 @@ auto default_rest_errors() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(4).has_value(), "start REST error runtime");
     mhttp::server::HttpServer server{ runtime };
-    Check(server.Get("/resource", [](auto&, auto&) {}).has_value(), "register method mismatch resource");
-    Check(server.Get("/input", [](auto&, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/resource", [](auto&, auto&) {}).has_value(), "register method mismatch resource");
+    Check(server.set_http_handler<mhttp::method::Get>("/input", [](auto&, auto& response) {
         Check(response.SetError(mhttp::Status::BadRequest).has_value(), "reject invalid application input");
     }).has_value(), "register application validation error");
     auto auth = mhttp::server::BasicAuth::Create("user", "password", "REST");
     Check(auth.has_value(), "create REST authentication policy");
-    Check(server.Get("/protected", [](auto&, auto&) {
+    Check(server.set_http_handler<mhttp::method::Get>("/protected", [](auto&, auto&) {
         Check(false, "unauthorized request cannot reach the resource");
     }, *auth).has_value(), "register authentication rejection");
-    Check(server.Get("/throw", [](auto&, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/throw", [](auto&, auto& response) {
         Check(response.SetContent("private partial output", "application/octet-stream").has_value(), "prepare discarded response");
         throw std::runtime_error{ "private exception diagnostic" };
     }).has_value(), "register contained exception");

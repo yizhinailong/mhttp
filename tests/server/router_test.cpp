@@ -35,7 +35,7 @@ auto dispatch(
 }
 
 /**
- * @brief Exercise method shortcuts, generic extension methods, deterministic Allow, and default errors.
+ * @brief Exercise per-method registrations, extension methods, deterministic Allow, and default errors.
  */
 auto router_methods() -> void {
     mhttp::Runtime runtime;
@@ -44,15 +44,15 @@ auto router_methods() -> void {
     auto handler = [](auto& request, auto& response) {
         Check(response.SetContent(std::string{ request.MethodString() }, "text/plain").has_value(), "method response");
     };
-    Check(router.Get("/verbs", handler).has_value(), "GET shortcut");
-    Check(router.Head("/verbs", handler).has_value(), "HEAD shortcut");
-    Check(router.Post("/verbs", handler).has_value(), "POST shortcut");
-    Check(router.Put("/verbs", handler).has_value(), "PUT shortcut");
-    Check(router.Patch("/verbs", handler).has_value(), "PATCH shortcut");
-    Check(router.Delete("/verbs", handler).has_value(), "DELETE shortcut");
-    Check(router.Options("/verbs", handler).has_value(), "OPTIONS shortcut");
-    Check(router.Route(mhttp::Method::PropFind, "/verbs", handler).has_value(), "generic method registration");
-    Check(router.Options("*", handler).has_value(), "OPTIONS asterisk registration");
+    Check(router.set_http_handler<mhttp::method::Get>("/verbs", handler).has_value(), "GET registration");
+    Check(router.set_http_handler<mhttp::method::Head>("/verbs", handler).has_value(), "HEAD registration");
+    Check(router.set_http_handler<mhttp::method::Post>("/verbs", handler).has_value(), "POST registration");
+    Check(router.set_http_handler<mhttp::method::Put>("/verbs", handler).has_value(), "PUT registration");
+    Check(router.set_http_handler<mhttp::method::Patch>("/verbs", handler).has_value(), "PATCH registration");
+    Check(router.set_http_handler<mhttp::method::Delete>("/verbs", handler).has_value(), "DELETE registration");
+    Check(router.set_http_handler<mhttp::method::Options>("/verbs", handler).has_value(), "OPTIONS registration");
+    Check(router.set_http_handler<mhttp::method::PropFind>("/verbs", handler).has_value(), "extension method registration");
+    Check(router.set_http_handler<mhttp::method::Options>("*", handler).has_value(), "OPTIONS asterisk registration");
     for (auto method : { "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "PROPFIND" }) {
         auto response = dispatch(runtime, router, method, "/verbs");
         CheckEq(response.Status(), mhttp::Status::Ok, "registered method status");
@@ -80,6 +80,15 @@ concept AcceptsEmptyHttpMethods = requires(Router& router) {
 };
 
 /**
+ * @brief Detect a missing method argument in lazy-body registration.
+ * @tparam Router Public router or server type.
+ */
+template <typename Router>
+concept AcceptsEmptyLazyHttpMethods = requires(Router& router) {
+    router.set_lazy_http_handler("/empty", [](auto&, auto&) {});
+};
+
+/**
  * @brief Own move-only state shared by every method in a template route registration.
  */
 struct TemplateRouteAspect {
@@ -104,6 +113,8 @@ auto router_template_methods() -> void {
     static_assert(std::same_as<mhttp::method, mhttp::Method>);
     static_assert(!AcceptsEmptyHttpMethods<mhttp::server::Router>);
     static_assert(!AcceptsEmptyHttpMethods<mhttp::server::HttpServer>);
+    static_assert(!AcceptsEmptyLazyHttpMethods<mhttp::server::Router>);
+    static_assert(!AcceptsEmptyLazyHttpMethods<mhttp::server::HttpServer>);
     mhttp::Runtime runtime;
     Check(runtime.Start(2).has_value(), "start template routing runtime");
     mhttp::server::HttpServer router{ runtime };
@@ -135,7 +146,7 @@ auto router_template_methods() -> void {
     auto replacement = [](auto&, auto& response) {
         Check(response.SetContent("replacement", "text/plain").has_value(), "template replacement response");
     };
-    Check(router.Post("/shared", replacement).has_value(), "replace one shared method through existing API");
+    Check(router.set_http_handler<mhttp::method::Post>("/shared", replacement).has_value(), "replace one shared method through existing API");
     Check(!weak.expired(), "other method retains shared callback state");
     CheckEq(dispatch(runtime, router, "PUT", "/shared").Body(), "owned-PUT:4"sv,
         "replacing one method preserves another method and its aspect");
@@ -164,7 +175,7 @@ auto router_template_validation() -> void {
     auto replacement = [](auto&, auto& response) {
         Check(response.SetContent("changed", "text/plain").has_value(), "changed template response");
     };
-    Check(router.Post("/validated", original).has_value(), "register original template validation binding");
+    Check(router.set_http_handler<mhttp::method::Post>("/validated", original).has_value(), "register original template validation binding");
     auto invalid = router.set_http_handler<mhttp::method::Post, static_cast<mhttp::Method>(999), mhttp::method::Put>(
         "/validated", replacement);
     Check(!invalid && invalid.error() == mhttp::Error::InvalidRequest, "invalid template method rejects entire pack");
@@ -187,27 +198,27 @@ auto router_paths() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(2).has_value(), "start path routing runtime");
     mhttp::server::Router router;
-    Check(router.Get("/users/:id/files/:name", [](auto& request, auto& response) {
+    Check(router.set_http_handler<mhttp::method::Get>("/users/:id/files/:name", [](auto& request, auto& response) {
         CheckEq(request.template PathParam<int>("id"), std::optional{ 42 }, "typed route capture");
         CheckEq(request.PathParam("name"), "a/b"sv, "encoded slash remains within one capture");
         CheckEq(request.Query().Get("x"), "one two"sv, "handler sees parsed query");
         Check(response.SetContent("captures", "text/plain").has_value(), "capture response");
     }).has_value(), "multiple captures");
     CheckEq(dispatch(runtime, router, "GET", "/users/42/files/a%2Fb?x=one+two").Body(), "captures"sv, "owned capture callback");
-    Check(router.Get("/choose/:name", [](auto&, auto& response) {
+    Check(router.set_http_handler<mhttp::method::Get>("/choose/:name", [](auto&, auto& response) {
         Check(response.SetContent("parameter", "text/plain").has_value(), "parameter response");
     }).has_value(), "parameter path");
-    Check(router.Get("/choose/static", [](auto&, auto& response) {
+    Check(router.set_http_handler<mhttp::method::Get>("/choose/static", [](auto&, auto& response) {
         Check(response.SetContent("static", "text/plain").has_value(), "static response");
     }).has_value(), "static path registered later");
-    Check(router.Get("/choose/static/", [](auto&, auto& response) {
+    Check(router.set_http_handler<mhttp::method::Get>("/choose/static/", [](auto&, auto& response) {
         Check(response.SetContent("slash", "text/plain").has_value(), "trailing slash response");
     }).has_value(), "trailing slash path");
     CheckEq(dispatch(runtime, router, "GET", "/choose/static").Body(), "static"sv, "static wins");
     CheckEq(dispatch(runtime, router, "GET", "/choose/static/").Body(), "slash"sv, "trailing slash distinct");
     CheckEq(dispatch(runtime, router, "GET", "/choose/other").Body(), "parameter"sv, "parameter fallback");
     CheckEq(dispatch(runtime, router, "GET", "/choose/").Body(), "parameter"sv, "empty parameter allowed");
-    Check(router.Get("/files/*", [](auto& request, auto& response) {
+    Check(router.set_http_handler<mhttp::method::Get>("/files/*", [](auto& request, auto& response) {
         Check(response.SetContent(std::string{ request.PathParam("*") }, "text/plain").has_value(), "wildcard response");
     }).has_value(), "wildcard path");
     CheckEq(dispatch(runtime, router, "GET", "/files/a/b%20c").Body(), "a/b c"sv, "decoded wildcard remainder");
@@ -221,7 +232,7 @@ auto router_head() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start().has_value(), "start HEAD runtime");
     mhttp::server::Router router;
-    Check(router.Get("/items/:id", [](auto&, auto& response) {
+    Check(router.set_http_handler<mhttp::method::Get>("/items/:id", [](auto&, auto& response) {
         Check(response.SetContent("from GET", "text/plain").has_value(), "GET representation");
     }).has_value(), "GET fallback path");
     auto response = dispatch(runtime, router, "HEAD", "/items/42");
@@ -233,7 +244,7 @@ auto router_head() -> void {
         Check(head->bytes.contains("Content-Length: 8\r\n"), "HEAD advertises GET representation length");
     }
     CheckEq(dispatch(runtime, router, "POST", "/items/42").Header("Allow"), "GET, HEAD"sv, "implicit HEAD in Allow");
-    Check(router.Head("/items/:id", [](auto&, auto& response) {
+    Check(router.set_http_handler<mhttp::method::Head>("/items/:id", [](auto&, auto& response) {
         Check(response.SetContent("explicit HEAD", "text/plain").has_value(), "explicit HEAD response");
     }).has_value(), "explicit HEAD path");
     CheckEq(dispatch(runtime, router, "HEAD", "/items/42").Body(), "explicit HEAD"sv, "explicit HEAD wins");
@@ -250,12 +261,12 @@ auto router_validation() -> void {
     auto handler = [](auto&, auto& response) {
         Check(response.SetContent("safe", "text/plain").has_value(), "safe regex response");
     };
-    Check(router.Get("/n/{id:[0-9]+}", handler).has_value(), "safe regex registration");
+    Check(router.set_http_handler<mhttp::method::Get>("/n/{id:[0-9]+}", handler).has_value(), "safe regex registration");
     for (auto path : { "/n/{id:(a+)+}", "/n/{id:[}", "/n/{id:123456789}", "relative", "/n/:id/:id" }) {
-        auto result = router.Get(path, handler);
+        auto result = router.set_http_handler<mhttp::method::Get>(path, handler);
         Check(!result && result.error() == mhttp::Error::InvalidRequest, "invalid pattern rejected");
     }
-    auto invalid = router.Route(static_cast<mhttp::Method>(999), "/n/{id:[0-9]+}", handler);
+    auto invalid = router.set_http_handler<static_cast<mhttp::Method>(999)>("/n/{id:[0-9]+}", handler);
     Check(!invalid && invalid.error() == mhttp::Error::InvalidRequest, "invalid method rejected");
     CheckEq(dispatch(runtime, router, "GET", "/n/123").Body(), "safe"sv, "prior route survives errors");
     CheckEq(dispatch(runtime, router, "GET", "/n/1234").Status(), mhttp::Status::NotFound, "regex subject bound enforced");
@@ -281,7 +292,7 @@ struct RetirementProbe {
      */
     ~RetirementProbe() {
         released = true;
-        Check(router.Get("/retired", [](auto&, auto&) {}).has_value(), "callback destructor may reenter registration");
+        Check(router.set_http_handler<mhttp::method::Get>("/retired", [](auto&, auto&) {}).has_value(), "callback destructor may reenter registration");
     }
 };
 
@@ -294,12 +305,12 @@ auto router_replacement() -> void {
     mhttp::server::Router router;
     bool released{};
     auto probe = std::make_shared<RetirementProbe>(router, released);
-    Check(router.Get("/same", [owned = std::move(probe)](auto&, auto&) {}).has_value(), "owned old handler");
+    Check(router.set_http_handler<mhttp::method::Get>("/same", [owned = std::move(probe)](auto&, auto&) {}).has_value(), "owned old handler");
     Check(!released, "configuration retains callback");
-    Check(router.Post("/same", [](auto&, auto& response) {
+    Check(router.set_http_handler<mhttp::method::Post>("/same", [](auto&, auto& response) {
         Check(response.SetContent("post", "text/plain").has_value(), "POST binding response");
     }).has_value(), "distinct method binding");
-    Check(router.Get("/same", [](auto&, auto& response) {
+    Check(router.set_http_handler<mhttp::method::Get>("/same", [](auto&, auto& response) {
         Check(response.SetContent("new", "text/plain").has_value(), "replacement response");
     }).has_value(), "replace GET binding");
     Check(released, "replacement releases old captures immediately");
@@ -318,21 +329,21 @@ auto router_guards() -> void {
     auto request = ServerRequestAccess::Create({ .target = "/items" });
     mhttp::server::Response response;
     auto handler = [](auto&, auto&) {};
-    Check(router.Get("/items", handler).has_value(), "initial registration");
+    Check(router.set_http_handler<mhttp::method::Get>("/items", handler).has_value(), "initial registration");
     {
         auto pending = RouterAccess::Prepare(router, request, response);
-        auto result = router.Get("/later", handler);
+        auto result = router.set_http_handler<mhttp::method::Get>("/later", handler);
         Check(!result && result.error() == mhttp::Error::Busy, "unstarted Task prevents mutation");
         auto template_result = router.set_http_handler<mhttp::method::Post, mhttp::method::Put>("/later", handler);
         Check(!template_result && template_result.error() == mhttp::Error::Busy, "prepared Task rejects template pack");
         auto frozen = RouterAccess::Freeze(router);
         Check(!frozen && frozen.error() == mhttp::Error::Busy, "unstarted Task prevents freezing");
     }
-    Check(router.Get("/later", handler).has_value(), "dropped Task releases reader");
+    Check(router.set_http_handler<mhttp::method::Get>("/later", handler).has_value(), "dropped Task releases reader");
     Check(RouterAccess::Freeze(router).has_value(), "freeze before server startup");
     auto repeated = RouterAccess::Freeze(router);
     Check(!repeated && repeated.error() == mhttp::Error::AlreadyRunning, "duplicate freeze rejected");
-    auto rejected = router.Get("/blocked", handler);
+    auto rejected = router.set_http_handler<mhttp::method::Get>("/blocked", handler);
     Check(!rejected && rejected.error() == mhttp::Error::AlreadyRunning, "frozen mutation rejected");
     auto template_rejected = router.set_http_handler<mhttp::method::Post, mhttp::method::Put>("/blocked", handler);
     Check(!template_rejected && template_rejected.error() == mhttp::Error::AlreadyRunning,
@@ -348,7 +359,7 @@ auto router_guards() -> void {
         Check(!RouterAccess::Thaw(router), "every prepared copy must drain");
     }
     Check(RouterAccess::Thaw(router).has_value(), "thaw after all reader copies drain");
-    Check(router.Get("/blocked", handler).has_value(), "registration resumes after stop");
+    Check(router.set_http_handler<mhttp::method::Get>("/blocked", handler).has_value(), "registration resumes after stop");
     Check(RouterAccess::Thaw(router).has_value(), "idle thaw idempotent");
 }
 
@@ -363,7 +374,7 @@ auto router_ownership() -> void {
     auto router = std::make_unique<mhttp::server::Router>();
     auto owned = std::make_shared<int>(42);
     std::weak_ptr<int> weak{ owned };
-    Check(router->Get("/owned", [owned = std::move(owned)](auto&, auto& output) -> mhttp::Task<void> {
+    Check(router->set_http_handler<mhttp::method::Get>("/owned", [owned = std::move(owned)](auto&, auto& output) -> mhttp::Task<void> {
         co_await mhttp::Sleep(1ms);
         CheckEq(*owned, 42, "callback capture survives wrapper destruction and suspension");
         Check(output.SetContent("owned", "text/plain").has_value(), "owned handler response");
@@ -377,7 +388,7 @@ auto router_ownership() -> void {
     auto unused = std::make_unique<mhttp::server::Router>();
     auto value = std::make_shared<int>(7);
     std::weak_ptr<int> dropped{ value };
-    Check(unused->Get("/owned", [value = std::move(value)](auto&, auto&) {}).has_value(), "unstarted lifetime route");
+    Check(unused->set_http_handler<mhttp::method::Get>("/owned", [value = std::move(value)](auto&, auto&) {}).has_value(), "unstarted lifetime route");
     {
         auto task = RouterAccess::Dispatch(*unused, request, response);
         unused.reset();
@@ -399,7 +410,7 @@ auto router_concurrency() -> void {
     std::latch entered{ 1 };
     std::atomic<bool> release{};
     std::atomic<unsigned> count{};
-    Check(router.Get("/items/:id", [&entered, &release, &count](auto& request, auto& response) -> mhttp::Task<void> {
+    Check(router.set_http_handler<mhttp::method::Get>("/items/:id", [&entered, &release, &count](auto& request, auto& response) -> mhttp::Task<void> {
         if (count.fetch_add(1) == 0) {
             entered.count_down();
             while (!release.load()) { co_await mhttp::Sleep(1ms); }
@@ -417,12 +428,12 @@ auto router_concurrency() -> void {
         });
     }
     entered.wait();
-    auto rejected = router.Get("/late", [](auto&, auto&) {});
+    auto rejected = router.set_http_handler<mhttp::method::Get>("/late", [](auto&, auto&) {});
     Check(!rejected && rejected.error() == mhttp::Error::Busy, "active request prevents concurrent mutation");
     release.store(true);
     callers.clear();
     CheckEq(count.load(), 160u, "all concurrent handlers completed");
-    Check(router.Get("/late", [](auto&, auto&) {}).has_value(), "mutation resumes after concurrent dispatch drain");
+    Check(router.set_http_handler<mhttp::method::Get>("/late", [](auto&, auto&) {}).has_value(), "mutation resumes after concurrent dispatch drain");
 }
 
 /**
@@ -432,12 +443,12 @@ auto router_failure_cleanup() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(2).has_value(), "start failure routing runtime");
     mhttp::server::Router router;
-    Check(router.Get("/throw", [](auto&, auto&) { throw 42; }).has_value(), "throwing route");
+    Check(router.set_http_handler<mhttp::method::Get>("/throw", [](auto&, auto&) { throw 42; }).has_value(), "throwing route");
     auto failed = dispatch(runtime, router, "GET", "/throw");
     CheckEq(failed.Status(), mhttp::Status::InternalServerError, "arbitrary callback exceptions become 500");
-    Check(router.Get("/after", [](auto&, auto&) {}).has_value(), "exception releases reader");
+    Check(router.set_http_handler<mhttp::method::Get>("/after", [](auto&, auto&) {}).has_value(), "exception releases reader");
     std::latch entered{ 1 };
-    Check(router.Get("/cancel", [&entered](auto&, auto&) -> mhttp::Task<void> {
+    Check(router.set_http_handler<mhttp::method::Get>("/cancel", [&entered](auto&, auto&) -> mhttp::Task<void> {
         entered.count_down();
         co_await mhttp::Sleep(24h);
     }).has_value(), "suspended cancelable route");
@@ -447,7 +458,7 @@ auto router_failure_cleanup() -> void {
     catch (std::system_error const& error) { canceled = error.code() == mhttp::Error::Canceled; }
     stopper.join();
     Check(canceled, "runtime cancellation reaches route boundary");
-    Check(router.Get("/after-cancel", [](auto&, auto&) {}).has_value(), "cancellation releases reader");
+    Check(router.set_http_handler<mhttp::method::Get>("/after-cancel", [](auto&, auto&) {}).has_value(), "cancellation releases reader");
     Check(runtime.Join().has_value(), "canceled routing runtime drains");
 }
 
@@ -492,9 +503,9 @@ auto router_member_handlers() -> void {
         mhttp::server::Router router;
         auto endpoint = std::make_shared<MemberEndpoint>();
         lifetime = endpoint;
-        Check(router.Get("/member/:name", std::bind_front(&MemberEndpoint::Read, endpoint)).has_value(),
+        Check(router.set_http_handler<mhttp::method::Get>("/member/:name", std::bind_front(&MemberEndpoint::Read, endpoint)).has_value(),
             "register bound const member function");
-        Check(router.Get("/async/:name", std::bind_front(&MemberEndpoint::ReadAsync, endpoint)).has_value(),
+        Check(router.set_http_handler<mhttp::method::Get>("/async/:name", std::bind_front(&MemberEndpoint::ReadAsync, endpoint)).has_value(),
             "register bound asynchronous member function");
         endpoint.reset();
         Check(!lifetime.expired(), "owned bindings retain their target after the caller releases it");

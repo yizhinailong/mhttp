@@ -85,7 +85,7 @@ namespace mhttp::test {
         std::atomic<bool> first{};
         std::atomic<unsigned> after{}, posts{};
         server::HttpServer server{ runtime, { .body_bytes = 9, .request_chunk_bytes = 2 } };
-        Check(server.RouteLazy(Method::Post, "/read/:id", [&](auto& request, auto& response) -> Task<void> {
+        Check(server.set_lazy_http_handler<Method::Post>("/read/:id", [&](auto& request, auto& response) -> Task<void> {
             CheckEq(request.template PathParam<unsigned>("id"), std::optional{ 42u }, "lazy captures initialized before body");
             std::string body;
             std::optional<std::string> retained;
@@ -104,10 +104,10 @@ namespace mhttp::test {
             Check(response.Headers().Set("X-Sum", request.Trailers().Get("X-Sum")).has_value(), "publish decoded trailer");
             Check(response.SetContent(std::move(body), "application/octet-stream").has_value(), "echo decoded binary upload");
         }).has_value(), "register segmented lazy upload");
-        Check(server.RouteLazy(Method::Post, "/empty", [](auto&, auto& response) {
+        Check(server.set_lazy_http_handler<Method::Post>("/empty", [](auto&, auto& response) {
             Check(response.SetContent("empty", "text/plain").has_value(), "reply without reading empty framing");
         }).has_value(), "register empty lazy request");
-        Check(server.Get("/after", [&](auto&, auto& response) {
+        Check(server.set_http_handler<Method::Get>("/after", [&](auto&, auto& response) {
             ++after;
             Check(response.SetContent("after", "text/plain").has_value(), "pipeline successor");
         }).has_value(), "register successor");
@@ -181,16 +181,16 @@ namespace mhttp::test {
         std::atomic<unsigned> forbidden{}, after{}, posts{};
         server::HttpServer server{ runtime, { .request_chunk_bytes = 2 } };
         Check(server.Use(LazyAuthentication{}).has_value(), "authenticate before reads");
-        Check(server.RouteLazy(Method::Post, "/none", [](auto&, auto& response) {
+        Check(server.set_lazy_http_handler<Method::Post>("/none", [](auto&, auto& response) {
             Check(response.SetContent("none", "text/plain").has_value(), "reply without reading upload");
         }).has_value(), "register no-read route");
-        Check(server.RouteLazy(Method::Post, "/partial", [](auto& request, auto& response) -> Task<void> {
+        Check(server.set_lazy_http_handler<Method::Post>("/partial", [](auto& request, auto& response) -> Task<void> {
             auto prefix = co_await request.ReadBody();
             Check(prefix && *prefix && **prefix == "ab", "partial read consumes only one bounded chunk");
             Check(response.SetContent("partial", "text/plain").has_value(), "reply without draining remainder");
         }).has_value(), "register partial-read route");
-        Check(server.RouteLazy(Method::Post, "/auth", [&](auto&, auto&) { ++forbidden; }).has_value(), "protected route");
-        Check(server.Get("/after", [&](auto&, auto&) { ++after; }).has_value(), "forbidden pipeline successor");
+        Check(server.set_lazy_http_handler<Method::Post>("/auth", [&](auto&, auto&) { ++forbidden; }).has_value(), "protected route");
+        Check(server.set_http_handler<Method::Get>("/after", [&](auto&, auto&) { ++after; }).has_value(), "forbidden pipeline successor");
         Check(server.SetPostRoutingHandler([&](auto&, auto&) { ++posts; }).has_value(), "observe early final hooks");
         Check(server.BindToAnyPort("127.0.0.1") && server.Start(), "start rejecting upload listener");
         TransportRuntime peers;
@@ -251,7 +251,7 @@ namespace mhttp::test {
         Check(runtime.Start(4).has_value(), "start failed lazy runtime");
         std::atomic<unsigned> handlers{}, errors{}, posts{};
         server::HttpServer server{ runtime, { .read_timeout = 100ms, .body_bytes = 5, .request_chunk_bytes = 2 } };
-        Check(server.RouteLazy(Method::Post, "/read", [&](auto& request, auto& response) -> Task<void> {
+        Check(server.set_lazy_http_handler<Method::Post>("/read", [&](auto& request, auto& response) -> Task<void> {
             ++handlers;
             for (;;) {
                 auto chunk = co_await request.ReadBody();
@@ -312,7 +312,7 @@ namespace mhttp::test {
             std::atomic<bool> entered{};
             std::atomic<unsigned> active{}, posts{}, accesses{};
             server::HttpServer server{ runtime };
-            Check(server.RouteLazy(Method::Post, "/wait", [&](auto& request, auto&) -> Task<void> {
+            Check(server.set_lazy_http_handler<Method::Post>("/wait", [&](auto& request, auto&) -> Task<void> {
                 ++active;
                 /**
                  * @brief Observe route frame cleanup after cancellation propagation.

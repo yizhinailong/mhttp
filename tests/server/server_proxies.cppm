@@ -99,7 +99,7 @@ namespace mhttp::test {
         server::HttpServer server{ runtime, { .read_timeout = 2s, .header_bytes = 512,
             .header_fields = 8, .body_bytes = 8,
             .trusted_proxies = server::TrustedProxies::Create({ "127.0.0.1", "10.0.0.0/8" }).value() } };
-        Check(server.Get("/ip", [&](auto& request, auto& response) -> Task<void> {
+        Check(server.set_http_handler<mhttp::method::Get>("/ip", [&](auto& request, auto& response) -> Task<void> {
             ++handlers;
             auto const address = request.ClientIp();
             co_await Sleep(1ms);

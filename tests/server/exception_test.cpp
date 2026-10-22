@@ -48,7 +48,7 @@ auto exception_defaults() -> void {
     Check(runtime.Start(2).has_value(), "start exception runtime");
     for (unsigned scenario{}; scenario < 3; ++scenario) {
         mhttp::server::Router router;
-        Check(router.Get("/throw", [scenario](auto&, auto& response) -> mhttp::Task<void> {
+        Check(router.set_http_handler<mhttp::method::Get>("/throw", [scenario](auto&, auto& response) -> mhttp::Task<void> {
             Check(response.Headers().Set("Location", "/partial").has_value(), "partial response field");
             Check(response.SetContent("partial secret", "text/plain").has_value(), "partial response body");
             co_await mhttp::Sleep(1ms);
@@ -67,7 +67,7 @@ auto exception_defaults() -> void {
             Check(head->bytes.contains("Connection: close\r\n") && !head->keep_alive, "exception overrides persistence");
             Check(!head->bytes.contains("Injected") && !head->bytes.contains("secret"), "exception diagnostics stay out of headers");
         }
-        Check(router.Get("/ok", [](auto&, auto&) {}).has_value(), "exception releases routing lease");
+        Check(router.set_http_handler<mhttp::method::Get>("/ok", [](auto&, auto&) {}).has_value(), "exception releases routing lease");
         auto ok = dispatch(runtime, router, "/ok");
         CheckEq(ok.response.Status(), mhttp::Status::Ok, "subsequent requests remain usable");
         Check(!ok.outcome.close && ok.outcome.send_response && !ok.outcome.failure, "successful request policy independent");
@@ -82,7 +82,7 @@ auto exception_customization() -> void {
     Check(runtime.Start(2).has_value(), "start custom exception runtime");
     mhttp::server::Router router;
     std::vector<std::string> trace;
-    Check(router.Get("/throw", [&](auto&, auto&) { trace.push_back("handler"); throw 42; }).has_value(), "unknown throwing handler");
+    Check(router.set_http_handler<mhttp::method::Get>("/throw", [&](auto&, auto&) { trace.push_back("handler"); throw 42; }).has_value(), "unknown throwing handler");
     Check(router.SetExceptionHandler([&, value = std::make_unique<int>(7)](auto&, auto& response, std::exception_ptr failure) -> mhttp::Task<void> {
         trace.push_back("exception");
         co_await mhttp::Sleep(1ms);
@@ -145,7 +145,7 @@ auto exception_preparation() -> void {
     CheckEq(response.Status(), mhttp::Status::InternalServerError, "pre-routing safe default");
     CheckEq(exceptions, 1u, "one exception customization");
     CheckEq(posts, 1u, "one final response hook");
-    auto mutation = router.Get("/late", [](auto&, auto&) {});
+    auto mutation = router.set_http_handler<mhttp::method::Get>("/late", [](auto&, auto&) {});
     Check(!mutation && mutation.error() == mhttp::Error::Busy, "preparation failure retains response write lease");
 }
 
@@ -160,7 +160,7 @@ auto exception_nested_failures() -> void {
         unsigned exceptions{};
         unsigned errors{};
         unsigned posts{};
-        Check(router.Get("/throw", [scenario](auto&, auto& response) {
+        Check(router.set_http_handler<mhttp::method::Get>("/throw", [scenario](auto&, auto& response) {
             if (scenario != 1) { throw 42; }
             Check(response.SetError(mhttp::Status::Forbidden).has_value(), "ordinary error response");
         }).has_value(), "nested failure route");
@@ -194,8 +194,8 @@ auto exception_post_routing() -> void {
     mhttp::server::Router router;
     unsigned posts{};
     unsigned exceptions{};
-    Check(router.Get("/throw", [](auto&, auto&) {}).has_value(), "post failure route");
-    Check(router.Get("/ok", [](auto&, auto&) {}).has_value(), "unrelated successful route");
+    Check(router.set_http_handler<mhttp::method::Get>("/throw", [](auto&, auto&) {}).has_value(), "post failure route");
+    Check(router.set_http_handler<mhttp::method::Get>("/ok", [](auto&, auto&) {}).has_value(), "unrelated successful route");
     Check(router.SetExceptionHandler([&](auto&, auto&, std::exception_ptr) { ++exceptions; }).has_value(), "post failure exception observer");
     Check(router.SetPostRoutingHandler([&](auto& request, auto&) {
         ++posts;
@@ -219,7 +219,7 @@ auto exception_concurrency() -> void {
     mhttp::server::Router router;
     std::atomic<unsigned> exceptions{};
     std::atomic<unsigned> errors{};
-    Check(router.Get("/throw/:id", [](auto& request, auto&) { throw std::string{ request.PathParam("id") }; }).has_value(), "concurrent throwing route");
+    Check(router.set_http_handler<mhttp::method::Get>("/throw/:id", [](auto& request, auto&) { throw std::string{ request.PathParam("id") }; }).has_value(), "concurrent throwing route");
     Check(router.SetExceptionHandler([&](auto& request, auto& response, std::exception_ptr failure) -> mhttp::Task<void> {
         ++exceptions;
         co_await mhttp::Sleep(1ms);
@@ -244,7 +244,7 @@ auto exception_concurrency() -> void {
     callers.clear();
     CheckEq(exceptions.load(), 1000u, "all exception hooks completed");
     CheckEq(errors.load(), 1000u, "all error hooks completed");
-    Check(router.Get("/after", [](auto&, auto&) {}).has_value(), "concurrent failures drain every lease");
+    Check(router.set_http_handler<mhttp::method::Get>("/after", [](auto&, auto&) {}).has_value(), "concurrent failures drain every lease");
 }
 
 /**
@@ -274,7 +274,7 @@ auto exception_ownership() -> void {
     Check(weak.expired(), "direct exception Task releases callback");
     auto owned = std::make_shared<int>(7);
     std::weak_ptr<int> router_weak{ owned };
-    Check(router->Get("/throw", [](auto&, auto&) { throw 42; }).has_value(), "owned exception route");
+    Check(router->set_http_handler<mhttp::method::Get>("/throw", [](auto&, auto&) { throw 42; }).has_value(), "owned exception route");
     Check(router->SetExceptionHandler([owned = std::move(owned)](auto&, auto&, std::exception_ptr) -> mhttp::Task<void> {
         co_await mhttp::Sleep(1ms);
         CheckEq(*owned, 7, "orphaned router exception state remains alive");
@@ -310,7 +310,7 @@ auto exception_cancellation() -> void {
                 co_await mhttp::Sleep(24h);
             }).has_value(), "cancelable error hook");
         } else if (scenario == 2) {
-            Check(router.Get("/throw", [](auto&, auto&) { throw 42; }).has_value(), "cancelable exception source");
+            Check(router.set_http_handler<mhttp::method::Get>("/throw", [](auto&, auto&) { throw 42; }).has_value(), "cancelable exception source");
             Check(router.SetExceptionHandler([&](auto&, auto&, std::exception_ptr) -> mhttp::Task<void> {
                 entered.count_down();
                 co_await mhttp::Sleep(24h);
@@ -327,7 +327,7 @@ auto exception_cancellation() -> void {
         catch (std::system_error const& error) { canceled = error.code() == mhttp::Error::Canceled; }
         stopper.join();
         Check(canceled, "hook cancellation is propagated instead of converted to a response");
-        Check(router.Get("/after", [](auto&, auto&) {}).has_value(), "canceled hook releases configuration reader");
+        Check(router.set_http_handler<mhttp::method::Get>("/after", [](auto&, auto&) {}).has_value(), "canceled hook releases configuration reader");
         Check(runtime.Join().has_value(), "canceled hook runtime drains");
     }
 }

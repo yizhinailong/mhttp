@@ -62,7 +62,7 @@ auto client_ip_loopback() -> void {
             return false;
         }).has_value(), "configure metadata observation before routing");
         Check(server.Use(ClientIpAspect{}).has_value(), "observe metadata in middleware");
-        Check(server.Get("/ip", [&](auto& request, auto& response) -> mhttp::Task<void> {
+        Check(server.set_http_handler<mhttp::method::Get>("/ip", [&](auto& request, auto& response) -> mhttp::Task<void> {
             auto const address = request.ClientIp();
             auto const peer = request.RemoteEndpoint();
             co_await mhttp::Sleep(1ms);
@@ -142,7 +142,7 @@ auto client_ip_parallel() -> void {
     std::atomic<unsigned> handlers{};
     mhttp::server::HttpServer server{ runtime,
         { .trusted_proxies = mhttp::server::TrustedProxies::Create({ "127.0.0.1", "10.0.0.0/8" }).value() } };
-    Check(server.Get("/ip", [&](auto& request, auto& response) -> mhttp::Task<void> {
+    Check(server.set_http_handler<mhttp::method::Get>("/ip", [&](auto& request, auto& response) -> mhttp::Task<void> {
         auto const address = request.ClientIp();
         co_await mhttp::Sleep(2ms);
         CheckEq(request.ClientIp(), address, "concurrent requests retain independent IP storage");
@@ -183,7 +183,7 @@ auto client_ip_ipv6() -> void {
         auto policy = mhttp::server::TrustedProxies::Create(
             trusted ? std::vector<std::string>{ "::1", "fd00::/8" } : std::vector<std::string>{ "0.0.0.0/0" }).value();
         mhttp::server::HttpServer server{ runtime, { .ipv6_only = true, .trusted_proxies = policy } };
-        Check(server.Get("/ip", [](auto& request, auto& response) {
+        Check(server.set_http_handler<mhttp::method::Get>("/ip", [](auto& request, auto& response) {
             CheckEq(request.RemoteEndpoint().address, "::1", "real IPv6 peer remains unchanged");
             Check(response.SetContent(request.ClientIp(), "text/plain").has_value(), "IPv6 resolved address");
         }).has_value(), "configure IPv6 IP endpoint");

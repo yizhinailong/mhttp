@@ -17,7 +17,7 @@ using namespace std::chrono_literals;
  * @return Dynamic loopback listening port.
  */
 auto start_keep_alive_server(mhttp::server::HttpServer& server) -> std::uint16_t {
-    Check(server.Get("/", [](auto& request, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/", [](auto& request, auto& response) {
         Check(response.Headers().Set("X-Peer-Port", std::to_string(request.RemoteEndpoint().port)).has_value(), "return observed peer port");
         Check(response.SetContent("ready", "text/plain").has_value(), "persistent echo content");
     }).has_value(), "register persistence route");

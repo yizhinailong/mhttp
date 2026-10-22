@@ -30,7 +30,7 @@ auto expect_binary_round_trip() -> void {
     Check(runtime.Start(4).has_value(), "start Expect round-trip runtime");
     mhttp::server::HttpServer server{ runtime };
     std::atomic<unsigned> uploads{};
-    Check(server.Post("/upload", [&](auto& request, auto& response) -> mhttp::Task<void> {
+    Check(server.set_http_handler<mhttp::method::Post>("/upload", [&](auto& request, auto& response) -> mhttp::Task<void> {
         ++uploads;
         co_await mhttp::Sleep(1ms);
         Check(response.Headers().Set("X-Expect", request.Header("Expect")).has_value(), "echo actual expectation field");
@@ -71,7 +71,7 @@ auto expect_server_admission() -> void {
     Check(runtime.Start(4).has_value(), "start Expect admission runtime");
     mhttp::server::HttpServer server{ runtime, { .body_bytes = 1024 } };
     std::atomic<unsigned> calls{};
-    Check(server.Post("/upload", [&](auto& request, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Post>("/upload", [&](auto& request, auto& response) {
         ++calls;
         Check(response.SetContent(request.Body(), "text/plain").has_value(), "echo bounded admitted body");
     }).has_value(), "register admission sentinel");
@@ -96,13 +96,13 @@ auto expect_redirect_ownership() -> void {
     mhttp::server::HttpServer destination{ runtime };
     std::string const body(128 * 1024, 'b');
     std::atomic<unsigned> posts{}, gets{}, early{}, after{};
-    Check(destination.Post("/post", [&](auto& request, auto& response) {
+    Check(destination.set_http_handler<mhttp::method::Post>("/post", [&](auto& request, auto& response) {
         ++posts;
         CheckEq(request.Body(), body, "redirect preserves an owned pending or already transmitted body");
         CheckEq(request.Header("Expect"), std::string_view{ "100-continue" }, "body-preserving redirect negotiates its own 100");
         Check(response.SetContent(request.Body(), "text/plain").has_value(), "return final redirected upload");
     }).has_value(), "register redirected upload");
-    Check(destination.Get("/get", [&](auto& request, auto& response) {
+    Check(destination.set_http_handler<mhttp::method::Get>("/get", [&](auto& request, auto& response) {
         ++gets;
         Check(request.Body().empty() && request.Header("Expect").empty(), "303 drops both promised body and Expect");
         Check(response.SetContent("rewritten", "text/plain").has_value(), "acknowledge redirected GET");
@@ -119,7 +119,7 @@ auto expect_redirect_ownership() -> void {
             ? mhttp::Status::SeeOther : mhttp::Status::TemporaryRedirect).has_value(), "set early cross-origin redirect");
         return true;
     }).has_value(), "register header-only redirects");
-    Check(source.Post("/after", [&](auto& request, auto& response) {
+    Check(source.set_http_handler<mhttp::method::Post>("/after", [&](auto& request, auto& response) {
         ++after;
         CheckEq(request.Body(), body, "source fully receives the upload after its own 100");
         Check(response.SetRedirect(origin + "/post", mhttp::Status::TemporaryRedirect).has_value(), "redirect an already uploaded body");

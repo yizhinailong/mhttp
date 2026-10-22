@@ -87,7 +87,7 @@ namespace mhttp::test {
         Check(runtime.Start(4).has_value(), "start raw multipart runtime");
         server::HttpServer server{ runtime, { .read_timeout = 1s } };
         std::atomic<unsigned> calls{};
-        Check(server.Post("/upload", [&calls](auto& request, auto& response) {
+        Check(server.set_http_handler<mhttp::method::Post>("/upload", [&calls](auto& request, auto& response) {
             ++calls;
             auto form = request.Multipart();
             if (Check(form.has_value(), "raw fragmented upload is valid multipart")) {
@@ -111,7 +111,7 @@ namespace mhttp::test {
         peers.Run(server_multipart_scenario(peers.Executor(), std::move(endpoint), stop_ready));
         stopper.join();
         CheckEq(calls.load(), 2U, "only two complete uploads execute application parsing");
-        Check(server.Get("/after", [](auto&, auto&) {}).has_value(), "stopped multipart intake releases all routing leases");
+        Check(server.set_http_handler<mhttp::method::Get>("/after", [](auto&, auto&) {}).has_value(), "stopped multipart intake releases all routing leases");
     }
 
 } // namespace mhttp::test

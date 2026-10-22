@@ -58,11 +58,11 @@ namespace {
      */
     auto install_routes(mhttp::server::HttpServer& server) -> void {
         auto notes = std::make_shared<Notes>();
-        require_success(server.Get("/health", [](auto&, auto& response) -> mhttp::Task<void> {
+        require_success(server.set_http_handler<mhttp::method::Get>("/health", [](auto&, auto& response) -> mhttp::Task<void> {
             co_await mhttp::Sleep(1ms);
             require_success(response.SetContent("ready\n", "text/plain"));
         }));
-        require_success(server.Get("/notes", [notes](auto& request, auto& response) {
+        require_success(server.set_http_handler<mhttp::method::Get>("/notes", [notes](auto& request, auto& response) {
             auto const limit = request.Query().template Get<unsigned>("limit").value_or(
                 request.Query().Has("limit") ? 0U : 10U);
             if (limit == 0 || limit > 100 || request.Query().Count("limit") > 1) {
@@ -78,7 +78,7 @@ namespace {
             }
             respond(response, mhttp::Status::Ok, std::move(body));
         }));
-        require_success(server.Post("/notes", [notes](auto& request, auto& response) {
+        require_success(server.set_http_handler<mhttp::method::Post>("/notes", [notes](auto& request, auto& response) {
             if (!valid_text(request.Body())) {
                 respond(response, mhttp::Status::BadRequest, "send 1-256 text bytes without control characters\n");
                 return;
@@ -98,7 +98,7 @@ namespace {
             require_success(response.Headers().Set("Location", std::format("/notes/{}", id)));
             respond(response, mhttp::Status::Created, request.Body());
         }));
-        require_success(server.Get("/notes/:id", [notes](auto& request, auto& response) {
+        require_success(server.set_http_handler<mhttp::method::Get>("/notes/:id", [notes](auto& request, auto& response) {
             auto const id = request.template PathParam<std::uint64_t>("id");
             if (!id || *id == 0) {
                 respond(response, mhttp::Status::BadRequest, "invalid note ID\n");
@@ -111,7 +111,8 @@ namespace {
             }
             respond(response, text ? mhttp::Status::Ok : mhttp::Status::NotFound, text.value_or("note not found\n"));
         }));
-        auto update = [notes](auto& request, auto& response) {
+        require_success(server.set_http_handler<mhttp::method::Put, mhttp::method::Patch>(
+            "/notes/:id", [notes](auto& request, auto& response) {
             auto const id = request.template PathParam<std::uint64_t>("id");
             if (!id || *id == 0 || !valid_text(request.Body())) {
                 respond(response, mhttp::Status::BadRequest, "invalid note ID or text\n");
@@ -127,14 +128,12 @@ namespace {
             }
             respond(response, found ? mhttp::Status::Ok : mhttp::Status::NotFound,
                 found ? request.Body() : "note not found\n");
-        };
-        require_success(server.Put("/notes/:id", update));
-        require_success(server.Patch("/notes/:id", std::move(update)));
-        require_success(server.Options("/notes/:id", [](auto&, auto& response) {
+        }));
+        require_success(server.set_http_handler<mhttp::method::Options>("/notes/:id", [](auto&, auto& response) {
             require_success(response.Headers().Set("Allow", "GET, HEAD, PUT, PATCH, DELETE, OPTIONS"));
             respond(response, mhttp::Status::NoContent, "");
         }));
-        require_success(server.Delete("/notes/:id", [notes](auto& request, auto& response) {
+        require_success(server.set_http_handler<mhttp::method::Delete>("/notes/:id", [notes](auto& request, auto& response) {
             auto const id = request.template PathParam<std::uint64_t>("id");
             if (!id || *id == 0) {
                 respond(response, mhttp::Status::BadRequest, "invalid note ID\n");

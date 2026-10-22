@@ -21,15 +21,15 @@ auto redirect_deadlines() -> void {
     auto first_port = first.BindToAnyPort("127.0.0.1");
     auto second_port = second.BindToAnyPort("127.0.0.1");
     Check(first_port && second_port, "bind redirect budget peers");
-    Check(first.Get("/one", [second_port](auto&, auto& response) -> mhttp::Task<void> {
+    Check(first.set_http_handler<mhttp::method::Get>("/one", [second_port](auto&, auto& response) -> mhttp::Task<void> {
         co_await mhttp::Sleep(100ms);
         Check(response.SetRedirect("http://127.0.0.1:" + std::to_string(*second_port) + "/two").has_value(), "first delayed redirect");
     }).has_value(), "register first budget hop");
-    Check(second.Get("/two", [first_port](auto&, auto& response) -> mhttp::Task<void> {
+    Check(second.set_http_handler<mhttp::method::Get>("/two", [first_port](auto&, auto& response) -> mhttp::Task<void> {
         co_await mhttp::Sleep(100ms);
         Check(response.SetRedirect("http://127.0.0.1:" + std::to_string(*first_port) + "/three").has_value(), "second delayed redirect");
     }).has_value(), "register second budget hop");
-    Check(first.Get("/three", [](auto&, auto& response) -> mhttp::Task<void> {
+    Check(first.set_http_handler<mhttp::method::Get>("/three", [](auto&, auto& response) -> mhttp::Task<void> {
         co_await mhttp::Sleep(100ms);
         Check(response.SetContent("complete", "text/plain").has_value(), "final delayed response");
     }).has_value(), "register final budget hop");
@@ -67,7 +67,7 @@ auto untimed_cancellation() -> void {
     Check(server_runtime.Start(4).has_value(), "start untimed cancellation peer runtime");
     std::counting_semaphore<2> entered{ 0 };
     mhttp::server::HttpServer server{ server_runtime };
-    Check(server.Get("/", [&entered](auto&, auto&) -> mhttp::Task<void> {
+    Check(server.set_http_handler<mhttp::method::Get>("/", [&entered](auto&, auto&) -> mhttp::Task<void> {
         entered.release();
         co_await mhttp::Sleep(5s);
     }).has_value(), "register untimed pending handler");

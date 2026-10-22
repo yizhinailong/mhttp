@@ -98,14 +98,14 @@ namespace mhttp::test {
         server::HttpServer server{ runtime };
         Check(server.Use(WireTraceAspect{ "global1" }).has_value(), "register first global aspect");
         Check(server.Use(WireTraceAspect{ "global2" }).has_value(), "register second global aspect");
-        Check(server.Get("/allow/:id", [](auto&, auto& response) -> Task<void> {
+        Check(server.set_http_handler<mhttp::method::Get>("/allow/:id", [](auto&, auto& response) -> Task<void> {
             co_await Sleep(1ms);
             Check(response.Headers().Add("X-Trace", "handler").has_value(), "record asynchronous handler");
             Check(response.SetContent("allowed", "text/plain").has_value(), "allowed response");
         }, WireTraceAspect{ "route1", true }, WireTraceAspect{ "route2", true }).has_value(), "register ordered route aspects");
-        Check(server.Get("/deny/:id", [](auto&, auto&) { Check(false, "denied handler must not run"); },
+        Check(server.set_http_handler<mhttp::method::Get>("/deny/:id", [](auto&, auto&) { Check(false, "denied handler must not run"); },
             WireTraceAspect{ "route1", true, true }, WireTraceAspect{ "route2", true }).has_value(), "register rejecting Before");
-        Check(server.Get("/intercept", [](auto&, auto&) { Check(false, "intercepted route must not run"); }).has_value(),
+        Check(server.set_http_handler<mhttp::method::Get>("/intercept", [](auto&, auto&) { Check(false, "intercepted route must not run"); }).has_value(),
             "register intercepted route sentinel");
         Check(server.SetNotFoundHandler([](auto& request, auto& response) {
             Check(response.Headers().Add("X-Trace", "missing").has_value(), "trace custom 404 handler");
@@ -210,7 +210,7 @@ namespace mhttp::test {
         Check(runtime.Start(4).has_value(), "start concurrent exception runtime");
         std::atomic<unsigned> standard{}, unknown{}, errors{}, posts{}, active{}, peak{}, initial{};
         server::HttpServer server{ runtime };
-        Check(server.Get("/fail/:kind/:id", [](auto& request, auto&) {
+        Check(server.set_http_handler<mhttp::method::Get>("/fail/:kind/:id", [](auto& request, auto&) {
             if (request.PathParam("kind") == "standard") { throw std::runtime_error{ "private failure\r\nInjected: yes" }; }
             throw 42;
         }).has_value(), "register concurrent failing handler");

@@ -105,7 +105,7 @@ namespace mhttp::test {
         std::atomic<unsigned> after{}, active{};
         server::HttpServer server{ runtime, { .write_timeout = 2s,
             .max_response_bytes = 512, .stream_chunk_bytes = 512 } };
-        Check(server.Get("/stream", [&](auto&, auto& response) {
+        Check(server.set_http_handler<Method::Get>("/stream", [&](auto&, auto& response) {
             Check(response.SetChunkedContentProvider([&](auto& writer) -> Task<Result<void>> {
                 StreamFrameLease lease{ active };
                 auto first = co_await writer.Write("first");
@@ -114,11 +114,11 @@ namespace mhttp::test {
                 co_return co_await writer.Write("second");
             }).has_value(), "configure gated streaming producer");
         }).has_value(), "register incremental stream");
-        Check(server.Get("/after", [&](auto&, auto& response) {
+        Check(server.set_http_handler<Method::Get>("/after", [&](auto&, auto& response) {
             ++after;
             Check(response.SetContent("after", "text/plain").has_value(), "pipeline probe content");
         }).has_value(), "register post-stream pipeline probe");
-        Check(server.Get("/edge", [](auto&, auto& response) {
+        Check(server.set_http_handler<Method::Get>("/edge", [](auto&, auto& response) {
             Check(response.SetChunkedContentProvider([](auto& writer) -> Task<Result<void>> {
                 co_return co_await writer.Write(std::string(505, 'x'));
             }).has_value(), "configure exact framed chunk bound");
@@ -187,7 +187,7 @@ namespace mhttp::test {
         Check(server.SetAccessLogger([&](auto const&, auto const&, auto) { ++accesses; }).has_value(), "observe complete output only");
         Check(server.SetErrorHandler([&](auto&, auto&) { ++errors; }).has_value(), "observe forbidden error-hook replay");
         Check(server.SetPostRoutingHandler([&](auto&, auto&) { ++posts; }).has_value(), "observe single finalization");
-        Check(server.Get("/fail/:mode", [&](auto& request, auto& response) {
+        Check(server.set_http_handler<Method::Get>("/fail/:mode", [&](auto& request, auto& response) {
             auto mode = std::string{ request.PathParam("mode") };
             Check(response.SetChunkedContentProvider([&, mode = std::move(mode)](auto& writer) -> Task<Result<void>> {
                 StreamFrameLease lease{ active };
@@ -210,7 +210,7 @@ namespace mhttp::test {
                 co_return co_await writer.Finish(std::move(trailers));
             }).has_value(), "defer failing raw producer");
         }).has_value(), "register raw failing stream");
-        Check(server.Get("/after", [&](auto&, auto&) { ++after; }).has_value(), "register hidden successor probe");
+        Check(server.set_http_handler<Method::Get>("/after", [&](auto&, auto&) { ++after; }).has_value(), "register hidden successor probe");
         Check(server.BindToAnyPort("127.0.0.1").has_value() && server.Start().has_value(), "start failed stream listener");
         TransportRuntime peers;
         peers.Run(server_stream_failure_scenario(peers.Executor(), *server.LocalEndpoint(), reset_ready, failures));
@@ -259,7 +259,7 @@ namespace mhttp::test {
             if (record.event == server::LogEvent::SessionFailure && record.error == Error::WriteTimeout) { ++timeouts; }
         }).has_value(), "observe streamed write expiry");
         Check(server.SetAccessLogger([&](auto const&, auto const&, auto) { ++accesses; }).has_value(), "reject partial stream access");
-        Check(server.Get("/large", [&](auto&, auto& response) {
+        Check(server.set_http_handler<Method::Get>("/large", [&](auto&, auto& response) {
             Check(response.SetChunkedContentProvider([&](auto& writer) -> Task<Result<void>> {
                 StreamFrameLease lease{ active };
                 for (unsigned index{}; index != 1024; ++index) {

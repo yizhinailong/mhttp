@@ -81,23 +81,22 @@ namespace mhttp::test {
         Check(runtime.Start(4).has_value(), "start listener runtime");
         server::HttpServer server{ runtime };
         std::atomic<int> handlers{};
-        for (auto method : { Method::Get, Method::Head, Method::Post, Method::Put,
-                 Method::Patch, Method::Delete, Method::Options, Method::Trace }) {
-            Check(server.Route(method, "/item/:id", [&](auto& request, auto& response) -> Task<void> {
-                Check(Runtime::IsIoThread(), "listener handler starts on I/O execution");
-                CheckEq(request.template PathParam<int>("id"), Result<int>{ 42 }, "typed path capture reaches handler");
-                CheckEq(request.Query().Get("q"), "raw query", "query and body coexist");
-                CheckEq(request.Body(), "abc", "all methods receive complete buffered bodies");
-                CheckEq(request.RemoteEndpoint().address, "127.0.0.1", "raw peer address snapshot");
-                auto value = co_await Offload([method = std::string{ request.MethodString() }] {
-                    Check(!Runtime::IsIoThread(), "Offload executes outside I/O threads");
-                    return method;
-                });
-                Check(Runtime::IsIoThread(), "handler resumes on I/O execution after Offload");
-                ++handlers;
-                Check(response.SetContent(std::move(value), "text/plain").has_value(), "set method content");
-            }).has_value(), "register common method");
-        }
+        Check(server.set_http_handler<Method::Get, Method::Head, Method::Post, Method::Put,
+                                      Method::Patch, Method::Delete, Method::Options, Method::Trace>(
+            "/item/:id", [&](auto& request, auto& response) -> Task<void> {
+            Check(Runtime::IsIoThread(), "listener handler starts on I/O execution");
+            CheckEq(request.template PathParam<int>("id"), Result<int>{ 42 }, "typed path capture reaches handler");
+            CheckEq(request.Query().Get("q"), "raw query", "query and body coexist");
+            CheckEq(request.Body(), "abc", "all methods receive complete buffered bodies");
+            CheckEq(request.RemoteEndpoint().address, "127.0.0.1", "raw peer address snapshot");
+            auto value = co_await Offload([method = std::string{ request.MethodString() }] {
+                Check(!Runtime::IsIoThread(), "Offload executes outside I/O threads");
+                return method;
+            });
+            Check(Runtime::IsIoThread(), "handler resumes on I/O execution after Offload");
+            ++handlers;
+            Check(response.SetContent(std::move(value), "text/plain").has_value(), "set method content");
+        }).has_value(), "register common method");
         TransportRuntime peers;
         for (unsigned iteration{}; iteration < 2; ++iteration) {
             Check(server.BindToAnyPort("127.0.0.1").has_value(), "bind real listener");
@@ -140,7 +139,7 @@ namespace mhttp::test {
             Runtime runtime;
             Check(runtime.Start(4).has_value(), "start idle runtime");
             auto server = std::make_unique<server::HttpServer>(runtime);
-            Check(server->Get("/", [](auto&, auto& response) {
+            Check(server->set_http_handler<Method::Get>("/", [](auto&, auto& response) {
                 Check(response.SetContent("idle", "text/plain").has_value(), "idle response");
             }).has_value(), "register idle handler");
             Check(server->BindToAnyPort("127.0.0.1").has_value(), "bind idle listener");
@@ -221,7 +220,7 @@ namespace mhttp::test {
             server::HttpServer server{ runtime };
             std::latch entered{ 3 };
             std::atomic<int> active{};
-            Check(server.Get("/", [&](auto&, auto&) -> Task<void> {
+            Check(server.set_http_handler<Method::Get>("/", [&](auto&, auto&) -> Task<void> {
                 ActiveHandler owner{ active };
                 entered.count_down();
                 co_await Sleep(24h);
@@ -238,7 +237,7 @@ namespace mhttp::test {
             }
             Check(server.Stop().has_value(), "server stop drains all in-flight user Tasks");
             CheckEq(active.load(), 0, "stop completion follows every handler frame destruction");
-            Check(server.Get("/after", [](auto&, auto&) {}).has_value(), "no readers remain after in-flight stop");
+            Check(server.set_http_handler<Method::Get>("/after", [](auto&, auto&) {}).has_value(), "no readers remain after in-flight stop");
         }
     }
 
@@ -255,7 +254,7 @@ namespace mhttp::test {
         Check(server.SetLogger([&](auto const&) { ++diagnostics; }).has_value(), "observe offload cancellation");
         Check(server.SetAccessLogger([&](auto const&, auto const&, auto) { ++accesses; }).has_value(),
             "observe canceled response writes");
-        Check(server.Get("/", [&](auto& request, auto&) -> Task<void> {
+        Check(server.set_http_handler<Method::Get>("/", [&](auto& request, auto&) -> Task<void> {
             ActiveHandler owner{ active };
             co_await Offload([&] {
                 entered.count_down();
@@ -281,7 +280,7 @@ namespace mhttp::test {
         Check(drained && active == 0, "AsyncStop finishes after worker and handler cleanup");
         CheckEq(diagnostics.load(), 0, "explicit cancellation is not a session diagnostic");
         CheckEq(accesses.load(), 0, "canceled handler never completes a response for access observation");
-        Check(server.Get("/after", [](auto&, auto&) {}).has_value(), "Offload drain releases route readers");
+        Check(server.set_http_handler<Method::Get>("/after", [](auto&, auto&) {}).has_value(), "Offload drain releases route readers");
     }
 
     /**
@@ -316,7 +315,7 @@ namespace mhttp::test {
         server::ServerOptions options;
         Check(options.default_headers.Set("X-Server", "default").has_value(), "configure server default field");
         server::HttpServer server{ runtime, options };
-        Check(server.Get("/:name", [](auto& request, auto& response) {
+        Check(server.set_http_handler<Method::Get>("/:name", [](auto& request, auto& response) {
             if (request.Path() == "/standard") { throw std::runtime_error{ "secret failure\r\nInjected: evil" }; }
             if (request.Path() == "/unknown") { throw 42; }
             Check(response.SetContent("healthy", "text/plain").has_value(), "healthy response after failures");
@@ -353,7 +352,7 @@ namespace mhttp::test {
             if (started_runtime) { Check(runtime.Start(4).has_value(), "start shared Listen request runtime"); }
             server::HttpServer server{ runtime };
             std::thread::id listening_thread;
-            Check(server.Get("/", [&](auto&, auto& response) -> Task<void> {
+            Check(server.set_http_handler<Method::Get>("/", [&](auto&, auto& response) -> Task<void> {
                 Check(Runtime::IsIoThread(), "Listen handler runs in Runtime execution");
                 if (!started_runtime) { CheckEq(std::this_thread::get_id(), listening_thread, "Listen runs on caller"); }
                 co_await Sleep(1ms);
@@ -438,7 +437,7 @@ namespace mhttp::test {
             Check(!record.native_error && !record.exception, "capacity rejection has no native or callback failure");
             ++rejected;
         }).has_value(), "observe capacity rejections");
-        Check(server.Get("/", [&](auto&, auto& response) {
+        Check(server.set_http_handler<Method::Get>("/", [&](auto&, auto& response) {
             ++handlers;
             Check(response.SetContent("capacity", "text/plain").has_value(), "capacity response");
         }).has_value(), "register capacity route");
@@ -558,7 +557,7 @@ namespace mhttp::test {
         TransportRuntime peers;
         for (bool ipv6_only : { false, true }) {
             server::HttpServer server{ runtime, { .ipv6_only = ipv6_only } };
-            Check(server.Get("/", [](auto&, auto& response) {
+            Check(server.set_http_handler<Method::Get>("/", [](auto&, auto& response) {
                 Check(response.SetContent("IPv6", "text/plain").has_value(), "IPv6 response");
             }).has_value(), "register IPv6 route");
             auto port = server.BindToAnyPort("::");
@@ -616,15 +615,15 @@ namespace mhttp::test {
         Runtime runtime;
         Check(runtime.Start(4).has_value(), "start access observer runtime");
         server::HttpServer server{ runtime, { .max_response_bytes = 512 } };
-        Check(server.Get("/time", [](auto&, auto& response) -> Task<void> {
+        Check(server.set_http_handler<Method::Get>("/time", [](auto&, auto& response) -> Task<void> {
             co_await Sleep(5ms);
             Check(response.SetContent("timed", "text/plain").has_value(), "timed response");
         }).has_value(), "register timed route");
-        Check(server.Post("/echo", [](auto& request, auto& response) {
+        Check(server.set_http_handler<Method::Post>("/echo", [](auto& request, auto& response) {
             Check(response.SetContent(request.Body(), "text/plain").has_value(), "logged Expect response");
         }).has_value(), "register logged upload");
-        Check(server.Get("/fail", [](auto&, auto&) { throw 42; }).has_value(), "register logged exception");
-        Check(server.Get("/large", [](auto&, auto& response) {
+        Check(server.set_http_handler<Method::Get>("/fail", [](auto&, auto&) { throw 42; }).has_value(), "register logged exception");
+        Check(server.set_http_handler<Method::Get>("/large", [](auto&, auto& response) {
             Check(response.SetContent(std::string(2048, 'x'), "text/plain").has_value(), "oversized application response");
         }).has_value(), "register fallback response");
         Check(server.SetPostRoutingHandler([](auto& request, auto& response) {
@@ -691,7 +690,7 @@ namespace mhttp::test {
         server::HttpServer server{ runtime };
         std::atomic<int> calls{};
         std::atomic<int> failures{};
-        Check(server.Get("/", [](auto&, auto& response) {
+        Check(server.set_http_handler<Method::Get>("/", [](auto&, auto& response) {
             Check(response.SetContent("observed", "text/plain").has_value(), "observed response");
         }).has_value(), "register observed route");
         Check(server.SetAccessLogger([&](auto const&, auto const&, auto) { ++calls; throw 42; }).has_value(),
@@ -758,16 +757,16 @@ namespace mhttp::test {
         Runtime runtime;
         Check(runtime.Start(4).has_value(), "start diagnostic observation runtime");
         server::HttpServer server{ runtime, { .read_timeout = 250ms, .max_response_bytes = 512 } };
-        Check(server.Get("/throw", [](auto&, auto&) { throw std::runtime_error{ "private diagnostic detail" }; }).has_value(),
+        Check(server.set_http_handler<Method::Get>("/throw", [](auto&, auto&) { throw std::runtime_error{ "private diagnostic detail" }; }).has_value(),
             "register diagnosed handler fault");
-        Check(server.Get("/large", [](auto&, auto& response) {
+        Check(server.set_http_handler<Method::Get>("/large", [](auto&, auto& response) {
             Check(response.SetContent(std::string(2048, 'x'), "text/plain").has_value(), "oversized diagnostic response");
         }).has_value(), "register diagnosed output bound");
-        Check(server.Get("/ok", [](auto&, auto& response) {
+        Check(server.set_http_handler<Method::Get>("/ok", [](auto&, auto& response) {
             Check(response.SetContent("ok", "text/plain").has_value(), "healthy diagnostic sentinel");
         }).has_value(), "register healthy diagnostic sentinel");
-        Check(server.Get("/access-fail", [](auto&, auto&) {}).has_value(), "register failing access observer route");
-        Check(server.Post("/body", [](auto&, auto&) {}).has_value(), "register truncated upload route");
+        Check(server.set_http_handler<Method::Get>("/access-fail", [](auto&, auto&) {}).has_value(), "register failing access observer route");
+        Check(server.set_http_handler<Method::Post>("/body", [](auto&, auto&) {}).has_value(), "register truncated upload route");
         Check(server.SetPostRoutingHandler([](auto& request, auto&) {
             if (request.Path() == "/post-fail") { throw 7; }
         }).has_value(), "register diagnosed post failure");

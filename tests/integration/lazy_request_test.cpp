@@ -29,7 +29,7 @@ auto lazy_binary_persistence() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(4).has_value(), "start lazy runtime");
     mhttp::server::HttpServer server{ runtime, { .body_bytes = 8192, .request_chunk_bytes = 7 } };
-    Check(server.RouteLazy(mhttp::Method::Post, "/lazy/:id", [owned = std::make_unique<unsigned>(7)](
+    Check(server.set_lazy_http_handler<mhttp::method::Post>("/lazy/:id", [owned = std::make_unique<unsigned>(7)](
         auto& request, auto& response
     ) -> mhttp::Task<void> {
         CheckEq(request.template PathParam<unsigned>("id"), std::optional{ 42u }, "lazy path captures exist before intake");
@@ -50,7 +50,7 @@ auto lazy_binary_persistence() -> void {
         Check(end && !*end && request.Body().empty(), "repeated end is stable without aggregation");
         Check(response.SetContent(std::move(body), "application/octet-stream").has_value(), "echo streamed binary content");
     }).has_value(), "register move-only lazy route");
-    Check(server.Post("/buffered", [](auto& request, auto& response) -> mhttp::Task<void> {
+    Check(server.set_http_handler<mhttp::method::Post>("/buffered", [](auto& request, auto& response) -> mhttp::Task<void> {
         auto read = co_await request.ReadBody();
         Check(!read && read.error() == mhttp::Error::InvalidRequest, "buffered routes have no reader");
         Check(response.SetContent(request.Body(), "application/octet-stream").has_value(), "ordinary route retains buffered body");
@@ -80,7 +80,7 @@ auto lazy_failure_and_retirement() -> void {
     std::latch accessed{ 1 };
     std::atomic<unsigned> errors{}, posts{};
     mhttp::server::HttpServer server{ runtime, { .read_timeout = 50ms } };
-    Check(server.RouteLazy(mhttp::Method::Post, "/expire", [&](auto& request, auto& response) -> mhttp::Task<void> {
+    Check(server.set_lazy_http_handler<mhttp::method::Post>("/expire", [&](auto& request, auto& response) -> mhttp::Task<void> {
         late.emplace(request.ReadBody());
         co_await mhttp::Sleep(100ms);
         auto expired = co_await request.ReadBody();
@@ -116,7 +116,7 @@ auto lazy_registration() -> void {
     mhttp::server::Router router;
     auto handler = [](auto&, auto&) {};
     for (bool lazy : { true, false, true }) {
-        auto registered = lazy ? router.RouteLazy(mhttp::Method::Post, "/item", handler) : router.Post("/item", handler);
+        auto registered = lazy ? router.set_lazy_http_handler<mhttp::method::Post>("/item", handler) : router.set_http_handler<mhttp::method::Post>("/item", handler);
         Check(registered.has_value(), "replace intake policy with binding");
         auto request = mhttp::detail::ServerRequestAccess::Create({ .method = "POST", .target = "/item" });
         mhttp::server::Response response;
@@ -124,7 +124,7 @@ auto lazy_registration() -> void {
         Check(route.handler && route.lazy == lazy, "selected callback retains its matching intake policy");
         auto read = mhttp::SyncWait(runtime, request.ReadBody());
         Check(!read && read.error() == mhttp::Error::InvalidRequest, "standalone preparation never invents body input");
-        auto busy = router.RouteLazy(mhttp::Method::Post, "/other", handler);
+        auto busy = router.set_lazy_http_handler<mhttp::method::Post>("/other", handler);
         Check(!busy && busy.error() == mhttp::Error::Busy, "lazy routes retain existing configuration lease guard");
     }
     Check(!mhttp::detail::validate_server_options({ .request_chunk_bytes = 0 }), "zero read chunk bound is rejected");
@@ -139,7 +139,7 @@ auto lazy_response_and_reuse() -> void {
     std::optional<mhttp::Task<mhttp::Result<std::optional<std::string>>>> late;
     std::latch next_entered{ 1 };
     mhttp::server::HttpServer server{ runtime, { .read_timeout = 50ms, .request_chunk_bytes = 3 } };
-    Check(server.RouteLazy(mhttp::Method::Post, "/echo", [&](auto& request, auto& response) -> mhttp::Task<void> {
+    Check(server.set_lazy_http_handler<mhttp::method::Post>("/echo", [&](auto& request, auto& response) -> mhttp::Task<void> {
         std::string body;
         for (;;) {
             auto chunk = co_await request.ReadBody();
@@ -156,7 +156,7 @@ auto lazy_response_and_reuse() -> void {
             co_return co_await writer.Write(body);
         }).has_value(), "defer owned streamed echo after complete upload");
     }).has_value(), "combine lazy upload and streamed response");
-    Check(server.Get("/next", [&](auto&, auto& response) -> mhttp::Task<void> {
+    Check(server.set_http_handler<mhttp::method::Get>("/next", [&](auto&, auto& response) -> mhttp::Task<void> {
         next_entered.count_down();
         co_await mhttp::Sleep(100ms);
         Check(response.SetContent("next", "text/plain").has_value(), "complete successor after old intake deadline");
@@ -182,7 +182,7 @@ auto lazy_completed_body_deadline() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(4).has_value(), "start completed-intake runtime");
     mhttp::server::HttpServer server{ runtime, { .read_timeout = 100ms, .request_chunk_bytes = 3 } };
-    Check(server.RouteLazy(mhttp::Method::Post, "/read", [](auto& request, auto& response) -> mhttp::Task<void> {
+    Check(server.set_lazy_http_handler<mhttp::method::Post>("/read", [](auto& request, auto& response) -> mhttp::Task<void> {
         std::string body;
         while (body.size() != 5) {
             auto chunk = co_await request.ReadBody();
@@ -194,7 +194,7 @@ auto lazy_completed_body_deadline() -> void {
         Check(end && !*end, "end of an already consumed body requires no timed read");
         Check(response.SetContent(std::move(body), "text/plain").has_value(), "reply after application work");
     }).has_value(), "register completed-body reader");
-    Check(server.Get("/next", [](auto&, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/next", [](auto&, auto& response) {
         Check(response.SetContent("next", "text/plain").has_value(), "reply on reused connection");
     }).has_value(), "register completed-body successor");
     mhttp::client::HttpClient client{ runtime, "127.0.0.1", start_lazy_server(server) };

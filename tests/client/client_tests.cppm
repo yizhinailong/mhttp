@@ -200,7 +200,7 @@ namespace mhttp::test {
         Runtime runtime;
         Check(runtime.Start(4).has_value(), "start IPv6 client runtime");
         server::HttpServer server{ runtime };
-        Check(server.Get("/", [](auto& request, auto& response) {
+        Check(server.set_http_handler<Method::Get>("/", [](auto& request, auto& response) {
             CheckEq(request.RemoteEndpoint().address, std::string{ "::1" }, "actual IPv6 peer endpoint");
             Check(response.Headers().Set("X-Host", request.Header("Host")).has_value(), "echo IPv6 Host authority");
         }).has_value(), "register IPv6 echo");
@@ -251,8 +251,8 @@ namespace mhttp::test {
             std::atomic<unsigned> uploads{};
             std::mutex body_mutex;
             std::string observed;
-            Check(server.Get("/warmup", [](auto&, auto&) {}).has_value(), "register persistent warmup");
-            Check(server.Post("/retry", [&](auto& request, auto& response) {
+            Check(server.set_http_handler<Method::Get>("/warmup", [](auto&, auto&) {}).has_value(), "register persistent warmup");
+            Check(server.set_http_handler<Method::Post>("/retry", [&](auto& request, auto& response) {
                 ++uploads;
                 std::scoped_lock lock{ body_mutex };
                 observed = request.Body();

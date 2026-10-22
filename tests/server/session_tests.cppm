@@ -91,7 +91,7 @@ namespace mhttp::test {
     auto session_pipeline_scenario(asio::any_io_executor executor) -> asio::awaitable<void> {
         server::Router router;
         std::vector<std::string> order;
-        Check(router.Post("/item/:id", [&](auto& request, auto& response) -> Task<void> {
+        Check(router.set_http_handler<Method::Post>("/item/:id", [&](auto& request, auto& response) -> Task<void> {
             auto const body = request.Body();
             auto const capture = std::string{ request.PathParam("id") };
             co_await Sleep(2ms);
@@ -104,7 +104,7 @@ namespace mhttp::test {
             order.push_back("POST");
             Check(response.SetContent(body, "application/octet-stream").has_value(), "set echoed binary content");
         }).has_value(), "register async session handler");
-        Check(router.Get("/next", [&](auto& request, auto& response) {
+        Check(router.set_http_handler<Method::Get>("/next", [&](auto& request, auto& response) {
             order.emplace_back(request.MethodString());
             Check(response.SetContent("next", "text/plain").has_value(), "set GET/HEAD content");
         }).has_value(), "register fallback route");
@@ -134,7 +134,7 @@ namespace mhttp::test {
      */
     auto session_chunked_scenario(asio::any_io_executor executor) -> asio::awaitable<void> {
         server::Router router;
-        Check(router.Post("/chunk", [](auto& request, auto& response) {
+        Check(router.set_http_handler<Method::Post>("/chunk", [](auto& request, auto& response) {
             CheckEq(request.Body(), "abcde", "chunk boundaries are removed");
             CheckEq(request.Trailers().Get("X-Sum"), "yes", "trailers are complete before dispatch");
             Check(request.Header("X-Sum").empty(), "trailers never overwrite request headers");
@@ -177,7 +177,7 @@ namespace mhttp::test {
         for (auto const& test : cases) {
             server::Router router;
             int calls{}, errors{}, posts{};
-            Check(router.Post("/", [&](auto&, auto&) { ++calls; }).has_value(), "register error sentinel");
+            Check(router.set_http_handler<Method::Post>("/", [&](auto&, auto&) { ++calls; }).has_value(), "register error sentinel");
             Check(router.SetErrorHandler([&](auto&, auto&) { ++errors; }).has_value(), "register error hook");
             Check(router.SetPostRoutingHandler([&](auto&, auto&) { ++posts; }).has_value(), "register post hook");
             server::ServerOptions options;
@@ -235,7 +235,7 @@ namespace mhttp::test {
      */
     auto session_exceptions_scenario(asio::any_io_executor executor) -> asio::awaitable<void> {
         server::Router router;
-        Check(router.Get("/", [](auto&, auto&) { throw std::runtime_error{ "private failure" }; }).has_value(),
+        Check(router.set_http_handler<Method::Get>("/", [](auto&, auto&) { throw std::runtime_error{ "private failure" }; }).has_value(),
             "register throwing handler");
         Check(router.SetExceptionHandler([](auto&, auto& response, std::exception_ptr) {
             Check(response.SetStatus(Status::Ok).has_value(), "custom exception status");
@@ -261,7 +261,7 @@ namespace mhttp::test {
      */
     auto session_persistence_scenario(asio::any_io_executor executor) -> asio::awaitable<void> {
         server::Router router;
-        Check(router.Get("/", [](auto&, auto& response) {
+        Check(router.set_http_handler<Method::Get>("/", [](auto&, auto& response) {
             Check(response.SetContent("ok", "text/plain").has_value(), "set persistence content");
         }).has_value(), "register persistence route");
         server::ServerOptions options;
@@ -307,7 +307,7 @@ namespace mhttp::test {
         for (bool body_phase : { false, true }) {
             server::Router router;
             unsigned errors{}, posts{};
-            Check(router.Post("/", [](auto&, auto&) { Check(false, "timed-out input cannot dispatch"); }).has_value(),
+            Check(router.set_http_handler<Method::Post>("/", [](auto&, auto&) { Check(false, "timed-out input cannot dispatch"); }).has_value(),
                 "register timeout sentinel");
             Check(router.SetErrorHandler([&errors](auto& request, auto& response) -> Task<void> {
                 ++errors;
@@ -355,7 +355,7 @@ namespace mhttp::test {
         auto router = std::make_unique<server::Router>();
         auto owned = std::make_shared<int>(7);
         std::weak_ptr<int> handler_lifetime = owned;
-        Check(router->Get("/", [owner = std::move(owned)](auto&, auto& response) {
+        Check(router->set_http_handler<Method::Get>("/", [owner = std::move(owned)](auto&, auto& response) {
             CheckEq(*owner, 7, "handler capture remains owned after wrapper destruction");
             Check(response.SetContent("owned", "text/plain").has_value(), "owned route response");
         }).has_value(), "register owned handler");
@@ -396,7 +396,7 @@ namespace mhttp::test {
     auto session_continue_scenario(asio::any_io_executor executor) -> asio::awaitable<void> {
         server::Router router;
         int handlers{}, posts{};
-        Check(router.Post("/", [&](auto& request, auto& response) {
+        Check(router.set_http_handler<Method::Post>("/", [&](auto& request, auto& response) {
             ++handlers;
             CheckEq(request.Body(), "body", "Expect body is complete before dispatch");
             Check(response.SetContent("accepted", "text/plain").has_value(), "accepted upload");
@@ -446,7 +446,7 @@ namespace mhttp::test {
         };
         for (auto const& test : cases) {
             server::Router router;
-            Check(router.Post("/", [](auto&, auto&) { Check(false, "rejected Expect cannot dispatch"); }).has_value(),
+            Check(router.set_http_handler<Method::Post>("/", [](auto&, auto&) { Check(false, "rejected Expect cannot dispatch"); }).has_value(),
                 "register rejected Expect sentinel");
             server::ServerOptions options;
             options.body_bytes = 3;
@@ -459,7 +459,7 @@ namespace mhttp::test {
             CheckEq(result.responses, std::size_t{ 1 }, "one final Expect rejection");
         }
         server::Router router;
-        Check(router.Post("/", [](auto& request, auto& response) {
+        Check(router.set_http_handler<Method::Post>("/", [](auto& request, auto& response) {
             CheckEq(request.Body(), "abc", "HTTP/1.0 reads body without an interim response");
             Check(response.SetContent("ignored", "text/plain").has_value(), "HTTP/1.0 response");
         }).has_value(), "register HTTP/1.0 upload");
@@ -492,7 +492,7 @@ namespace mhttp::test {
     ) -> asio::awaitable<void> {
         server::Router router;
         std::weak_ptr<int> released;
-        Check(router.Get("/", [&](auto&, auto&) -> Task<void> {
+        Check(router.set_http_handler<Method::Get>("/", [&](auto&, auto&) -> Task<void> {
             auto owner = std::make_shared<int>(7);
             released = owner;
             entered.count_down();
@@ -521,7 +521,7 @@ namespace mhttp::test {
         server::Router router;
         std::shared_ptr<impl::Session> session;
         unsigned calls{};
-        Check(router.Get("/", [&](auto&, auto& response) -> Task<void> {
+        Check(router.set_http_handler<Method::Get>("/", [&](auto&, auto& response) -> Task<void> {
             ++calls;
             co_await impl::ToTask(pair->connection->Executor(), session->Drain());
             co_await Sleep(2ms);

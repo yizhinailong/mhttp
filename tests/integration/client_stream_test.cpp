@@ -46,7 +46,7 @@ auto client_incremental_receiver() -> void {
     Check(runtime.Start(4).has_value(), "start incremental receiver runtime");
     std::atomic<bool> released{}, produced{};
     mhttp::server::HttpServer server{ runtime };
-    Check(server.Get("/stream", [&](auto&, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/stream", [&](auto&, auto& response) {
         Check(response.SetChunkedContentProvider([&](auto& writer) -> mhttp::Task<mhttp::Result<void>> {
             auto written = co_await writer.Write(std::string("a\0b", 3));
             if (!written) { co_return written; }
@@ -59,7 +59,7 @@ auto client_incremental_receiver() -> void {
             co_return co_await writer.Finish(std::move(trailers));
         }).has_value(), "configure gated response");
     }).has_value(), "register incremental response");
-    Check(server.Get("/next", [](auto&, auto& response) { static_cast<void>(response.SetContent("next", "text/plain")); }).has_value(),
+    Check(server.set_http_handler<mhttp::method::Get>("/next", [](auto&, auto& response) { static_cast<void>(response.SetContent("next", "text/plain")); }).has_value(),
         "register buffered successor");
     mhttp::client::HttpClient client{ runtime, "127.0.0.1", start_client_stream_server(server), { .response_chunk_bytes = 2 } };
     std::vector<mhttp::client::TransferProgress> samples;
@@ -114,12 +114,12 @@ auto client_stream_redirects_and_upload_progress() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(4).has_value(), "start receiver redirect runtime");
     mhttp::server::HttpServer server{ runtime };
-    Check(server.Post("/start", [](auto& request, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Post>("/start", [](auto& request, auto& response) {
         CheckEq(request.Body(), "upload", "initial buffered upload");
         static_cast<void>(response.SetRedirect("/final", mhttp::Status::TemporaryRedirect));
         static_cast<void>(response.SetContent("hidden redirect body", "text/plain"));
     }).has_value(), "register preserved-body redirect");
-    Check(server.Post("/final", [](auto& request, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Post>("/final", [](auto& request, auto& response) {
         CheckEq(request.Body(), "upload", "307 replays buffered upload");
         static_cast<void>(response.SetContent("final", "text/plain"));
     }).has_value(), "register final response");
@@ -165,7 +165,7 @@ auto client_stream_callback_failures() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(4).has_value(), "start callback failure runtime");
     mhttp::server::HttpServer server{ runtime };
-    Check(server.Get("/body", [](auto&, auto& response) { static_cast<void>(response.SetContent("body", "text/plain")); }).has_value(),
+    Check(server.set_http_handler<mhttp::method::Get>("/body", [](auto&, auto& response) { static_cast<void>(response.SetContent("body", "text/plain")); }).has_value(),
         "register callback failure input");
     auto const port = start_client_stream_server(server);
     std::atomic<unsigned> active{};
@@ -199,7 +199,7 @@ auto client_stream_callback_stop() -> void {
         mhttp::Runtime runtime;
         Check(runtime.Start(4).has_value(), "start stopped callback runtime");
         mhttp::server::HttpServer server{ runtime };
-        Check(server.Get("/body", [](auto&, auto& response) { static_cast<void>(response.SetContent("body", "text/plain")); }).has_value(), "callback stop input");
+        Check(server.set_http_handler<mhttp::method::Get>("/body", [](auto&, auto& response) { static_cast<void>(response.SetContent("body", "text/plain")); }).has_value(), "callback stop input");
         mhttp::client::HttpClient client{ runtime, "127.0.0.1", start_client_stream_server(server),
             { .timeout_policy = mhttp::client::TimeoutPolicy::Never } };
         std::latch entered{ 1 };
@@ -231,14 +231,14 @@ auto client_stream_caller_cancellation() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(4).has_value(), "start inherited-cancellation runtime");
     mhttp::server::HttpServer upstream{ runtime };
-    Check(upstream.Get("/body", [](auto&, auto& response) { static_cast<void>(response.SetContent("body", "text/plain")); }).has_value(),
+    Check(upstream.set_http_handler<mhttp::method::Get>("/body", [](auto&, auto& response) { static_cast<void>(response.SetContent("body", "text/plain")); }).has_value(),
         "inherited-cancellation upstream");
     mhttp::client::HttpClient outbound{ runtime, "127.0.0.1", start_client_stream_server(upstream),
         { .timeout_policy = mhttp::client::TimeoutPolicy::Never } };
     std::atomic<unsigned> active{};
     std::latch entered{ 1 };
     mhttp::server::HttpServer proxy{ runtime };
-    Check(proxy.Get("/proxy", [&](auto&, auto&) -> mhttp::Task<void> {
+    Check(proxy.set_http_handler<mhttp::method::Get>("/proxy", [&](auto&, auto&) -> mhttp::Task<void> {
         mhttp::client::TransferCallbacks callbacks;
         callbacks.on_body = [&](std::string) -> mhttp::Task<mhttp::Result<void>> {
             CallbackFrame frame{ active };

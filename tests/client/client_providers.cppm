@@ -23,8 +23,8 @@ namespace mhttp::test {
             Check(runtime.Start(4).has_value(), "start provider head retry runtime");
             server::HttpServer server{ runtime };
             std::atomic<unsigned> uploads{};
-            Check(server.Get("/warmup", [](auto&, auto&) {}).has_value(), "provider retry warmup");
-            Check(server.Post("/retry", [&](auto& request, auto& response) {
+            Check(server.set_http_handler<Method::Get>("/warmup", [](auto&, auto&) {}).has_value(), "provider retry warmup");
+            Check(server.set_http_handler<Method::Post>("/retry", [&](auto& request, auto& response) {
                 ++uploads;
                 CheckEq(request.Body(), "data", "provider upload is transmitted exactly once");
                 static_cast<void>(response.SetContent("stored", "text/plain"));

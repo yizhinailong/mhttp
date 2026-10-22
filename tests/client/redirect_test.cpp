@@ -32,22 +32,20 @@ auto methods_and_bodies() -> void {
     mhttp::server::HttpServer server{ runtime };
     for (auto status : { mhttp::Status::MovedPermanently, mhttp::Status::Found, mhttp::Status::SeeOther,
                          mhttp::Status::TemporaryRedirect, mhttp::Status::PermanentRedirect }) {
-        for (auto method : { mhttp::Method::Post, mhttp::Method::Head }) {
-            Check(server.Route(method, "/redirect/" + std::to_string(static_cast<int>(status)), [status](auto&, auto& response) {
-                Check(response.SetRedirect("/final", status).has_value(), "set method redirect");
-                Check(response.SetContent("discarded redirect representation", "").has_value(), "redirect has its own body");
-            }).has_value(), "register method redirect");
-        }
+        Check(server.set_http_handler<mhttp::method::Post, mhttp::method::Head>(
+            "/redirect/" + std::to_string(static_cast<int>(status)), [status](auto&, auto& response) {
+            Check(response.SetRedirect("/final", status).has_value(), "set method redirect");
+            Check(response.SetContent("discarded redirect representation", "").has_value(), "redirect has its own body");
+        }).has_value(), "register method redirect");
     }
-    for (auto method : { mhttp::Method::Get, mhttp::Method::Post, mhttp::Method::Head }) {
-        Check(server.Route(method, "/final", [](auto& request, auto& response) {
-            Check(response.Headers().Set("X-Method", request.MethodString()).has_value(), "echo redirected method");
-            Check(response.Headers().Set("X-Bytes", std::to_string(request.Body().size())).has_value(), "echo redirected length");
-            Check(response.Headers().Set("X-Type", request.ContentType()).has_value(), "echo redirected media type");
-            Check(response.SetContent(request.Body(), "").has_value(), "echo retained representation");
-        }).has_value(), "register final echo");
-    }
-    Check(server.Get("/probe", [](auto&, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get, mhttp::method::Post, mhttp::method::Head>(
+        "/final", [](auto& request, auto& response) {
+        Check(response.Headers().Set("X-Method", request.MethodString()).has_value(), "echo redirected method");
+        Check(response.Headers().Set("X-Bytes", std::to_string(request.Body().size())).has_value(), "echo redirected length");
+        Check(response.Headers().Set("X-Type", request.ContentType()).has_value(), "echo redirected media type");
+        Check(response.SetContent(request.Body(), "").has_value(), "echo retained representation");
+    }).has_value(), "register final echo");
+    Check(server.set_http_handler<mhttp::method::Get>("/probe", [](auto&, auto& response) {
         Check(response.SetContent("clean stream", "").has_value(), "probe after redirected body");
     }).has_value(), "register stream probe");
     auto port = start_redirect_peer(server);
@@ -82,25 +80,25 @@ auto disabled_and_bounded() -> void {
     Check(runtime.Start(4).has_value(), "start redirect limit runtime");
     mhttp::server::HttpServer server{ runtime };
     std::atomic<unsigned> calls{};
-    Check(server.Get("/loop", [&calls](auto&, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/loop", [&calls](auto&, auto& response) {
         ++calls;
         Check(response.SetRedirect("/loop").has_value(), "redirect loop");
         Check(response.SetContent("original redirect", "").has_value(), "set original 302 body");
     }).has_value(), "register loop");
-    Check(server.Get("/missing", [](auto&, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/missing", [](auto&, auto& response) {
         Check(response.SetStatus(mhttp::Status::Found).has_value(), "set response status");
         Check(response.SetContent("no Location", "").has_value(), "302 without Location");
     }).has_value(), "register missing Location");
-    Check(server.Get("/cached", [](auto&, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/cached", [](auto&, auto& response) {
         Check(response.SetStatus(mhttp::Status::NotModified).has_value(), "set response status");
         Check(response.Headers().Set("Location", "/loop").has_value(), "304 is not a redirect");
     }).has_value(), "register 304");
-    Check(server.Get("/duplicate", [](auto&, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/duplicate", [](auto&, auto& response) {
         Check(response.SetStatus(mhttp::Status::Found).has_value(), "set response status");
         Check(response.Headers().Add("Location", "/loop").has_value(), "first Location");
         Check(response.Headers().Add("Location", "/missing").has_value(), "ambiguous Location");
     }).has_value(), "register duplicate Location");
-    Check(server.Get("/tls", [](auto&, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/tls", [](auto&, auto& response) {
         Check(response.SetRedirect("https://localhost/").has_value(), "unsupported scheme Location");
     }).has_value(), "register unsupported redirect scheme");
     auto port = start_redirect_peer(server);
@@ -131,11 +129,11 @@ auto relative_targets() -> void {
     Check(runtime.Start(4).has_value(), "start relative redirect runtime");
     mhttp::server::HttpServer server{ runtime };
     std::string location;
-    Check(server.Get("/dir/start", [&location](auto&, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/dir/start", [&location](auto&, auto& response) {
         Check(response.SetRedirect(location).has_value(), "configure relative Location");
     }).has_value(), "register relative source");
     for (auto path : { "/next", "/dir/next", "/a+b/:segment" }) {
-        Check(server.Get(path, [](auto& request, auto& response) {
+        Check(server.set_http_handler<mhttp::method::Get>(path, [](auto& request, auto& response) {
             Check(response.SetContent(std::string{ request.Target() }, "").has_value(), "echo unmodified final wire target");
             Check(response.Headers().Set("X-Cookie", request.Header("Cookie")).has_value(), "echo same-origin cookie");
         }).has_value(), "register effective relative destination");
@@ -172,22 +170,22 @@ auto cross_origin_credentials() -> void {
     auto first_port = first.BindToAnyPort("127.0.0.1");
     auto second_port = second.BindToAnyPort("127.0.0.1");
     Check(first_port && second_port, "bind both redirect origins");
-    Check(first.Get("/cross", [second_port](auto& request, auto& response) {
+    Check(first.set_http_handler<mhttp::method::Get>("/cross", [second_port](auto& request, auto& response) {
         Check(!request.Header("Authorization").empty() && !request.Header("Cookie").empty(), "first hop receives credentials");
         Check(response.SetRedirect("http://127.0.0.1:" + std::to_string(*second_port) + "/remote").has_value(), "cross-port Location");
     }).has_value(), "register cross-origin source");
-    Check(second.Get("/remote", [first_port, second_port](auto& request, auto& response) {
+    Check(second.set_http_handler<mhttp::method::Get>("/remote", [first_port, second_port](auto& request, auto& response) {
         Check(request.Header("Authorization").empty() && request.Header("Cookie").empty()
             && request.Header("Proxy-Authorization").empty(), "neither explicit nor fallback credentials cross origin");
         CheckEq(request.Header("Host"), "127.0.0.1:" + std::to_string(*second_port), "cross-origin Host is regenerated");
         CheckEq(request.Header("X-Default"), "retained"sv, "ordinary defaults are retained on every hop");
         Check(response.SetRedirect("http://127.0.0.1:" + std::to_string(*first_port) + "/final").has_value(), "redirect back to first origin");
     }).has_value(), "register remote origin");
-    Check(first.Get("/final", [](auto& request, auto& response) {
+    Check(first.set_http_handler<mhttp::method::Get>("/final", [](auto& request, auto& response) {
         Check(request.Header("Authorization").empty() && request.Header("Cookie").empty(), "returning to original origin does not restore removed credentials");
         Check(response.SetContent("final", "").has_value(), "finish cross-origin chain");
     }).has_value(), "register returning destination");
-    Check(first.Get("/direct", [](auto& request, auto& response) {
+    Check(first.set_http_handler<mhttp::method::Get>("/direct", [](auto& request, auto& response) {
         Check(!request.Header("Authorization").empty() && !request.Header("Cookie").empty(), "new Send retains configured credentials");
         Check(response.SetContent("direct", "").has_value(), "direct request after redirects");
     }).has_value(), "register direct destination");
@@ -220,23 +218,23 @@ auto cross_origin_limits() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(4).has_value(), "start cross-origin limits runtime");
     mhttp::server::HttpServer first{ runtime }, second{ runtime };
-    Check(second.Get("/large", [](auto&, auto& response) {
+    Check(second.set_http_handler<mhttp::method::Get>("/large", [](auto&, auto& response) {
         Check(response.SetContent("123456789", "").has_value(), "oversized destination body");
     }).has_value(), "register large destination");
-    Check(second.Get("/slow", [](auto&, auto& response) -> mhttp::Task<void> {
+    Check(second.set_http_handler<mhttp::method::Get>("/slow", [](auto&, auto& response) -> mhttp::Task<void> {
         co_await mhttp::Sleep(200ms);
         Check(response.SetContent("slow", "").has_value(), "delayed destination");
     }).has_value(), "register slow destination");
-    Check(second.Get("/ok", [](auto&, auto& response) {
+    Check(second.set_http_handler<mhttp::method::Get>("/ok", [](auto&, auto& response) {
         Check(response.SetContent("remote", "").has_value(), "complete remote hop");
     }).has_value(), "register remote success");
     auto second_port = start_redirect_peer(second);
     for (auto path : { "/large", "/slow", "/ok" }) {
-        Check(first.Get(path, [second_port, path](auto&, auto& response) {
+        Check(first.set_http_handler<mhttp::method::Get>(path, [second_port, path](auto&, auto& response) {
             Check(response.SetRedirect("http://127.0.0.1:" + std::to_string(second_port) + path).has_value(), "cross-origin bounded redirect");
         }).has_value(), "register limit redirect");
     }
-    Check(first.Get("/direct", [](auto&, auto& response) {
+    Check(first.set_http_handler<mhttp::method::Get>("/direct", [](auto&, auto& response) {
         Check(response.SetContent("local", "").has_value(), "constructor origin destination");
     }).has_value(), "register original origin success");
     auto first_port = start_redirect_peer(first);

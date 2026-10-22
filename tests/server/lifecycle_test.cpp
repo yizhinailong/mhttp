@@ -26,7 +26,7 @@ auto server_bound_lifecycle() -> void {
     CheckEq(server.LocalEndpoint(), std::optional{ mhttp::Endpoint{ "127.0.0.1", *port } }, "owned local snapshot");
     CheckEq(server.WaitUntilReady().error(), mhttp::Error::NotRunning, "bound socket is not a submitted server");
     CheckEq(server.Start().error(), mhttp::Error::NotRunning, "Start requires a running runtime");
-    Check(server.Get("/", [](auto&, auto&) {}).has_value(), "failed Start rolls back router freeze");
+    Check(server.set_http_handler<mhttp::method::Get>("/", [](auto&, auto&) {}).has_value(), "failed Start rolls back router freeze");
     mhttp::server::HttpServer conflicting{ runtime };
     CheckEq(conflicting.Bind("127.0.0.1", *port).error(), mhttp::Error::BindIpAddress,
         "second listener cannot bind an occupied loopback port");
@@ -44,19 +44,19 @@ auto server_quick_restart() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(4).has_value(), "start multithreaded server runtime");
     mhttp::server::HttpServer server{ runtime };
-    Check(server.Get("/", [](auto&, auto&) {}).has_value(), "register retained route");
+    Check(server.set_http_handler<mhttp::method::Get>("/", [](auto&, auto&) {}).has_value(), "register retained route");
     for (unsigned iteration{}; iteration < 100; ++iteration) {
         Check(server.BindToAnyPort("127.0.0.1").has_value(), "bind a fresh generation");
         Check(server.Start().has_value(), "start a fresh generation");
         Check(server.IsRunning(), "Start publishes running before return");
         CheckEq(server.Start().error(), mhttp::Error::AlreadyRunning, "duplicate Start is rejected");
-        CheckEq(server.Get("/during", [](auto&, auto&) {}).error(), mhttp::Error::AlreadyRunning,
+        CheckEq(server.set_http_handler<mhttp::method::Get>("/during", [](auto&, auto&) {}).error(), mhttp::Error::AlreadyRunning,
             "runtime route registration is guarded");
         if (iteration % 2 == 0) { Check(server.WaitUntilReady().has_value(), "wait for submitted generation"); }
         Check(server.Stop().has_value(), "stop immediately or after readiness");
         Check(!server.IsRunning() && !server.LocalEndpoint(), "drain clears active generation");
         CheckEq(server.WaitUntilReady().error(), mhttp::Error::NotRunning, "stopped readiness returns immediately");
-        Check(server.Get("/after", [](auto&, auto&) {}).has_value(), "drain thaws route registration");
+        Check(server.set_http_handler<mhttp::method::Get>("/after", [](auto&, auto&) {}).has_value(), "drain thaws route registration");
     }
 }
 
@@ -90,7 +90,7 @@ auto stop_server_task(mhttp::server::HttpServer& server) -> mhttp::Task<void> {
     CheckEq(server.Listen("127.0.0.1", 0).error(), mhttp::Error::Busy, "blocking Listen rejects I/O threads");
     co_await server.AsyncStop();
     Check(!server.IsRunning() && !server.LocalEndpoint(), "AsyncStop returns only after listener drain");
-    Check(server.Get("/after-async-stop", [](auto&, auto&) {}).has_value(), "AsyncStop thaws routing before return");
+    Check(server.set_http_handler<mhttp::method::Get>("/after-async-stop", [](auto&, auto&) {}).has_value(), "AsyncStop thaws routing before return");
 }
 
 /**
@@ -150,7 +150,7 @@ auto server_blocking_listen() -> void {
             listener.join();
             Check(result && result->has_value(), "Listen returns success after drain");
             CheckEq(runtime.IsRunning(), started_runtime, "Listen stops only its own inline execution generation");
-            Check(server.Get("/after-listen", [](auto&, auto&) {}).has_value(), "Listen permits reuse after drain");
+            Check(server.set_http_handler<mhttp::method::Get>("/after-listen", [](auto&, auto&) {}).has_value(), "Listen permits reuse after drain");
         }
     }
 }

@@ -96,7 +96,7 @@ auto graceful_completion() -> void {
     std::binary_semaphore entered{ 0 };
     std::atomic<bool> finish{};
     mhttp::server::HttpServer server{ runtime };
-    Check(server.Get("/", [&](auto&, auto& response) -> mhttp::Task<void> {
+    Check(server.set_http_handler<mhttp::method::Get>("/", [&](auto&, auto& response) -> mhttp::Task<void> {
         entered.release();
         while (!finish.load()) { co_await mhttp::Sleep(1ms); }
         static_cast<void>(response.SetContent("completed", "text/plain"));
@@ -108,12 +108,12 @@ auto graceful_completion() -> void {
     mhttp::test::ThreadTask stop{ [&] { return server.Stop(2s); } };
     Check(grace_eventually([&] { return !server.IsRunning(); }), "grace publishes admission closure immediately");
     Check(stop.WaitFor(0ms) == std::future_status::timeout, "grace waits for begun request");
-    CheckEq(server.Get("/during", [](auto&, auto&) {}).error(), mhttp::Error::AlreadyRunning, "routing remains frozen until full drain");
+    CheckEq(server.set_http_handler<mhttp::method::Get>("/during", [](auto&, auto&) {}).error(), mhttp::Error::AlreadyRunning, "routing remains frozen until full drain");
     finish.store(true);
     auto response = request.Get();
     Check(stop.Get().has_value(), "natural completion reports successful grace");
     Check(response && response->Body() == "completed" && !response->KeepAlive(), "begun response completes and closes persistence");
-    Check(!server.LocalEndpoint() && server.Get("/new", [](auto&, auto&) {}).has_value(), "complete drain thaws routes");
+    Check(!server.LocalEndpoint() && server.set_http_handler<mhttp::method::Get>("/new", [](auto&, auto&) {}).has_value(), "complete drain thaws routes");
     auto next_port = start_grace_server(server);
     mhttp::client::HttpClient next{ runtime, "127.0.0.1", next_port };
     auto restarted = mhttp::SyncWait(runtime, next.Get("/new"));
@@ -129,7 +129,7 @@ auto nonblocking_async_grace() -> void {
     std::binary_semaphore entered{ 0 };
     std::atomic<bool> finish{};
     mhttp::server::HttpServer server{ runtime };
-    Check(server.Get("/", [&](auto&, auto& response) -> mhttp::Task<void> {
+    Check(server.set_http_handler<mhttp::method::Get>("/", [&](auto&, auto& response) -> mhttp::Task<void> {
         entered.release();
         while (!finish.load()) { co_await mhttp::Sleep(1ms); }
         static_cast<void>(response.SetContent("async", "text/plain"));
@@ -156,7 +156,7 @@ auto grace_deadline() -> void {
         std::binary_semaphore entered{ 0 };
         std::atomic<unsigned> active{};
         mhttp::server::HttpServer server{ runtime };
-        Check(server.Get("/", [&](auto&, auto&) -> mhttp::Task<void> {
+        Check(server.set_http_handler<mhttp::method::Get>("/", [&](auto&, auto&) -> mhttp::Task<void> {
             GraceFrame frame{ active };
             entered.release();
             co_await mhttp::Sleep(5s);
@@ -183,7 +183,7 @@ auto concurrent_grace_deadlines() -> void {
         Check(runtime.Start(4).has_value(), "start concurrent grace runtime");
         std::binary_semaphore entered{ 0 };
         mhttp::server::HttpServer server{ runtime };
-        Check(server.Get("/", [&](auto&, auto&) -> mhttp::Task<void> { entered.release(); co_await mhttp::Sleep(5s); }).has_value(), "register concurrent grace handler");
+        Check(server.set_http_handler<mhttp::method::Get>("/", [&](auto&, auto&) -> mhttp::Task<void> { entered.release(); co_await mhttp::Sleep(5s); }).has_value(), "register concurrent grace handler");
         mhttp::client::HttpClient client{ runtime, "127.0.0.1", start_grace_server(server) };
         mhttp::test::ThreadTask request{ [&] { return mhttp::SyncWait(runtime, client.Get()); } };
         Check(entered.try_acquire_for(1s), "concurrent grace request entered");
@@ -208,7 +208,7 @@ auto immediate_escalation() -> void {
         std::binary_semaphore entered{ 0 };
         std::atomic<unsigned> active{};
         mhttp::server::HttpServer server{ runtime };
-        Check(server.Get("/", [&](auto&, auto&) -> mhttp::Task<void> {
+        Check(server.set_http_handler<mhttp::method::Get>("/", [&](auto&, auto&) -> mhttp::Task<void> {
             GraceFrame frame{ active }; entered.release(); co_await mhttp::Sleep(5s);
         }).has_value(), "register escalation handler");
         mhttp::client::HttpClient client{ runtime, "127.0.0.1", start_grace_server(server) };
@@ -234,7 +234,7 @@ auto offload_cleanup() -> void {
     std::binary_semaphore entered{ 0 }, release{ 0 };
     std::atomic<unsigned> active{};
     mhttp::server::HttpServer server{ runtime };
-    Check(server.Get("/", [&](auto&, auto&) -> mhttp::Task<void> {
+    Check(server.set_http_handler<mhttp::method::Get>("/", [&](auto&, auto&) -> mhttp::Task<void> {
         GraceFrame frame{ active };
         co_await mhttp::Offload([&] { entered.release(); release.acquire(); });
     }).has_value(), "register owned blocking worker");
@@ -260,14 +260,14 @@ auto caller_cancellation() -> void {
     std::atomic<unsigned> active{};
     std::atomic<bool> canceled{};
     mhttp::server::HttpServer target{ runtime };
-    Check(target.Get("/", [&](auto&, auto&) -> mhttp::Task<void> {
+    Check(target.set_http_handler<mhttp::method::Get>("/", [&](auto&, auto&) -> mhttp::Task<void> {
         GraceFrame frame{ active }; entered.release(); co_await mhttp::Sleep(5s);
     }).has_value(), "register control cancellation target");
     mhttp::client::HttpClient upstream{ runtime, "127.0.0.1", start_grace_server(target) };
     mhttp::test::ThreadTask request{ [&] { return mhttp::SyncWait(runtime, upstream.Get()); } };
     Check(entered.try_acquire_for(1s), "target request enters before control grace");
     mhttp::server::HttpServer control{ runtime };
-    Check(control.Get("/", [&](auto&, auto&) -> mhttp::Task<void> {
+    Check(control.set_http_handler<mhttp::method::Get>("/", [&](auto&, auto&) -> mhttp::Task<void> {
         auto result = co_await target.AsyncStop(5s);
         canceled.store(!result && result.error() == mhttp::Error::Canceled);
     }).has_value(), "register independent asynchronous shutdown controller");
@@ -288,7 +288,7 @@ auto owned_listen_runtime() -> void {
     Check(caller_runtime.Start(2).has_value(), "start separate Listen controller runtime");
     std::binary_semaphore entered{ 0 };
     mhttp::server::HttpServer server{ target_runtime };
-    Check(server.Get("/", [&](auto&, auto& response) -> mhttp::Task<void> {
+    Check(server.set_http_handler<mhttp::method::Get>("/", [&](auto&, auto& response) -> mhttp::Task<void> {
         entered.release(); co_await mhttp::Sleep(40ms);
         static_cast<void>(response.SetContent("inline", "text/plain"));
     }).has_value(), "register inline grace response");

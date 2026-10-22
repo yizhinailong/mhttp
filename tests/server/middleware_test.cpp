@@ -80,7 +80,7 @@ auto middleware_order() -> void {
     Check(runtime.Start(2).has_value(), "start middleware runtime");
     std::vector<std::string> trace;
     mhttp::server::Router router;
-    Check(router.Get("/items/:id", [&trace](auto&, auto&) { trace.push_back("handler"); },
+    Check(router.set_http_handler<mhttp::method::Get>("/items/:id", [&trace](auto&, auto&) { trace.push_back("handler"); },
         TraceAspect{ trace, "route1" }, TraceAspect{ trace, "route2" }).has_value(), "route aspects");
     Check(router.Use(TraceAspect{ trace, "global1" }).has_value(), "first global aspect");
     Check(router.Use(TraceAspect{ trace, "global2" }).has_value(), "second global aspect");
@@ -106,7 +106,7 @@ auto middleware_short_circuit() -> void {
         mhttp::server::Router router;
         Check(router.Use(TraceAspect{ trace, "g1", scenario != 0, scenario != 3 },
             TraceAspect{ trace, "g2" }).has_value(), "global short-circuit configuration");
-        Check(router.Get("/items/:id", [&trace](auto&, auto&) { trace.push_back("handler"); },
+        Check(router.set_http_handler<mhttp::method::Get>("/items/:id", [&trace](auto&, auto&) { trace.push_back("handler"); },
             TraceAspect{ trace, "r1", scenario != 1, scenario != 2 }, TraceAspect{ trace, "r2" }).has_value(),
             "route short-circuit configuration");
         auto response = run(runtime, router);
@@ -135,7 +135,7 @@ auto middleware_exceptions() -> void {
         std::vector<std::string> trace;
         mhttp::server::Router router;
         Check(router.Use(TraceAspect{ trace, "g", true, true, scenario == 0, scenario == 4 }).has_value(), "throwing global configuration");
-        Check(router.Get("/items/:id", [&](auto&, auto&) {
+        Check(router.set_http_handler<mhttp::method::Get>("/items/:id", [&](auto&, auto&) {
             trace.push_back("handler");
             if (scenario == 2) { throw std::range_error{ "handler" }; }
         }, TraceAspect{ trace, "r", true, true, scenario == 1, scenario == 3 }).has_value(), "throwing route configuration");
@@ -194,7 +194,7 @@ auto middleware_ownership() -> void {
     auto owned = std::make_shared<int>(7);
     std::weak_ptr<int> weak{ owned };
     Check(router->Use(OwnedAspect{ std::make_unique<int>(42), std::move(owned) }).has_value(), "move-only async global aspect");
-    Check(router->Get("/owned", [](auto& input, auto&) {
+    Check(router->set_http_handler<mhttp::method::Get>("/owned", [](auto& input, auto&) {
         CheckEq(input.Data().template Fetch<int>(), std::optional{ 42 }, "route sees asynchronous global context");
     }).has_value(), "context observing route");
     auto pending = RouterAccess::Dispatch(*router, request, response);

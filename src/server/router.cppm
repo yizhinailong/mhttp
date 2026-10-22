@@ -184,30 +184,9 @@ export namespace mhttp::server {
         }
 
         /**
-         * @brief Register or replace one method-specific handler with optional ordered aspects.
-         * @tparam F Synchronous void or Task<void> callable accepting Request& and Response&.
-         * @tparam Aspects Owned Before/After objects returning bool or Task<bool>.
-         * @param method Supported method.
-         * @param path Decoded route pattern, copied during registration.
-         * @param handler Callable copied or moved into stable storage.
-         * @param aspects Aspects copied or moved in registration order.
-         * @return Success, InvalidRequest, AlreadyRunning while frozen, or Busy while requests are prepared.
-         */
-        template <typename F, typename... Aspects>
-            requires detail::HttpHandlerFunction<std::decay_t<F>> && (detail::HttpAspect<std::decay_t<Aspects>> && ...)
-        [[nodiscard]] auto Route(
-            mhttp::Method method,
-            std::string_view path,
-            F&& handler,
-            Aspects&&... aspects
-        ) -> Result<void> {
-            return m_impl->Register(method, path,
-                detail::make_http_handler(std::forward<F>(handler), std::forward<Aspects>(aspects)...));
-        }
-
-        /**
          * @brief Register one owned handler and aspect sequence for one or more compile-time methods.
          * @tparam METHODS Nonempty list of supported HTTP methods; duplicates replace the same binding.
+         *         GET also serves implicit HEAD fallback; OPTIONS also accepts the literal asterisk path.
          * @tparam F Synchronous void or Task<void> callable accepting Request& and Response&.
          * @tparam Aspects Owned Before/After objects returning bool or Task<bool>.
          * @param path Decoded route pattern, copied during registration.
@@ -231,146 +210,30 @@ export namespace mhttp::server {
 
         /**
          * @brief Register a handler that may pull bounded request chunks before the full upload arrives.
+         * @tparam METHODS Nonempty list of supported HTTP methods; pattern matching and HEAD fallback
+         *         follow set_http_handler.
          * @tparam F Synchronous void or Task<void> callable accepting Request& and Response&.
          * @tparam Aspects Owned ordered Before/After objects; global middleware still wraps the route.
-         * @param method Supported method; all normal pattern matching and HEAD fallback rules apply.
          * @param path Decoded route pattern, copied during registration.
-         * @param handler Callable copied or moved into stable storage; await Request::ReadBody to read.
-         * @param aspects Aspects copied or moved in registration order.
-         * @return Registration result as for Route; replacing a binding also replaces its intake policy.
+         * @param handler Callable copied or moved once into stable storage shared by all listed methods;
+         *        await Request::ReadBody to read.
+         * @param aspects Aspects copied or moved once into the same shared storage.
+         * @return Registration result as for set_http_handler; replacing a binding also replaces its intake policy.
          * @note Unread body bytes force close after the response. Body() stays empty; trailers appear
          *       after ReadBody returns nullopt. Standalone dispatch has no network body to read.
          */
-        template <typename F, typename... Aspects>
-            requires detail::HttpHandlerFunction<std::decay_t<F>> && (detail::HttpAspect<std::decay_t<Aspects>> && ...)
-        [[nodiscard]] auto RouteLazy(
-            mhttp::Method method,
+        template <mhttp::Method... METHODS, typename F, typename... Aspects>
+            requires (sizeof...(METHODS) > 0) && detail::HttpHandlerFunction<std::decay_t<F>>
+                && (detail::HttpAspect<std::decay_t<Aspects>> && ...)
+        [[nodiscard]] auto set_lazy_http_handler(
             std::string_view path,
             F&& handler,
             Aspects&&... aspects
         ) -> Result<void> {
-            return m_impl->Register(method, path,
+            constexpr std::array methods{ METHODS... };
+            return m_impl->Register(methods, path,
                 detail::make_http_handler(std::forward<F>(handler), std::forward<Aspects>(aspects)...), true);
         }
-
-        /**
-         * @brief Register a GET handler, also eligible for implicit HEAD fallback.
-         * @tparam F Eligible handler type.
-         * @tparam Aspects Eligible ordered aspect types.
-         * @param path Decoded route pattern.
-         * @param handler Owned callback.
-         * @param aspects Owned route aspects.
-         * @return Registration result as for Route.
-         */
-        template <typename F, typename... Aspects>
-            requires detail::HttpHandlerFunction<std::decay_t<F>> && (detail::HttpAspect<std::decay_t<Aspects>> && ...)
-        [[nodiscard]] auto Get(
-            std::string_view path,
-            F&& handler,
-            Aspects&&... aspects
-        ) -> Result<void> { return Route(mhttp::Method::Get, path, std::forward<F>(handler), std::forward<Aspects>(aspects)...); }
-
-        /**
-         * @brief Register an explicit HEAD handler before considering GET fallback.
-         * @tparam F Eligible handler type.
-         * @tparam Aspects Eligible ordered aspect types.
-         * @param path Decoded route pattern.
-         * @param handler Owned callback.
-         * @param aspects Owned route aspects.
-         * @return Registration result as for Route.
-         */
-        template <typename F, typename... Aspects>
-            requires detail::HttpHandlerFunction<std::decay_t<F>> && (detail::HttpAspect<std::decay_t<Aspects>> && ...)
-        [[nodiscard]] auto Head(
-            std::string_view path,
-            F&& handler,
-            Aspects&&... aspects
-        ) -> Result<void> { return Route(mhttp::Method::Head, path, std::forward<F>(handler), std::forward<Aspects>(aspects)...); }
-
-        /**
-         * @brief Register a POST handler.
-         * @tparam F Eligible handler type.
-         * @tparam Aspects Eligible ordered aspect types.
-         * @param path Decoded route pattern.
-         * @param handler Owned callback.
-         * @param aspects Owned route aspects.
-         * @return Registration result as for Route.
-         */
-        template <typename F, typename... Aspects>
-            requires detail::HttpHandlerFunction<std::decay_t<F>> && (detail::HttpAspect<std::decay_t<Aspects>> && ...)
-        [[nodiscard]] auto Post(
-            std::string_view path,
-            F&& handler,
-            Aspects&&... aspects
-        ) -> Result<void> { return Route(mhttp::Method::Post, path, std::forward<F>(handler), std::forward<Aspects>(aspects)...); }
-
-        /**
-         * @brief Register a PUT handler.
-         * @tparam F Eligible handler type.
-         * @tparam Aspects Eligible ordered aspect types.
-         * @param path Decoded route pattern.
-         * @param handler Owned callback.
-         * @param aspects Owned route aspects.
-         * @return Registration result as for Route.
-         */
-        template <typename F, typename... Aspects>
-            requires detail::HttpHandlerFunction<std::decay_t<F>> && (detail::HttpAspect<std::decay_t<Aspects>> && ...)
-        [[nodiscard]] auto Put(
-            std::string_view path,
-            F&& handler,
-            Aspects&&... aspects
-        ) -> Result<void> { return Route(mhttp::Method::Put, path, std::forward<F>(handler), std::forward<Aspects>(aspects)...); }
-
-        /**
-         * @brief Register a PATCH handler.
-         * @tparam F Eligible handler type.
-         * @tparam Aspects Eligible ordered aspect types.
-         * @param path Decoded route pattern.
-         * @param handler Owned callback.
-         * @param aspects Owned route aspects.
-         * @return Registration result as for Route.
-         */
-        template <typename F, typename... Aspects>
-            requires detail::HttpHandlerFunction<std::decay_t<F>> && (detail::HttpAspect<std::decay_t<Aspects>> && ...)
-        [[nodiscard]] auto Patch(
-            std::string_view path,
-            F&& handler,
-            Aspects&&... aspects
-        ) -> Result<void> { return Route(mhttp::Method::Patch, path, std::forward<F>(handler), std::forward<Aspects>(aspects)...); }
-
-        /**
-         * @brief Register a DELETE handler without platform macro conflicts.
-         * @tparam F Eligible handler type.
-         * @tparam Aspects Eligible ordered aspect types.
-         * @param path Decoded route pattern.
-         * @param handler Owned callback.
-         * @param aspects Owned route aspects.
-         * @return Registration result as for Route.
-         */
-        template <typename F, typename... Aspects>
-            requires detail::HttpHandlerFunction<std::decay_t<F>> && (detail::HttpAspect<std::decay_t<Aspects>> && ...)
-        [[nodiscard]] auto Delete(
-            std::string_view path,
-            F&& handler,
-            Aspects&&... aspects
-        ) -> Result<void> { return Route(mhttp::Method::Delete, path, std::forward<F>(handler), std::forward<Aspects>(aspects)...); }
-
-        /**
-         * @brief Register an OPTIONS handler, including for the literal asterisk target.
-         * @tparam F Eligible handler type.
-         * @tparam Aspects Eligible ordered aspect types.
-         * @param path Decoded route pattern, or *.
-         * @param handler Owned callback.
-         * @param aspects Owned route aspects.
-         * @return Registration result as for Route.
-         */
-        template <typename F, typename... Aspects>
-            requires detail::HttpHandlerFunction<std::decay_t<F>> && (detail::HttpAspect<std::decay_t<Aspects>> && ...)
-        [[nodiscard]] auto Options(
-            std::string_view path,
-            F&& handler,
-            Aspects&&... aspects
-        ) -> Result<void> { return Route(mhttp::Method::Options, path, std::forward<F>(handler), std::forward<Aspects>(aspects)...); }
     };
 
 } // namespace mhttp::server

@@ -5,7 +5,7 @@ Request::Form() 继续解析 urlencoded；Request::Multipart() 按需解析 mult
 两者返回独立拥有的数据，不缓存、不改写 Body，结果可以在请求销毁后使用。
 
 ```cpp
-auto registered = server.Post("/upload", [](auto& request, auto& response) {
+auto registered = server.set_http_handler<mhttp::method::Post>("/upload", [](auto& request, auto& response) {
     auto form = request.Multipart();
     if (!form) {
         static_cast<void>(response.SetError(form.error() == mhttp::Error::BodyTooLarge

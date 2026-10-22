@@ -20,7 +20,7 @@ auto main() -> int {
     auto opened = mhttp::db::SessionPool::Open(soci::sqlite3, "db=app.db timeout=5", { .size = 2 });
     if (!opened) { return 1; }
     mhttp::server::HttpServer server{ runtime };
-    auto routed = server.Get("/notes/:id", [pool = *opened](
+    auto routed = server.set_http_handler<mhttp::method::Get>("/notes/:id", [pool = *opened](
         mhttp::server::Request& request,
         mhttp::server::Response& response
     ) -> mhttp::Task<void> {

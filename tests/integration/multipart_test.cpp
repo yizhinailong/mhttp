@@ -46,7 +46,7 @@ auto multipart_http_round_trips() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(4).has_value(), "start multipart round-trip runtime");
     mhttp::server::HttpServer server{ runtime };
-    Check(server.Post("/echo", [](auto& request, auto& response) -> mhttp::Task<void> {
+    Check(server.set_http_handler<mhttp::method::Post>("/echo", [](auto& request, auto& response) -> mhttp::Task<void> {
         auto form = request.Multipart();
         if (!form) {
             Check(response.SetError(form.error() == mhttp::Error::BodyTooLarge
@@ -95,7 +95,7 @@ auto multipart_http_limits() -> void {
     Check(runtime.Start(4).has_value(), "start multipart admission runtime");
     mhttp::server::HttpServer server{ runtime };
     for (auto path : { "/default", "/small", "/wide" }) {
-        Check(server.Post(path, [path](auto& request, auto& response) {
+        Check(server.set_http_handler<mhttp::method::Post>(path, [path](auto& request, auto& response) {
             mhttp::MultipartLimits limits;
             if (std::string_view{ path } == "/small") { limits.max_parts = 2; limits.part_bytes = 4; }
             if (std::string_view{ path } == "/wide") { limits.max_parts = 129; }

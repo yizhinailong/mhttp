@@ -331,7 +331,7 @@ auto soci_http_handlers() -> void {
         sql << "create table note (id integer primary key, text text not null)";
     }));
     mhttp::server::HttpServer server{ runtime };
-    Check(server.Post("/notes", [pool](mhttp::server::Request& request, mhttp::server::Response& response) -> mhttp::Task<void> {
+    Check(server.set_http_handler<mhttp::method::Post>("/notes", [pool](mhttp::server::Request& request, mhttp::server::Response& response) -> mhttp::Task<void> {
         auto id = co_await pool.Execute([text = std::string{ request.Body() }](soci::session& sql) {
             Check(!mhttp::Runtime::IsIoThread(), "database work runs outside I/O threads");
             sql << "insert into note (text) values (:text)", soci::use(text);
@@ -343,7 +343,7 @@ auto soci_http_handlers() -> void {
         Check(response.SetStatus(mhttp::Status::Created).has_value(), "database insert is 201");
         Check(response.Headers().Set("Location", std::format("/notes/{}", id)).has_value(), "publish created note location");
     }).has_value(), "register database insert route");
-    Check(server.Get("/notes/:id", [pool](mhttp::server::Request& request, mhttp::server::Response& response) -> mhttp::Task<void> {
+    Check(server.set_http_handler<mhttp::method::Get>("/notes/:id", [pool](mhttp::server::Request& request, mhttp::server::Response& response) -> mhttp::Task<void> {
         auto id = request.PathParam<long long>("id");
         if (!id) {
             Check(response.SetError(mhttp::Status::BadRequest).has_value(), "reject non-numeric note id");

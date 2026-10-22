@@ -158,7 +158,7 @@ namespace mhttp::test {
         Check(server.SetErrorHandler([](auto&, auto& response) {
             Check(response.SetJson(Json{ { "error", static_cast<unsigned>(response.Status()) } }).has_value(), "uniform application error envelope");
         }).has_value(), "register REST error representation");
-        Check(server.Post("/users", [store](auto& request, auto& response) {
+        Check(server.set_http_handler<Method::Post>("/users", [store](auto& request, auto& response) {
             auto update = parse_user_update(request, false);
             if (!update) { Check(response.SetError(Status::BadRequest).has_value(), "validate new user"); return; }
             auto user = store->Create(std::move(*update->name), *update->age);
@@ -166,25 +166,23 @@ namespace mhttp::test {
             Check(response.Headers().Set("Location", "/users/" + std::to_string(user.id)).has_value(), "publish created resource location");
             write_user(response, user);
         }).has_value(), "register user creation");
-        Check(server.Get("/users/:id", [store](auto& request, auto& response) {
+        Check(server.set_http_handler<Method::Get>("/users/:id", [store](auto& request, auto& response) {
             auto id = request.template PathParam<std::uint64_t>("id");
             if (!id || *id == 0) { Check(response.SetError(Status::BadRequest).has_value(), "validate typed user id"); return; }
             write_user(response, store->Read(*id));
         }).has_value(), "register user lookup");
-        for (auto method : { Method::Put, Method::Patch }) {
-            Check(server.Route(method, "/users/:id", [store, method](auto& request, auto& response) {
-                auto id = request.template PathParam<std::uint64_t>("id");
-                auto update = parse_user_update(request, method == Method::Patch);
-                if (!id || *id == 0 || !update) { Check(response.SetError(Status::BadRequest).has_value(), "validate typed id and update schema"); return; }
-                write_user(response, store->Update(*id, std::move(update->name), update->age));
-            }).has_value(), "register user replacement/patch");
-        }
-        Check(server.Delete("/users/:id", [store](auto& request, auto& response) {
+        Check(server.set_http_handler<Method::Put, Method::Patch>("/users/:id", [store](auto& request, auto& response) {
+            auto id = request.template PathParam<std::uint64_t>("id");
+            auto update = parse_user_update(request, request.Method() == Method::Patch);
+            if (!id || *id == 0 || !update) { Check(response.SetError(Status::BadRequest).has_value(), "validate typed id and update schema"); return; }
+            write_user(response, store->Update(*id, std::move(update->name), update->age));
+        }).has_value(), "register user replacement/patch");
+        Check(server.set_http_handler<Method::Delete>("/users/:id", [store](auto& request, auto& response) {
             auto id = request.template PathParam<std::uint64_t>("id");
             if (!id || *id == 0) { Check(response.SetError(Status::BadRequest).has_value(), "validate deletion id"); return; }
             Check((store->Erase(*id) ? response.SetEmpty(Status::NoContent) : response.SetError(Status::NotFound)).has_value(), "delete resource or report missing user");
         }).has_value(), "register user deletion");
-        Check(server.Get("/users", [store](auto& request, auto& response) {
+        Check(server.set_http_handler<Method::Get>("/users", [store](auto& request, auto& response) {
             auto page = request.Query().Has("page") ? request.Query().template Get<unsigned>("page") : std::optional{ 1U };
             auto size = request.Query().Has("size") ? request.Query().template Get<unsigned>("size") : std::optional{ 10U };
             if (!page || !size || *page == 0 || *page > 1000000 || *size == 0 || *size > 100) {

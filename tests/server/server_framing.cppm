@@ -107,9 +107,9 @@ namespace mhttp::test {
             CheckEq(request.Body(), HIDDEN_REQUEST, "accepted body retains HTTP-looking bytes as payload");
             Check(response.SetContent("ok", "text/plain").has_value(), "accepted response after input rejections");
         };
-        Check(server.Get("/ok", handler).has_value(), "register GET rejection sentinel");
-        Check(server.Post("/ok", handler).has_value(), "register POST rejection sentinel");
-        Check(server.Get("/sentinel", [&](auto&, auto&) { ++hidden; }).has_value(), "register hidden request sentinel");
+        Check(server.set_http_handler<mhttp::method::Get>("/ok", handler).has_value(), "register GET rejection sentinel");
+        Check(server.set_http_handler<mhttp::method::Post>("/ok", handler).has_value(), "register POST rejection sentinel");
+        Check(server.set_http_handler<mhttp::method::Get>("/sentinel", [&](auto&, auto&) { ++hidden; }).has_value(), "register hidden request sentinel");
         Check(server.SetPreRoutingHandler([](auto& request, auto& response) -> bool {
             if (request.Path() != "/early") { return false; }
             Check(response.SetError(Status::Forbidden).has_value(), "prepare early response without consuming declared body");
@@ -181,16 +181,16 @@ namespace mhttp::test {
         Check(runtime.Start(4).has_value(), "start keep-alive acceptance runtime");
         std::atomic<unsigned> calls{};
         server::HttpServer server{ runtime, { .keep_alive_max_requests = 6 } };
-        Check(server.Get("/ok", [&](auto&, auto& response) {
+        Check(server.set_http_handler<mhttp::method::Get>("/ok", [&](auto&, auto& response) {
             ++calls;
             Check(response.SetContent("ok", "text/plain").has_value(), "persistent GET response");
         }).has_value(), "register persistent GET");
-        Check(server.Post("/empty", [&](auto& request, auto& response) {
+        Check(server.set_http_handler<mhttp::method::Post>("/empty", [&](auto& request, auto& response) {
             ++calls;
             Check(request.Body().empty(), "unframed persistent POST has no body");
             Check(response.SetEmpty(Status::Ok).has_value(), "persistent empty POST response");
         }).has_value(), "register persistent empty POST");
-        Check(server.Delete("/delete", [&](auto& request, auto& response) {
+        Check(server.set_http_handler<mhttp::method::Delete>("/delete", [&](auto& request, auto& response) {
             ++calls;
             Check(request.Body().empty(), "unframed DELETE has no body");
             Check(response.SetContent("deleted", "text/plain").has_value(), "persistent DELETE response");

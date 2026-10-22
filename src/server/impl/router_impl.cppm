@@ -178,23 +178,6 @@ namespace mhttp::impl {
         }
 
         /**
-         * @brief Register or replace a callback without running user destruction code under the mutex.
-         * @param method Supported method.
-         * @param path Borrowed decoded registration pattern.
-         * @param handler Owned callable adapter.
-         * @param lazy Whether the route pulls its body after head admission.
-         * @return Success, AlreadyRunning while frozen, Busy while prepared readers exist, or InvalidRequest.
-         */
-        auto Register(
-            Method method,
-            std::string_view path,
-            detail::HttpHandler handler,
-            bool lazy = false
-        ) -> Result<void> {
-            return Register(std::span<Method const>{ &method, 1 }, path, std::move(handler), lazy);
-        }
-
-        /**
          * @brief Publish method bindings under one configuration guard, sharing owned callback state.
          * @param methods Nonempty borrowed method list, validated before any binding is changed.
          * @param path Borrowed decoded pattern, validated before its first binding is inserted.

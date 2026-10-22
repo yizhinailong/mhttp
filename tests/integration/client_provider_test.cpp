@@ -29,7 +29,7 @@ auto client_provider_binary_and_empty() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(4).has_value(), "start provider runtime");
     mhttp::server::HttpServer server{ runtime, { .request_chunk_bytes = 7 } };
-    Check(server.RouteLazy(mhttp::Method::Post, "/echo", [](auto& request, auto& response) -> mhttp::Task<void> {
+    Check(server.set_lazy_http_handler<mhttp::method::Post>("/echo", [](auto& request, auto& response) -> mhttp::Task<void> {
         std::string body;
         for (;;) {
             auto chunk = co_await request.ReadBody();
@@ -95,19 +95,19 @@ auto client_provider_redirects_and_expect() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(4).has_value(), "start replay provider runtime");
     mhttp::server::HttpServer server{ runtime };
-    Check(server.Post("/redirect/:code", [](auto& request, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Post>("/redirect/:code", [](auto& request, auto& response) {
         CheckEq(request.Body(), "provider", "initial redirected provider upload");
         static_cast<void>(response.SetRedirect("/final", static_cast<mhttp::Status>(*request.template PathParam<unsigned>("code"))));
     }).has_value(), "provider redirect route");
-    Check(server.Post("/final", [](auto& request, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Post>("/final", [](auto& request, auto& response) {
         CheckEq(request.Body(), "provider", "preserved method replays provider");
         static_cast<void>(response.SetContent("post", "text/plain"));
     }).has_value(), "provider replay target");
-    Check(server.Get("/final", [](auto& request, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/final", [](auto& request, auto& response) {
         Check(request.Body().empty() && !request.Headers().Has("Expect"), "303 clears provider and Expect");
         static_cast<void>(response.SetContent("get", "text/plain"));
     }).has_value(), "provider rewrite target");
-    Check(server.RouteLazy(mhttp::Method::Post, "/reject", [](auto&, auto& response) {
+    Check(server.set_lazy_http_handler<mhttp::method::Post>("/reject", [](auto&, auto& response) {
         static_cast<void>(response.SetError(mhttp::Status::Forbidden));
     }).has_value(), "early final rejects provider without interim response");
     mhttp::client::HttpClient client{ runtime, "127.0.0.1", start_provider_server(server),
@@ -148,8 +148,8 @@ auto client_provider_failures() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(4).has_value(), "start failed provider runtime");
     mhttp::server::HttpServer server{ runtime };
-    Check(server.Post("/body", [](auto&, auto&) {}).has_value(), "failed upload route");
-    Check(server.Get("/ok", [](auto&, auto& response) { static_cast<void>(response.SetContent("ok", "text/plain")); }).has_value(), "provider recovery route");
+    Check(server.set_http_handler<mhttp::method::Post>("/body", [](auto&, auto&) {}).has_value(), "failed upload route");
+    Check(server.set_http_handler<mhttp::method::Get>("/ok", [](auto&, auto& response) { static_cast<void>(response.SetContent("ok", "text/plain")); }).has_value(), "provider recovery route");
     mhttp::client::HttpClient client{ runtime, "127.0.0.1", start_provider_server(server), { .upload_chunk_bytes = 3, .upload_body_bytes = 5 } };
     for (unsigned mode{}; mode != 6; ++mode) {
         unsigned calls{};
@@ -189,7 +189,7 @@ auto client_provider_timeout_policies() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(4).has_value(), "start provider deadline runtime");
     mhttp::server::HttpServer server{ runtime };
-    Check(server.Post("/body", [](auto& request, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Post>("/body", [](auto& request, auto& response) {
         static_cast<void>(response.SetContent(request.Body(), "text/plain"));
     }).has_value(), "provider deadline echo");
     auto const port = start_provider_server(server);
@@ -218,7 +218,7 @@ auto client_provider_stop() -> void {
         mhttp::Runtime runtime;
         Check(runtime.Start(4).has_value(), "start canceled provider runtime");
         mhttp::server::HttpServer server{ runtime };
-        Check(server.Post("/body", [](auto&, auto&) {}).has_value(), "pending provider upload");
+        Check(server.set_http_handler<mhttp::method::Post>("/body", [](auto&, auto&) {}).has_value(), "pending provider upload");
         mhttp::client::HttpClient client{ runtime, "127.0.0.1", start_provider_server(server),
             { .timeout_policy = mhttp::client::TimeoutPolicy::Never } };
         std::atomic<unsigned> active{};
@@ -258,7 +258,7 @@ auto client_provider_framed_bounds() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(4).has_value(), "start framed provider runtime");
     mhttp::server::HttpServer server{ runtime };
-    Check(server.Post("/body", [](auto& request, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Post>("/body", [](auto& request, auto& response) {
         static_cast<void>(response.SetContent(std::to_string(request.Body().size()), "text/plain"));
     }).has_value(), "framed provider byte counter");
     mhttp::client::HttpClient client{ runtime, "127.0.0.1", start_provider_server(server), { .max_request_bytes = 512 } };

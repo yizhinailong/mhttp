@@ -84,10 +84,10 @@ auto static_mount_selection() -> void {
         "canonical duplicate mount replaces root and options");
     Check(server.Mount("/files/deep", tree.path / "alternate").has_value(), "nested mount");
     Check(server.Mount("/no-index", tree.path / "public", { .index_file = "" }).has_value(), "disable directory index");
-    Check(server.Get("/files/letters.txt", [](auto&, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/files/letters.txt", [](auto&, auto& response) {
         static_cast<void>(response.SetContent("explicit route", "text/plain"));
     }).has_value(), "ordinary route takes precedence");
-    Check(server.Post("/files/post-only", [](auto&, auto&) {}).has_value(), "explicit method outcome takes precedence");
+    Check(server.set_http_handler<mhttp::method::Post>("/files/post-only", [](auto&, auto&) {}).has_value(), "explicit method outcome takes precedence");
     Check(server.SetNotFoundHandler([](auto&, auto& response) { static_cast<void>(response.SetContent("missing", "text/plain")); }).has_value(),
         "static misses use configured not-found handler");
     Check(server.SetPostRoutingHandler([](auto&, auto& response) { static_cast<void>(response.Headers().Set("X-After", "yes")); }).has_value(),
@@ -275,7 +275,7 @@ auto static_mount_guards() -> void {
     Check(auth && server.Use(std::move(*auth)), "guard static fallback with global authentication");
     Check(server.Mount("/", tree.path / "public").has_value(), "guarded mount");
     Check(!server.Mount("/", tree.path / "missing"), "failed replacement preserves existing mount");
-    Check(server.Get("/io", [&](auto&, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/io", [&](auto&, auto& response) {
         CheckEq(router.Mount("/io", tree.path / "public").error(), mhttp::Error::Busy, "filesystem configuration refuses I/O threads");
         static_cast<void>(response.SetContent("guarded", "text/plain"));
     }).has_value(), "I/O configuration probe");

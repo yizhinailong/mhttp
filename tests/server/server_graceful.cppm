@@ -112,7 +112,7 @@ namespace mhttp::test {
             std::atomic<unsigned> after{};
             server::HttpServer server{ runtime };
             if (lazy) {
-                Check(server.RouteLazy(Method::Post, "/upload", [&](auto& request, auto& response) -> Task<void> {
+                Check(server.set_lazy_http_handler<Method::Post>("/upload", [&](auto& request, auto& response) -> Task<void> {
                     std::string body;
                     for (;;) {
                         auto chunk = co_await request.ReadBody();
@@ -124,11 +124,11 @@ namespace mhttp::test {
                 }).has_value(), "register draining lazy intake");
             } else {
                 Check(server.SetPreRoutingHandler([&](auto&, auto&) { prepared = true; return false; }).has_value(), "signal buffered head admission");
-                Check(server.Post("/upload", [](auto& request, auto& response) {
+                Check(server.set_http_handler<Method::Post>("/upload", [](auto& request, auto& response) {
                     static_cast<void>(response.SetContent(std::string{ request.Body() }, "application/octet-stream"));
                 }).has_value(), "register draining buffered intake");
             }
-            Check(server.Get("/after", [&](auto&, auto&) { ++after; }).has_value(), "register hidden pipeline successor");
+            Check(server.set_http_handler<Method::Get>("/after", [&](auto&, auto&) { ++after; }).has_value(), "register hidden pipeline successor");
             Check(server.BindToAnyPort("127.0.0.1") && server.Start() && server.WaitUntilReady(), "start raw body listener");
             TransportRuntime peers;
             peers.Run(grace_body_scenario(peers.Executor(), server, prepared, after));
@@ -164,7 +164,7 @@ namespace mhttp::test {
         Runtime runtime;
         Check(runtime.Start(4).has_value(), "start idle grace runtime");
         server::HttpServer server{ runtime, { .read_timeout = 5s, .keep_alive_timeout = 5s } };
-        Check(server.Get("/", [](auto&, auto& response) { static_cast<void>(response.SetContent("ready", "text/plain")); }).has_value(), "register persistent idle route");
+        Check(server.set_http_handler<Method::Get>("/", [](auto&, auto& response) { static_cast<void>(response.SetContent("ready", "text/plain")); }).has_value(), "register persistent idle route");
         Check(server.BindToAnyPort("127.0.0.1") && server.Start(), "start idle grace listener");
         TransportRuntime peers;
         peers.Run(grace_idle_scenario(peers.Executor(), server));
@@ -236,7 +236,7 @@ namespace mhttp::test {
         std::atomic<bool> release{};
         std::atomic<unsigned> after{}, active{};
         server::HttpServer server{ runtime, { .write_timeout = 5s } };
-        Check(server.Get("/", [&](auto&, auto& response) {
+        Check(server.set_http_handler<Method::Get>("/", [&](auto&, auto& response) {
             server::ContentProvider provider = [&, mode](auto& writer) -> Task<Result<void>> {
                 StreamFrameLease frame{ active };
                 auto first = co_await writer.Write("first");
@@ -255,7 +255,7 @@ namespace mhttp::test {
                                     : response.SetChunkedContentProvider(std::move(provider));
             Check(configured.has_value(), "configure owned graceful provider");
         }).has_value(), "register committed grace provider");
-        Check(server.Get("/after", [&](auto&, auto&) { ++after; }).has_value(), "register committed stream successor");
+        Check(server.set_http_handler<Method::Get>("/after", [&](auto&, auto&) { ++after; }).has_value(), "register committed stream successor");
         Check(server.BindToAnyPort("127.0.0.1") && server.Start(), "start committed grace listener");
         TransportRuntime peers;
         peers.Run(grace_stream_scenario(peers.Executor(), server, release, mode, fixed, http10));

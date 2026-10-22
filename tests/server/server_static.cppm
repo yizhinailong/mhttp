@@ -116,7 +116,7 @@ namespace mhttp::test {
         Check(runtime.Start(2).has_value(), "start static framing runtime");
         server::HttpServer server{ runtime, { .max_response_bytes = 512, .stream_chunk_bytes = 5 } };
         Check(server.Mount("/files", static_fixture() / "public").has_value(), "static framing mount");
-        Check(server.Get("/after", [](auto&, auto& response) { static_cast<void>(response.SetContent("after", "text/plain")); }).has_value(),
+        Check(server.set_http_handler<Method::Get>("/after", [](auto&, auto& response) { static_cast<void>(response.SetContent("after", "text/plain")); }).has_value(),
             "framing successor probe");
         Check(server.BindToAnyPort("127.0.0.1").has_value() && server.Start().has_value(), "start static framing listener");
         TransportRuntime peers;
@@ -234,7 +234,7 @@ namespace mhttp::test {
                 co_await Offload([file] { std::ofstream output{ file, std::ios::binary }; output << "x"; });
             }
         }).has_value(), "mutate selected file on a worker before head commitment");
-        Check(server.Get("/after", [&](auto&, auto&) { ++after; }).has_value(), "mutation pipeline probe");
+        Check(server.set_http_handler<Method::Get>("/after", [&](auto&, auto&) { ++after; }).has_value(), "mutation pipeline probe");
         Check(server.SetLogger([&](auto const& event) { if (event.error == Error::Read) { ++diagnostics; } }).has_value(),
             "observe native mutation detection");
         Check(server.BindToAnyPort("127.0.0.1").has_value() && server.Start().has_value(), "start static mutation listener");

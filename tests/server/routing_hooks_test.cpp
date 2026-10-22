@@ -78,7 +78,7 @@ auto routing_hook_order() -> void {
         return false;
     }).has_value(), "pre-routing hook");
     Check(router.Use(TraceAspect{ trace, "global" }).has_value(), "global aspect");
-    Check(router.Get("/items/:id", [&](auto& request, auto& response) {
+    Check(router.set_http_handler<mhttp::method::Get>("/items/:id", [&](auto& request, auto& response) {
         trace.push_back("handler");
         CheckEq(request.PathParam("id"), "42"sv, "handler captures after pre-routing");
         Check(response.SetError(mhttp::Status::Forbidden).has_value(), "handler error result");
@@ -106,7 +106,7 @@ auto routing_interception() -> void {
     mhttp::server::Router router;
     std::vector<std::string> trace;
     Check(router.Use(TraceAspect{ trace, "global" }).has_value(), "intercepted global aspect");
-    Check(router.Get("/intercepted", [&](auto&, auto&) { trace.push_back("handler"); }).has_value(), "intercepted route");
+    Check(router.set_http_handler<mhttp::method::Get>("/intercepted", [&](auto&, auto&) { trace.push_back("handler"); }).has_value(), "intercepted route");
     Check(router.SetNotFoundHandler([&](auto&, auto&) { trace.push_back("404"); }).has_value(), "intercepted custom 404");
     Check(router.SetPreRoutingHandler([&](auto&, auto& response) -> mhttp::Task<bool> {
         trace.push_back("pre");
@@ -140,7 +140,7 @@ auto routing_not_found() -> void {
         CheckEq(response.Status(), mhttp::Status::NotFound, "404 is initialized before custom handler");
         Check(response.SetContent(std::string{ request.Path() }, "text/plain").has_value(), "custom 404 representation");
     }, TraceAspect{ trace, "missing" }).has_value(), "404 handler with aspect");
-    Check(router.Get("/declared", [](auto&, auto& response) {
+    Check(router.set_http_handler<mhttp::method::Get>("/declared", [](auto&, auto& response) {
         Check(response.SetError(mhttp::Status::NotFound).has_value(), "handler-generated 404");
     }).has_value(), "route returning 404");
     Check(router.SetPostRoutingHandler([&](auto&, auto&) { trace.push_back("post"); }).has_value(), "404 post hook");
@@ -186,7 +186,7 @@ auto routing_error_framing() -> void {
     }
     CheckEq(errors, 1u, "status change does not recursively invoke error handler");
     CheckEq(posts, 1u, "post runs once after error transformation");
-    Check(router.Get("/ok", [](auto&, auto&) {}).has_value(), "successful route");
+    Check(router.set_http_handler<mhttp::method::Get>("/ok", [](auto&, auto&) {}).has_value(), "successful route");
     static_cast<void>(dispatch(runtime, router, "GET", "/ok"));
     CheckEq(errors, 1u, "successful responses skip error handler");
     CheckEq(posts, 2u, "successful response runs post");
@@ -290,10 +290,10 @@ auto routing_protocol_error() -> void {
         auto outcome = mhttp::SyncWait(runtime, RouterAccess::Process(prepared, request, response));
         Check(outcome.send_response && !outcome.failure, "protocol error response finalized");
         CheckEq(trace, std::vector<std::string>{ "error", "post" }, "only finalization hooks run for parser errors");
-        auto blocked = router.Get("/late", [](auto&, auto&) {});
+        auto blocked = router.set_http_handler<mhttp::method::Get>("/late", [](auto&, auto&) {});
         Check(!blocked && blocked.error() == mhttp::Error::Busy, "parser error write retains configuration guard");
     }
-    Check(router.Get("/late", [](auto&, auto&) {}).has_value(), "parser error lease releases after write");
+    Check(router.set_http_handler<mhttp::method::Get>("/late", [](auto&, auto&) {}).has_value(), "parser error lease releases after write");
 }
 
 /**

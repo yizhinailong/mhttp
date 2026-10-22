@@ -39,8 +39,8 @@ auto shared_http_routes() -> void {
         ++calls;
         static_cast<void>(response.SetContent("accepted", "text/plain"));
     };
-    Check(server.Get("/a", handler, limiter).has_value() && server.Get("/b", handler, limiter).has_value(), "copy one quota into both routes");
-    Check(server.Get("/independent", handler, independent).has_value(), "register independent quota");
+    Check(server.set_http_handler<mhttp::method::Get>("/a", handler, limiter).has_value() && server.set_http_handler<mhttp::method::Get>("/b", handler, limiter).has_value(), "copy one quota into both routes");
+    Check(server.set_http_handler<mhttp::method::Get>("/independent", handler, independent).has_value(), "register independent quota");
     auto port = start_rate_server(server);
     mhttp::client::HttpClient first{ runtime, "127.0.0.1", port };
     mhttp::client::HttpClient second{ runtime, "127.0.0.1", port };
@@ -69,7 +69,7 @@ auto trusted_client_identity() -> void {
         if (trusted) { options.trusted_proxies = mhttp::server::TrustedProxies::Create({ "127.0.0.1" }).value(); }
         mhttp::server::HttpServer server{ runtime, options };
         Check(server.Use(limiter).has_value(), "install global quota");
-        Check(server.Get("/", [](auto& request, auto& response) {
+        Check(server.set_http_handler<mhttp::method::Get>("/", [](auto& request, auto& response) {
             static_cast<void>(response.SetContent(request.ClientIp(), "text/plain"));
         }).has_value(), "echo quota client identity");
         mhttp::client::HttpClient client{ runtime, "127.0.0.1", start_rate_server(server) };
@@ -98,9 +98,9 @@ auto lazy_upload_denial() -> void {
     auto limiter = *mhttp::server::RateLimit::Create({ .max_requests = 1, .window = 60s });
     mhttp::server::HttpServer server{ runtime };
     Check(server.Use(limiter).has_value(), "install lazy upload quota");
-    Check(server.Get("/", [](auto&, auto& response) { static_cast<void>(response.SetContent("accepted", "text/plain")); }).has_value(), "register quota warmup");
+    Check(server.set_http_handler<mhttp::method::Get>("/", [](auto&, auto& response) { static_cast<void>(response.SetContent("accepted", "text/plain")); }).has_value(), "register quota warmup");
     std::atomic<unsigned> handled{}, produced{};
-    Check(server.RouteLazy(mhttp::Method::Post, "/upload", [&](auto&, auto&) { ++handled; }).has_value(), "register limited lazy upload");
+    Check(server.set_lazy_http_handler<mhttp::method::Post>("/upload", [&](auto&, auto&) { ++handled; }).has_value(), "register limited lazy upload");
     mhttp::client::HttpClient client{ runtime, "127.0.0.1", start_rate_server(server) };
     auto warmup = mhttp::SyncWait(runtime, client.Get());
     Check(warmup && warmup->Status() == mhttp::Status::Ok, "consume upload client's quota");
@@ -125,7 +125,7 @@ auto concurrent_http_quota() -> void {
     mhttp::server::HttpServer server{ runtime };
     Check(server.Use(limiter).has_value(), "install concurrent quota");
     std::atomic<unsigned> accepted{}, handled{};
-    Check(server.Get("/", [&](auto&, auto& response) -> mhttp::Task<void> {
+    Check(server.set_http_handler<mhttp::method::Get>("/", [&](auto&, auto& response) -> mhttp::Task<void> {
         ++handled;
         co_await mhttp::Sleep(2ms);
         static_cast<void>(response.SetContent("accepted", "text/plain"));

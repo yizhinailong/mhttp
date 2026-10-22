@@ -55,7 +55,7 @@ namespace mhttp::test {
         Runtime runtime;
         Check(runtime.Start(4).has_value(), "start request metadata runtime");
         server::HttpServer server{ runtime };
-        Check(server.Post("/meta/:name", [](auto& request, auto& response) {
+        Check(server.set_http_handler<Method::Post>("/meta/:name", [](auto& request, auto& response) {
             CheckEq(request.Target(), META_TARGET, "handler sees the original encoded target and query bytes");
             CheckEq(request.Path(), "/meta/a/b", "application path decodes encoded slash");
             CheckEq(request.PathParam("name"), "a/b", "encoded slash remains inside one route capture");
@@ -138,12 +138,10 @@ namespace mhttp::test {
         Runtime runtime;
         Check(runtime.Start(4).has_value(), "start request bodies runtime");
         server::HttpServer server{ runtime };
-        for (auto method : { Method::Get, Method::Post, Method::Put }) {
-            Check(server.Route(method, "/echo", [](auto& request, auto& response) {
-                Check(response.SetContent(request.Body(), request.ContentType()).has_value(), "echo empty or binary body");
-            }).has_value(), "register method-specific body echo");
-        }
-        Check(server.Get("/decoded/*", [](auto& request, auto& response) {
+        Check(server.set_http_handler<Method::Get, Method::Post, Method::Put>("/echo", [](auto& request, auto& response) {
+            Check(response.SetContent(request.Body(), request.ContentType()).has_value(), "echo empty or binary body");
+        }).has_value(), "register method-specific body echo");
+        Check(server.set_http_handler<Method::Get>("/decoded/*", [](auto& request, auto& response) {
             Check(request.Body().empty(), "bodyless path request returns empty Body");
             Check(response.SetContent(std::string{ request.PathParam("*") }, "application/octet-stream").has_value(),
                 "echo decoded path bytes");
@@ -223,21 +221,21 @@ namespace mhttp::test {
             Check(response.Headers().Set("X-Custom", "kept").has_value(), "add custom field before response mutation");
             return false;
         }).has_value(), "register custom response field before mutations");
-        Check(server.Get("/empty/:code", [](auto& request, auto& response) {
+        Check(server.set_http_handler<Method::Get>("/empty/:code", [](auto& request, auto& response) {
             Check(request.Body().empty(), "bodyless request has an empty Body");
             Check(response.SetContent("discarded", "text/html").has_value(), "prepare discarded representation");
             Check(response.SetEmpty(static_cast<Status>(*request.template PathParam<unsigned>("code"))).has_value(),
                 "SetEmpty clears body and media type");
         }).has_value(), "register empty response mutation");
-        Check(server.Get("/error", [](auto&, auto& response) {
+        Check(server.set_http_handler<Method::Get>("/error", [](auto&, auto& response) {
             Check(response.SetError(Status::Forbidden).has_value(), "SetError prepares safe standard representation");
         }).has_value(), "register error response mutation");
-        Check(server.Get("/redirect/:code", [](auto& request, auto& response) {
+        Check(server.set_http_handler<Method::Get>("/redirect/:code", [](auto& request, auto& response) {
             Check(response.SetContent("discarded", "text/html").has_value(), "prepare discarded redirect representation");
             Check(response.SetRedirect("/destination?x=one%20two",
                 static_cast<Status>(*request.template PathParam<unsigned>("code"))).has_value(), "set selected redirect status");
         }).has_value(), "register redirect response mutation");
-        Check(server.Get("/safe", [](auto&, auto& response) {
+        Check(server.set_http_handler<Method::Get>("/safe", [](auto&, auto& response) {
             Check(response.SetContent("safe", "text/plain").has_value(), "prepare valid response before rejected mutations");
             Check(response.Headers().Set("X-Custom", "kept").has_value(), "prepare valid custom field");
             CheckEq(response.Headers().Set("X-Custom", "bad\r\nInjected: yes").error(), Error::InvalidHeaders,
@@ -252,11 +250,11 @@ namespace mhttp::test {
             Check(response.Headers().Set("Content-Length", "9999").has_value(), "prepare stale application length");
             Check(response.Headers().Set("Transfer-Encoding", "chunked").has_value(), "prepare application framing override");
         }).has_value(), "register rejected response mutation checks");
-        Check(server.Get("/close", [](auto&, auto& response) {
+        Check(server.set_http_handler<Method::Get>("/close", [](auto&, auto& response) {
             Check(response.Headers().Set("Connection", "close").has_value(), "application requests close");
             Check(response.SetContent("closed", "text/plain").has_value(), "closing response representation");
         }).has_value(), "register application close response");
-        Check(server.Get("/tail", [&](auto&, auto&) { ++tail; }).has_value(), "register forbidden pipeline successor sentinel");
+        Check(server.set_http_handler<Method::Get>("/tail", [&](auto&, auto&) { ++tail; }).has_value(), "register forbidden pipeline successor sentinel");
         Check(server.BindToAnyPort("127.0.0.1").has_value(), "bind response mutation listener");
         Check(server.Start().has_value(), "start response mutation listener");
         TransportRuntime peers;

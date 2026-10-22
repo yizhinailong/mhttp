@@ -18,7 +18,7 @@ auto authentication_snapshots() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(4).has_value(), "start authentication runtime");
     mhttp::server::HttpServer server{ runtime };
-    Check(server.Get("/", [](auto& request, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/", [](auto& request, auto& response) {
         for (auto name : { "Authorization", "X-Default", "X-Repeated" }) {
             Check(response.Headers().Set(name, request.Header(name)).has_value(), "echo request field");
         }
@@ -75,7 +75,7 @@ auto default_header_replacement() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(2).has_value(), "start header replacement runtime");
     mhttp::server::HttpServer server{ runtime };
-    Check(server.Get("/", [](auto& request, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/", [](auto& request, auto& response) {
         Check(response.Headers().Set("X-Default", request.Header("X-Default")).has_value(), "echo configured default");
         Check(response.Headers().Set("X-Auth", request.Header("Authorization")).has_value(), "echo authorization presence");
     }).has_value(), "register replacement peer");

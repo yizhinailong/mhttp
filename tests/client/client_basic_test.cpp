@@ -64,23 +64,22 @@ auto send_methods_and_metadata() -> void {
     Check(runtime.Start(4).has_value(), "start method runtime");
     mhttp::server::HttpServer server{ runtime };
     std::atomic<unsigned> calls{};
-    for (auto method : { mhttp::Method::Get, mhttp::Method::Head, mhttp::Method::Post, mhttp::Method::Put,
-                         mhttp::Method::Patch, mhttp::Method::Delete, mhttp::Method::Options }) {
-        Check(server.Route(method, "/echo", [&calls](auto& request, auto& response) {
-            ++calls;
-            CheckEq(request.Target(), "/echo?original=1&tag=one+two&tag=a%2Fb"sv, "peer receives ordered escaped query without fragment");
-            CheckEq(request.Query().Values("tag"), std::vector{ "one two"sv, "a/b"sv }, "peer decodes repeated additional query values");
-            CheckEq(request.Header("X-Default"), "default"sv, "configuration field reaches every request");
-            CheckEq(request.Header("X-Override"), "explicit"sv, "explicit fields override defaults");
-            Check(!request.Headers().Has("Accept-Encoding") && !request.Headers().Has("Content-Type"), "client infers neither compression nor content type");
-            CheckEq(request.Headers().Count("Content-Length"), std::size_t{ 1 }, "only one authoritative request length");
-            Check(response.Headers().Set("X-Method", request.MethodString()).has_value(), "return method");
-            Check(response.Headers().Set("X-Host", request.Header("Host")).has_value(), "return generated Host");
-            Check(response.Headers().Set("X-Agent", request.Header("User-Agent")).has_value(), "return generated agent");
-            Check(response.Headers().Set("X-Peer-Port", std::to_string(request.RemoteEndpoint().port)).has_value(), "return actual peer port");
-            Check(response.SetContent(request.Body(), "application/octet-stream").has_value(), "echo binary body");
-        }).has_value(), "register common method route");
-    }
+    Check(server.set_http_handler<mhttp::method::Get, mhttp::method::Head, mhttp::method::Post, mhttp::method::Put,
+                                  mhttp::method::Patch, mhttp::method::Delete, mhttp::method::Options>(
+        "/echo", [&calls](auto& request, auto& response) {
+        ++calls;
+        CheckEq(request.Target(), "/echo?original=1&tag=one+two&tag=a%2Fb"sv, "peer receives ordered escaped query without fragment");
+        CheckEq(request.Query().Values("tag"), std::vector{ "one two"sv, "a/b"sv }, "peer decodes repeated additional query values");
+        CheckEq(request.Header("X-Default"), "default"sv, "configuration field reaches every request");
+        CheckEq(request.Header("X-Override"), "explicit"sv, "explicit fields override defaults");
+        Check(!request.Headers().Has("Accept-Encoding") && !request.Headers().Has("Content-Type"), "client infers neither compression nor content type");
+        CheckEq(request.Headers().Count("Content-Length"), std::size_t{ 1 }, "only one authoritative request length");
+        Check(response.Headers().Set("X-Method", request.MethodString()).has_value(), "return method");
+        Check(response.Headers().Set("X-Host", request.Header("Host")).has_value(), "return generated Host");
+        Check(response.Headers().Set("X-Agent", request.Header("User-Agent")).has_value(), "return generated agent");
+        Check(response.Headers().Set("X-Peer-Port", std::to_string(request.RemoteEndpoint().port)).has_value(), "return actual peer port");
+        Check(response.SetContent(request.Body(), "application/octet-stream").has_value(), "echo binary body");
+    }).has_value(), "register common method route");
     auto port = start_loopback(server);
     mhttp::client::ClientOptions options;
     Check(options.default_headers.Set("X-Default", "default").has_value(), "default request field");
@@ -124,11 +123,11 @@ auto statuses_and_url_target() -> void {
     Check(runtime.Start(4).has_value(), "start status runtime");
     mhttp::server::HttpServer server{ runtime };
     for (auto status : { mhttp::Status::NoContent, mhttp::Status::NotModified, mhttp::Status::NotFound }) {
-        Check(server.Get('/' + std::to_string(static_cast<unsigned>(status)), [status](auto&, auto& response) {
+        Check(server.set_http_handler<mhttp::method::Get>('/' + std::to_string(static_cast<unsigned>(status)), [status](auto&, auto& response) {
             Check(response.SetEmpty(status).has_value(), "select ordinary bodyless/error status");
         }).has_value(), "register status response");
     }
-    Check(server.Get("/base", [](auto& request, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/base", [](auto& request, auto& response) {
         CheckEq(request.Target(), "/base?from=url"sv, "empty request target uses URL path and query without its fragment");
         Check(response.Headers().Set("Connection", "close").has_value(), "explicit closing response");
         Check(response.SetContent("base", "text/plain").has_value(), "URL target content");
@@ -155,11 +154,11 @@ auto busy_and_foreign_stop() -> void {
     Check(runtime.Start(4).has_value(), "start concurrent client runtime");
     mhttp::server::HttpServer server{ runtime };
     std::latch entered{ 4 };
-    Check(server.Get("/slow", [&entered](auto&, auto&) -> mhttp::Task<void> {
+    Check(server.set_http_handler<mhttp::method::Get>("/slow", [&entered](auto&, auto&) -> mhttp::Task<void> {
         entered.count_down();
         co_await mhttp::Sleep(5s);
     }).has_value(), "register pending requests");
-    Check(server.Get("/fast", [](auto&, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/fast", [](auto&, auto& response) {
         Check(response.SetContent("fast", "text/plain").has_value(), "reconnected response");
     }).has_value(), "register fast route");
     auto port = start_loopback(server);
@@ -191,8 +190,8 @@ auto deadlines_and_runtime_restart() -> void {
     mhttp::Runtime server_runtime, client_runtime;
     Check(server_runtime.Start(4).has_value() && client_runtime.Start(4).has_value(), "start independent client/server runtimes");
     mhttp::server::HttpServer server{ server_runtime };
-    Check(server.Get("/slow", [](auto&, auto&) -> mhttp::Task<void> { co_await mhttp::Sleep(300ms); }).has_value(), "register delayed response");
-    Check(server.Get("/fast", [](auto&, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/slow", [](auto&, auto&) -> mhttp::Task<void> { co_await mhttp::Sleep(300ms); }).has_value(), "register delayed response");
+    Check(server.set_http_handler<mhttp::method::Get>("/fast", [](auto&, auto& response) {
         Check(response.SetContent("ready", "text/plain").has_value(), "fast response after timeout");
     }).has_value(), "register successful response");
     auto port = start_loopback(server);
@@ -221,11 +220,11 @@ auto active_runtime_stop() -> void {
     mhttp::server::HttpServer server{ server_runtime };
     std::promise<void> entered;
     auto ready = entered.get_future();
-    Check(server.Get("/hold", [&entered](auto&, auto&) -> mhttp::Task<void> {
+    Check(server.set_http_handler<mhttp::method::Get>("/hold", [&entered](auto&, auto&) -> mhttp::Task<void> {
         entered.set_value();
         co_await mhttp::Sleep(5s);
     }).has_value(), "register active runtime-stop request");
-    Check(server.Get("/fast", [](auto&, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/fast", [](auto&, auto& response) {
         Check(response.SetContent("new-generation", "text/plain").has_value(), "response after runtime restart");
     }).has_value(), "register restarted request");
     auto port = start_loopback(server);
@@ -253,7 +252,7 @@ auto large_binary_ownership() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(4).has_value(), "start large binary runtime");
     mhttp::server::HttpServer server{ runtime };
-    Check(server.Post("/binary", [](auto& request, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Post>("/binary", [](auto& request, auto& response) {
         CheckEq(request.Body().size(), std::size_t{ 4 * 1024 * 1024 }, "server owns complete bounded upload");
         Check(response.SetContent(request.Body(), "application/octet-stream").has_value(), "echo four-MiB binary body");
     }).has_value(), "register large binary echo");
@@ -282,17 +281,16 @@ auto convenience_requests() -> void {
     Check(runtime.Start(4).has_value(), "start convenience runtime");
     mhttp::server::HttpServer server{ runtime };
     std::atomic<unsigned> calls{};
-    for (auto method : { mhttp::Method::Get, mhttp::Method::Head, mhttp::Method::Post, mhttp::Method::Put,
-                         mhttp::Method::Patch, mhttp::Method::Delete, mhttp::Method::Options }) {
-        Check(server.Route(method, "/shortcuts", [&calls](auto& request, auto& response) {
-            ++calls;
-            Check(response.Headers().Set("X-Method", request.MethodString()).has_value(), "return convenience method");
-            Check(response.Headers().Set("X-Target", request.Target()).has_value(), "return convenience target");
-            Check(response.Headers().Set("X-Size", std::to_string(request.Body().size())).has_value(), "return convenience body size");
-            Check(response.Headers().Set("X-Type", request.ContentType()).has_value(), "return convenience media type");
-            Check(response.SetContent(request.Body(), "application/octet-stream").has_value(), "return convenience binary content");
-        }).has_value(), "register convenience method");
-    }
+    Check(server.set_http_handler<mhttp::method::Get, mhttp::method::Head, mhttp::method::Post, mhttp::method::Put,
+                                  mhttp::method::Patch, mhttp::method::Delete, mhttp::method::Options>(
+        "/shortcuts", [&calls](auto& request, auto& response) {
+        ++calls;
+        Check(response.Headers().Set("X-Method", request.MethodString()).has_value(), "return convenience method");
+        Check(response.Headers().Set("X-Target", request.Target()).has_value(), "return convenience target");
+        Check(response.Headers().Set("X-Size", std::to_string(request.Body().size())).has_value(), "return convenience body size");
+        Check(response.Headers().Set("X-Type", request.ContentType()).has_value(), "return convenience media type");
+        Check(response.SetContent(request.Body(), "application/octet-stream").has_value(), "return convenience binary content");
+    }).has_value(), "register convenience method");
     auto port = start_loopback(server);
     mhttp::client::HttpClient client{ runtime, std::format("http://127.0.0.1:{}/shortcuts?tag=from-url", port) };
     auto from_url = mhttp::SyncWait(runtime, client.Get());

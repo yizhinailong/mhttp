@@ -64,8 +64,8 @@ auto route_authentication() -> void {
     auto basic = mhttp::server::BasicAuth::Create(user, password, "basic-area");
     auto bearer = mhttp::server::BearerAuth::Create(token, "bearer-area");
     Check(basic && bearer, "create route authentication aspects");
-    Check(server.Get("/basic", handler, *basic).has_value(), "register Basic route aspect");
-    Check(server.Get("/bearer", handler, *bearer).has_value(), "register Bearer route aspect");
+    Check(server.set_http_handler<mhttp::method::Get>("/basic", handler, *basic).has_value(), "register Basic route aspect");
+    Check(server.set_http_handler<mhttp::method::Get>("/bearer", handler, *bearer).has_value(), "register Bearer route aspect");
     user = password = token = "caller changed its source";
     auto port = start_middleware_peer(server);
     mhttp::client::HttpClient client{ runtime, "127.0.0.1", port };
@@ -122,7 +122,7 @@ auto global_authentication() -> void {
     });
     Check(auth && server.Use(*auth), "install global custom Bearer validator");
     for (auto path : { "/a", "/b" }) {
-        Check(server.Get(path, [&handled](auto&, auto& response) {
+        Check(server.set_http_handler<mhttp::method::Get>(path, [&handled](auto&, auto& response) {
             ++handled;
             Check(response.SetContent("global protected", "text/plain").has_value(), "global protected response");
         }).has_value(), "register globally protected route");
@@ -220,7 +220,7 @@ auto cors_actual_requests() -> void {
     Check(cors && server.Use(*cors), "install exact-origin CORS globally");
     options.origins.clear();
     std::atomic<unsigned> handled{};
-    Check(server.Get("/data", [&handled](auto&, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/data", [&handled](auto&, auto& response) {
         ++handled;
         Check(response.Headers().Set("Vary", "Accept-Encoding").has_value(), "handler supplies independent cache variation");
         Check(response.Headers().Set("X-Trace", "trace").has_value(), "exposed handler field");
@@ -264,8 +264,8 @@ auto cors_preflights() -> void {
         .headers = { "Content-Type", "X-Tenant", "Authorization" }, .max_age = 600s });
     Check(cors && server.Use(*cors), "install configurable wildcard CORS");
     std::atomic<unsigned> calls{};
-    Check(server.Get("/resource", [&calls](auto&, auto&) { ++calls; }).has_value(), "GET-only resource");
-    Check(server.Options("/ordinary", [&calls](auto&, auto&) { ++calls; }).has_value(), "ordinary OPTIONS route");
+    Check(server.set_http_handler<mhttp::method::Get>("/resource", [&calls](auto&, auto&) { ++calls; }).has_value(), "GET-only resource");
+    Check(server.set_http_handler<mhttp::method::Options>("/ordinary", [&calls](auto&, auto&) { ++calls; }).has_value(), "ordinary OPTIONS route");
     auto port = start_middleware_peer(server);
     mhttp::client::HttpClient client{ runtime, "127.0.0.1", port };
     mhttp::Headers fields;
@@ -324,7 +324,7 @@ auto cors_and_authentication() -> void {
     auto auth = mhttp::server::BearerAuth::Create("secret");
     Check(cors && auth && server.Use(*cors, *auth), "install CORS before authentication");
     std::atomic<unsigned> handled{};
-    Check(server.Get("/secret", [&handled](auto&, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/secret", [&handled](auto&, auto& response) {
         ++handled;
         Check(response.SetContent("authorized", "text/plain").has_value(), "combined authorized response");
     }).has_value(), "register combined protected route");

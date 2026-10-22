@@ -69,7 +69,7 @@ namespace mhttp::test {
         Check(runtime.Start(4).has_value(), "start concurrent pipeline runtime");
         std::atomic<unsigned> ready{}, calls{};
         server::HttpServer server{ runtime, { .keep_alive_max_requests = 20, .max_connections = 64 } };
-        Check(server.Get("/identity/:client/:index", [&](auto& request, auto& response) -> Task<void> {
+        Check(server.set_http_handler<mhttp::method::Get>("/identity/:client/:index", [&](auto& request, auto& response) -> Task<void> {
             auto const client = *request.template PathParam<unsigned>("client");
             auto const index = *request.template PathParam<unsigned>("index");
             if (index == 0) {
@@ -88,7 +88,7 @@ namespace mhttp::test {
         peers.Run(server_pipeline_clients(peers.Executor(), *server.LocalEndpoint()));
         Check(server.Stop().has_value(), "drain concurrent pipeline sessions");
         Check(ready == 50 && calls == 1000, "all fifty sessions overlap and dispatch exactly one handler per request");
-        Check(server.Get("/after", [](auto&, auto&) {}).has_value(), "concurrent session drain releases every route reader");
+        Check(server.set_http_handler<mhttp::method::Get>("/after", [](auto&, auto&) {}).has_value(), "concurrent session drain releases every route reader");
     }
 
     /**
@@ -122,7 +122,7 @@ namespace mhttp::test {
         std::latch entered{ 1 };
         std::atomic<bool> worker_done{};
         server::HttpServer server{ runtime };
-        Check(server.Get("/slow", [&](auto&, auto& response) -> Task<void> {
+        Check(server.set_http_handler<mhttp::method::Get>("/slow", [&](auto&, auto& response) -> Task<void> {
             auto result = co_await Offload([&] {
                 Check(!Runtime::IsIoThread(), "blocking work runs outside every I/O execution thread");
                 entered.count_down();
@@ -133,7 +133,7 @@ namespace mhttp::test {
             Check(Runtime::IsIoThread(), "handler resumes on I/O execution after worker completion");
             Check(response.SetContent(std::move(result), "text/plain").has_value(), "completed Offload response");
         }).has_value(), "register blocking worker route");
-        Check(server.Get("/fast", [&](auto&, auto& response) {
+        Check(server.set_http_handler<mhttp::method::Get>("/fast", [&](auto&, auto& response) {
             Check(!worker_done, "fast handler runs while the other connection is blocked in its worker");
             Check(response.SetContent("fast", "text/plain").has_value(), "unrelated fast response");
         }).has_value(), "register unrelated fast route");

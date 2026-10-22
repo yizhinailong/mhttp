@@ -85,23 +85,23 @@ namespace mhttp::test {
             auto value = request.PathParam("value", request.PathParam("*"));
             Check(response.SetContent(std::string{ value }, "text/plain").has_value(), "captured route response");
         };
-        Check(server.Get("/static", fixed("literal")).has_value(), "register static path");
-        Check(server.Get("/middle/:value/end", captured).has_value(), "register middle capture");
-        Check(server.Get("/last/:value", captured).has_value(), "register trailing capture");
-        Check(server.Get("/multi/:id/:name", [](auto& request, auto& response) {
+        Check(server.set_http_handler<Method::Get>("/static", fixed("literal")).has_value(), "register static path");
+        Check(server.set_http_handler<Method::Get>("/middle/:value/end", captured).has_value(), "register middle capture");
+        Check(server.set_http_handler<Method::Get>("/last/:value", captured).has_value(), "register trailing capture");
+        Check(server.set_http_handler<Method::Get>("/multi/:id/:name", [](auto& request, auto& response) {
             CheckEq(request.template PathParam<int>("id"), std::optional{ 42 }, "typed numeric capture over HTTP");
             Check(response.SetContent(std::format("{}:{}", request.PathParam("id"), request.PathParam("name")),
                 "text/plain").has_value(), "consecutive parameter response");
         }).has_value(), "register consecutive typed and encoded captures");
-        Check(server.Get("/regex/{value:[0-9]+}", captured).has_value(), "register safe bounded regex");
-        Check(server.Get("/catch/*", captured).has_value(), "register wildcard remainder");
-        Check(server.Get("/priority/:value", captured).has_value(), "register parameter before competing static path");
-        Check(server.Get("/priority/static", fixed("literal")).has_value(), "register higher priority static path");
-        Check(server.Get("/priority/static/", fixed("slash")).has_value(), "register distinct trailing slash");
-        Check(server.Get("/a b", fixed("encoded static")).has_value(), "register decoded literal space");
-        Check(server.Get("/literal:colon", fixed("literal colon")).has_value(), "register embedded literal colon");
+        Check(server.set_http_handler<Method::Get>("/regex/{value:[0-9]+}", captured).has_value(), "register safe bounded regex");
+        Check(server.set_http_handler<Method::Get>("/catch/*", captured).has_value(), "register wildcard remainder");
+        Check(server.set_http_handler<Method::Get>("/priority/:value", captured).has_value(), "register parameter before competing static path");
+        Check(server.set_http_handler<Method::Get>("/priority/static", fixed("literal")).has_value(), "register higher priority static path");
+        Check(server.set_http_handler<Method::Get>("/priority/static/", fixed("slash")).has_value(), "register distinct trailing slash");
+        Check(server.set_http_handler<Method::Get>("/a b", fixed("encoded static")).has_value(), "register decoded literal space");
+        Check(server.set_http_handler<Method::Get>("/literal:colon", fixed("literal colon")).has_value(), "register embedded literal colon");
         for (auto path : { "/regex/{value:(a+)+}", "/regex/{value:[}", "/regex/{value:123456789}" }) {
-            CheckEq(server.Get(path, fixed("invalid")).error(), Error::InvalidRequest,
+            CheckEq(server.set_http_handler<Method::Get>(path, fixed("invalid")).error(), Error::InvalidRequest,
                 "dangerous, invalid, and excessive regexes are rejected without replacing valid routes");
         }
         Check(server.BindToAnyPort("127.0.0.1").has_value(), "bind route path listener");
@@ -157,8 +157,8 @@ namespace mhttp::test {
             auto method = request.Method() == Method::Head ? Method::Get : *request.Method();
             Check(response.SetContent(std::string{ ToString(method) }, "text/plain").has_value(), "shared-path method response");
         };
-        Check(server.Get("/verbs", handler).has_value(), "register GET with implicit HEAD");
-        Check(server.Post("/verbs", handler).has_value(), "register POST on the same route");
+        Check(server.set_http_handler<Method::Get>("/verbs", handler).has_value(), "register GET with implicit HEAD");
+        Check(server.set_http_handler<Method::Post>("/verbs", handler).has_value(), "register POST on the same route");
         Check(server.BindToAnyPort("127.0.0.1").has_value(), "bind route method listener");
         Check(server.Start().has_value(), "start route method listener");
         TransportRuntime peers;

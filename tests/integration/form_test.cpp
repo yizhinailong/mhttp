@@ -84,7 +84,7 @@ auto form_and_query_round_trips() -> void {
     mhttp::Runtime runtime;
     Check(runtime.Start(4).has_value(), "start form integration runtime");
     mhttp::server::HttpServer server{ runtime };
-    Check(server.Post("/form", [](auto& request, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Post>("/form", [](auto& request, auto& response) {
         auto form = request.Form();
         if (!form) {
             Check(response.SetError(mhttp::Status::BadRequest).has_value(), "reject nonform body");
@@ -93,7 +93,7 @@ auto form_and_query_round_trips() -> void {
         CheckEq(request.Query().Get("origin"), "query"sv, "URL query stays independent of form fields");
         Check(response.SetContent(form->Encode(), "application/x-www-form-urlencoded").has_value(), "echo decoded/reencoded form");
     }).has_value(), "register form echo");
-    Check(server.Get("/query", [](auto& request, auto& response) {
+    Check(server.set_http_handler<mhttp::method::Get>("/query", [](auto& request, auto& response) {
         Check(response.SetContent(request.Query().Encode(), "text/plain").has_value(), "echo ordered query");
     }).has_value(), "register query echo");
     auto port = server.BindToAnyPort("127.0.0.1");
