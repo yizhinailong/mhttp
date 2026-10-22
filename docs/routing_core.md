@@ -1,8 +1,9 @@
 # 路由匹配核心
 
 `mhttp::detail::RouteTree` 是不依赖网络的内部组件，注册方法、模式和调用方管理的
-handler 标识符，匹配时返回拥有所有权的 `RouteMatch`。它尚未执行 handler 或写出响应；
-服务端公共路由接口与 HTTP 会话将在后续阶段接入。
+handler 标识符，匹配时返回拥有所有权的 `RouteMatch`。它本身不执行 handler 或写出响应；
+`server::Router` 在其上保存处理器与 aspect，HTTP 会话负责读取请求并写回响应，
+见[服务端接口基础](server_api.md)。
 
 ## 路径与匹配
 
@@ -42,8 +43,10 @@ HEAD 先搜索所有显式 HEAD 候选，再按相同路径优先级搜索 GET�
 
 节点由平坦容器拥有，搜索使用显式帧，深路径的匹配、回溯和销毁不会递归占用调用栈。
 完成注册后允许多个线程同时调用 `Match`；每个结果独立拥有参数，后续匹配不会使其失效。
-修改路由表需要外部同步。上层 Router 还需在运行期间拒绝注册，并在会话排空后才恢复修改。
+修改路由表需要外部同步；上层 Router 用配置锁提供这种同步，运行期间拒绝注册，
+并在会话排空后才允许修改。
 
 `tests/server/route_pattern_test.cpp` 覆盖模式语法、危险正则、来源大小边界和路径解码；
 `route_tree_test.cpp` 覆盖优先级、回溯、方法、HEAD、编码路径、正则匹配大小边界，
-以及 3000 段路径和多线程只读匹配。HTTP 响应与 handler 行为仍需后续端到端测试。
+以及 3000 段路径和多线程只读匹配。handler 分派由 `tests/server/router_test.cpp` 覆盖；
+路由参数、编码分隔符、404/405 与 HEAD 的完整 HTTP 响应由 `python tools/check_server.py` 验证。

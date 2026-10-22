@@ -1,7 +1,7 @@
 # 异步基础
 
-消费者通过 `import mhttp;` 使用 `Task<T>`、`Runtime`、`Sleep`、`Offload` 和
-`SyncWait`。公共接口使用标准库类型；Asio 执行器和桥接函数位于实现分区。
+消费者通过 `import mhttp;` 使用 `Task<T>`、`Runtime`、`Sleep`、`Offload`、
+`SyncWait` 和 `MoveOnlyFunction`。公共接口使用标准库类型；Asio 执行器和桥接函数位于实现分区。
 监听器、HTTP 会话和客户端通过内部桥接运行用户 Task，保持公共接口中的 Asio 名字不可见。
 
 ## Task 的所有权
@@ -14,6 +14,14 @@
 Task 拥有协程帧。未开始等待就析构时会释放帧和按值传入的参数；完成后由等待方销毁。
 引用参数和 lambda 借用的对象必须活到整个异步操作完成。避免立即调用带捕获的
 协程 lambda；优先用普通协程函数的按值参数保存所有权。
+
+## 只可移动回调
+
+公共回调类型使用 `MoveOnlyFunction<R(Args...)>`，它实现 mhttp 需要的 `std::move_only_function` 子集，
+不依赖标准库是否已提供该类型。构造时分配一次并拥有可调用对象，支持只可移动的捕获；
+移动转移所有权并使源对象为空，复制被禁用。空函数指针或成员指针构造空对象，
+调用空对象抛出 `std::bad_function_call`。客户端的内容 provider 与 TransferCallbacks、
+服务端的诊断和访问日志回调，以及 StreamWriter 的内容 provider 均使用此类型。
 
 ## Runtime 的生命周期
 

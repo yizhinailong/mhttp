@@ -31,32 +31,30 @@ mcpp build --locked
 
 ## 最小用法
 
-服务端先启动 Runtime，再注册和启动监听器。此示例的主线程等待回车，
-I/O 线程继续处理请求；停止时先排空服务端，再销毁 Runtime。
+服务端可以使用 drogon 风格的 `mhttp::app()`：注册路由后链式配置监听地址和 I/O 线程数，
+`Run()` 阻塞调用线程；收到 Ctrl+C（SIGINT / SIGTERM）或 `Quit()` 后，
+先在默认五秒的宽限内完成已开始的请求，再停止 I/O 线程并返回。
 
 ```cpp
 import std;
 import mhttp;
 
 auto main() -> int {
-    mhttp::Runtime runtime;
-    if (!runtime.Start(2)) { return 1; }
-    mhttp::server::HttpServer server{ runtime };
-    auto registered = server.set_http_handler<mhttp::method::Get>(
+    mhttp::app().set_http_handler<mhttp::method::Get>(
         "/hello/:name", [](auto& request, auto& response) -> mhttp::Task<void> {
         co_await mhttp::Sleep(std::chrono::milliseconds{ 1 });
         auto result = response.SetContent(
             "Hello, " + std::string{ request.PathParam("name") } + "\n", "text/plain");
         if (!result) { throw std::runtime_error{ std::string{ mhttp::ToString(result.error()) } }; }
     });
-    if (!registered) { return 1; }
-    if (!server.Bind("127.0.0.1", 8080) || !server.Start() || !server.WaitUntilReady()) { return 1; }
-    std::cout << "Listening on http://127.0.0.1:8080; press Enter to stop.\n";
-    std::string line;
-    std::getline(std::cin, line);
-    return server.Stop() ? 0 : 1;
+    auto result = mhttp::app().SetListener("127.0.0.1", 8080).SetThreadNum(2).Run();
+    return result ? 0 : 1;
 }
 ```
+
+注册结果可以直接忽略；需要发现非法路径等失败时，检查返回的 `RouteRegistration`。
+需要自行管理 Runtime、与其他组件共享 Runtime 或使用多个监听器时，直接构造 `server::HttpServer`，
+见 [服务端接口基础](docs/server_api.md) 的“监听器生命周期”和“应用入口”。
 
 客户端在非 I/O 线程上用 `SyncWait` 等待结果。HTTP 的 4xx / 5xx 仍然是成功收到的
 Response；传输、解析或取消失败才通过 `Result` 的错误分支返回。
@@ -79,7 +77,8 @@ auto main() -> int {
 }
 ```
 
-Runtime 必须活得比服务端、客户端及其 Task 更久。一个 HttpClient 同时只接收一个 Send；
+Runtime 必须活得比服务端、客户端及其 Task 更久；`mhttp::app()` 自己拥有 Runtime，
+Run 期间可通过 `GetRuntime()` 借给客户端使用。一个 HttpClient 同时只接收一个 Send；
 并发请求使用多个客户端。不同服务端会话可以并发调用 handler，共享业务状态需自行同步；
 不要在 handler 中阻塞等待或执行耗时任务，阻塞业务可通过 `Offload` 移出 I/O 线程。
 
@@ -111,7 +110,9 @@ mcpp run rest_client -- http://127.0.0.1:8080
 示例最多保存 128 条、每条 1–256 字节且不含控制字符的笔记，不持久化。
 资源满时返回 409，不存在时返回 404；不合法的 ID、内容或 limit 返回 400。
 [rest_client](examples/rest_client/main.cpp) 演示完整 CRUD、查询参数、Location、HEAD、OPTIONS
-和错误状态处理。服务端在主线程收到回车或 stdin EOF 后停止；传入端口 0 可分配动态端口。
+和错误状态处理。rest_server 在 `mhttp::app()` 上注册路由并链式配置监听地址、线程数和服务端限制，
+在辅助线程中 `Run()`；主线程等待就绪后打印实际地址，收到回车或 stdin EOF 时调用 `Quit()` 优雅停止。
+示例关闭了信号处理，由控制台负责停止；传入端口 0 可分配动态端口。
 
 JSON 的 feature、独立 `import mhttp.json;` 与读写接口见 [JSON 适配](docs/json.md)；
 SOCI 的 feature、独立 `import mhttp.soci;` 与会话池见 [SOCI 数据库](docs/soci.md)；
@@ -189,7 +190,7 @@ doxygen Doxyfile
 
 打开 `target/doxygen/html/index.html` 查看生成的文档。
 文档包含项目说明和源码中的 Doxygen 注释，支持 `.cppm` 模块文件。
-现有文档工作流会在 `master` 分支相关文件变更时构建文档并发布到 GitHub Pages。
+现有文档工作流会在 `main` 分支相关文件变更时构建文档并发布到 GitHub Pages。
 
 开发约定见 [AGENTS.md](AGENTS.md)，构建配置格式见
 [mcpp 清单文档](https://github.com/mcpp-community/mcpp/blob/main/docs/04-mcpp-toml.md)。

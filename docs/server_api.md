@@ -1,7 +1,8 @@
 # 服务端接口基础
 
 `server::Request`、`server::Response`、`server::RequestData` 和 `server::Router`
-通过 `import mhttp;` 使用。HttpServer 在借用的 Runtime 上提供异步监听器与 HTTP 会话。
+通过 `import mhttp;` 使用。HttpServer 在借用的 Runtime 上提供异步监听器与 HTTP 会话；
+`mhttp::App` 自己拥有 Runtime 和一个监听器，见本文最后的“应用入口”。
 
 ## 路由注册
 
@@ -383,7 +384,7 @@ ServerOptions 定义会话的读写超时、keep-alive 空闲超时和最大请�
 以及 URI、头部字节数、字段数、请求 body 和整份响应的大小上限。
 默认请求限制沿用协议核心；整份缓冲响应默认最多 16 MiB，含实际发送的头部和 body。
 超时和除 body 外的上限必须为正，body 上限可以设为零以拒绝有内容的请求。
-内部选项校验会在建立服务器资源前拒绝无效值和无法安全转换的超时；监听器接入尚待完成。
+HttpServer 的 Bind 与 App 的 Run 在创建套接字前校验选项，无效值和无法安全转换的超时返回 InvalidRequest。
 
 default_headers 保存回退响应头，应用显式设置同名字段时，整组默认值被覆盖；
 否则保留该默认字段的全部重复值。Date 缺失时自动按 GMT 补齐。
@@ -625,6 +626,10 @@ IsRunning 和 LocalEndpoint 反映正在接受连接的监听器。`GetRuntime()
 运行期间可用于创建客户端或调用 SyncWait、Offload；Runtime 由 Run 启停，不要自行 Start 或 Stop。
 App 必须在非 I/O 线程析构，析构会 Quit 并等待进行中的 Run 返回；单例在静态析构阶段销毁，
 应在 main 返回前让 Run 结束。需要多个监听器或与其他组件共享 Runtime 时，直接使用 HttpServer。
+
+由控制台或其他事件负责停止时，可以在辅助线程调用 Run，再由控制线程 WaitUntilReady、读取 LocalEndpoint
+并在适当时机 Quit；[rest_server](../examples/rest_server/main.cpp) 用这种方式在回车或 stdin EOF 时停止，
+并通过 DisableSignalHandling 把信号留给默认处理。
 
 `tests/server/app_test.cpp` 覆盖配置错误、日志转发、I/O 线程拒绝、服务与重启、
 handler 内 Quit、宽限超时和 SIGINT 退出。

@@ -2,8 +2,10 @@
 
 ## 项目方向
 
-`mhttp` 计划基于 standalone Asio 实现异步服务端。当前处于初始化阶段，
-只有构建骨架，尚未实现监听器、连接会话或 HTTP 协议处理。
+`mhttp` 是基于 standalone Asio 的异步 HTTP/1.1 库：协议核心负责有界的增量解析与序列化，
+服务端提供监听器、会话、路由、中间件、静态文件、流式响应和 `mhttp::app()` 应用入口，
+客户端提供连接复用、重定向和连接池；JSON 与 SOCI 是可选模块，TLS 和压缩尚未实现。
+功能概览见 `README.md`，各组件的契约见 `docs/`。
 实现新功能时保持传输、协议处理和应用接口的职责清晰，按实际需求逐步增加组件。
 
 ## 技术栈与构建
@@ -28,22 +30,28 @@ doxygen Doxyfile
 
 按 `mcpp.toml` 中指定的版本准备 LLVM 工具链后即可构建；
 项目通过 `[toolchain].default` 选择编译器。
-添加 `tests/**/*.cpp` 后，使用 `mcpp test --timeout 30` 运行测试。
+使用 `mcpp test --timeout 30` 运行测试；模块边界、私有实现、可选模块和示例的额外检查
+由 `tools/check_*.py` 执行，完整列表见 `README.md`。
 库本身没有可运行入口；示例程序在 `examples/` 目录中通过 `mcpp run <target>` 运行。
 
 ## 目录与模块
 
 - `src/mhttp.cppm`：公共主模块，消费者通过 `import mhttp;` 使用库。
-- `src/**/*.cppm`：后续库组件，声明和实现放在同一个模块接口文件中。
-- 按职责组织目录；需要拆分时使用 `mhttp:component` 分区，由主模块导出公共分区。
-- `tests/**/*.cpp`：后续独立测试程序，每个程序提供 `main()`，以退出码表示成败。
+- `src/{core,client,server,utils}/`：按职责划分的库组件，使用 `mhttp:component` 分区
+  （如 `mhttp:server.router`），声明和实现放在同一个模块接口文件中，由主模块导出公共分区。
+- `src/**/impl/`：依赖 Asio 的实现分区，只由公共分区导入、不重新导出，规则见 `docs/module_boundaries.md`。
+- `src/core/json.cppm`、`src/db/soci.cppm`：由 `json`、`soci` feature 启用的独立模块
+  `mhttp.json`、`mhttp.soci`，默认 `import mhttp;` 不依赖它们。
+- `tests/**/*.cpp`：独立测试程序，每个程序提供 `main()`，以退出码表示成败；
+  `tests/json/`、`tests/soci/` 是开启 feature 的独立消费者工程，由对应检查脚本运行，不参与根项目的测试发现。
+- `tools/check_*.py`：在临时或独立工程中运行的额外检查，包括私有分区测试、可选模块和示例。
 - `examples/`：独立的 mcpp 示例项目，`examples/mcpp.toml` 通过路径依赖使用 mhttp
-  并声明示例可执行目标；不在根 `mcpp.toml` 中添加示例目标。
+  并声明 rest_server、rest_client、stress_test 等可执行目标；不在根 `mcpp.toml` 中添加示例目标。
 - `target/` 和 `compile_commands.json`（包括 `examples/` 下的同名产物）为生成文件，不提交。
 - `Doxyfile`：Doxygen 配置，解析项目说明和 `src/`，包含 `.cppm` 模块文件，
   输出 HTML 到 `target/doxygen/html/`，由现有文档工作流发布至 GitHub Pages。
-- `.github/workflows/` 已有工作流草稿；其中 TLS、压缩和消费者示例
-  步骤引用的功能或文件目前尚未实现，不应据此假定项目已支持这些能力。
+- `.github/workflows/`：Linux / Windows CI 构建并运行 `mcpp test` 与全部检查脚本；
+  文档工作流在 `main` 分支构建并发布 Doxygen；version-tag 工作流在 `mcpp.toml` 版本变化时创建标签。
 
 ## C++ 风格
 

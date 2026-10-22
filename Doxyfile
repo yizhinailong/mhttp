@@ -1,6 +1,6 @@
 # Project
 PROJECT_NAME           = mhttp
-PROJECT_BRIEF          = "基于 standalone Asio 的异步服务端"
+PROJECT_BRIEF          = "基于 standalone Asio 的异步 HTTP 库"
 OUTPUT_DIRECTORY       = target/doxygen
 OUTPUT_LANGUAGE        = Chinese
 INPUT_ENCODING         = UTF-8

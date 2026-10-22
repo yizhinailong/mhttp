@@ -1,6 +1,6 @@
 /**
  * @file main.cpp
- * @brief Serve bounded in-memory notes with asynchronous handlers and synchronized application state.
+ * @brief Serve bounded in-memory notes through the process-wide application with synchronized state.
  */
 import std;
 import mhttp;
@@ -53,16 +53,29 @@ namespace {
     }
 
     /**
-     * @brief Install handlers whose captured shared state outlives every admitted request.
-     * @param server Idle listener that owns the registered callbacks.
+     * @brief Request Quit when leaving the console scope, including exceptional exits.
+     * @note Keeps the Run future's blocking destructor from waiting on a listener nobody stops.
      */
-    auto install_routes(mhttp::server::HttpServer& server) -> void {
+    struct QuitOnExit {
+        mhttp::App& app; ///< Application whose Run must end before its future is released.
+
+        /**
+         * @brief Ask the active Run to drain; idle applications ignore the request.
+         */
+        ~QuitOnExit() { app.Quit(); }
+    };
+
+    /**
+     * @brief Install handlers whose captured shared state outlives every admitted request.
+     * @param router Idle application routes that own the registered callbacks.
+     */
+    auto install_routes(mhttp::server::Router& router) -> void {
         auto notes = std::make_shared<Notes>();
-        require_success(server.set_http_handler<mhttp::method::Get>("/health", [](auto&, auto& response) -> mhttp::Task<void> {
+        require_success(router.set_http_handler<mhttp::method::Get>("/health", [](auto&, auto& response) -> mhttp::Task<void> {
             co_await mhttp::Sleep(1ms);
             require_success(response.SetContent("ready\n", "text/plain"));
         }));
-        require_success(server.set_http_handler<mhttp::method::Get>("/notes", [notes](auto& request, auto& response) {
+        require_success(router.set_http_handler<mhttp::method::Get>("/notes", [notes](auto& request, auto& response) {
             auto const limit = request.Query().template Get<unsigned>("limit").value_or(
                 request.Query().Has("limit") ? 0U : 10U);
             if (limit == 0 || limit > 100 || request.Query().Count("limit") > 1) {
@@ -78,7 +91,7 @@ namespace {
             }
             respond(response, mhttp::Status::Ok, std::move(body));
         }));
-        require_success(server.set_http_handler<mhttp::method::Post>("/notes", [notes](auto& request, auto& response) {
+        require_success(router.set_http_handler<mhttp::method::Post>("/notes", [notes](auto& request, auto& response) {
             if (!valid_text(request.Body())) {
                 respond(response, mhttp::Status::BadRequest, "send 1-256 text bytes without control characters\n");
                 return;
@@ -98,7 +111,7 @@ namespace {
             require_success(response.Headers().Set("Location", std::format("/notes/{}", id)));
             respond(response, mhttp::Status::Created, request.Body());
         }));
-        require_success(server.set_http_handler<mhttp::method::Get>("/notes/:id", [notes](auto& request, auto& response) {
+        require_success(router.set_http_handler<mhttp::method::Get>("/notes/:id", [notes](auto& request, auto& response) {
             auto const id = request.template PathParam<std::uint64_t>("id");
             if (!id || *id == 0) {
                 respond(response, mhttp::Status::BadRequest, "invalid note ID\n");
@@ -111,7 +124,7 @@ namespace {
             }
             respond(response, text ? mhttp::Status::Ok : mhttp::Status::NotFound, text.value_or("note not found\n"));
         }));
-        require_success(server.set_http_handler<mhttp::method::Put, mhttp::method::Patch>(
+        require_success(router.set_http_handler<mhttp::method::Put, mhttp::method::Patch>(
             "/notes/:id", [notes](auto& request, auto& response) {
             auto const id = request.template PathParam<std::uint64_t>("id");
             if (!id || *id == 0 || !valid_text(request.Body())) {
@@ -129,11 +142,11 @@ namespace {
             respond(response, found ? mhttp::Status::Ok : mhttp::Status::NotFound,
                 found ? request.Body() : "note not found\n");
         }));
-        require_success(server.set_http_handler<mhttp::method::Options>("/notes/:id", [](auto&, auto& response) {
+        require_success(router.set_http_handler<mhttp::method::Options>("/notes/:id", [](auto&, auto& response) {
             require_success(response.Headers().Set("Allow", "GET, HEAD, PUT, PATCH, DELETE, OPTIONS"));
             respond(response, mhttp::Status::NoContent, "");
         }));
-        require_success(server.set_http_handler<mhttp::method::Delete>("/notes/:id", [notes](auto& request, auto& response) {
+        require_success(router.set_http_handler<mhttp::method::Delete>("/notes/:id", [notes](auto& request, auto& response) {
             auto const id = request.template PathParam<std::uint64_t>("id");
             if (!id || *id == 0) {
                 respond(response, mhttp::Status::BadRequest, "invalid note ID\n");
@@ -152,30 +165,37 @@ namespace {
 } // namespace
 
 /**
- * @brief Start a loopback listener, then drain it when the non-I/O console thread receives Enter or EOF.
+ * @brief Run the process-wide application on a helper thread and quit it when the console receives Enter or EOF.
  * @param argc Argument count.
  * @param argv Optional decimal port; zero selects an available dynamic port.
  * @return Zero after clean shutdown, otherwise one for invalid setup or an operation failure.
+ * @note This non-I/O thread owns the console, so signal handling is disabled and Ctrl+C keeps its default.
  */
 auto main(int argc, char* argv[]) -> int {
     try {
         auto const port = argc == 1 ? std::optional<std::uint16_t>{ 8080 }
             : mhttp::utils::parse_integer<std::uint16_t>(argv[1]);
         if (argc > 2 || !port) { throw std::runtime_error{ "usage: rest_server [port: 0-65535]" }; }
-        mhttp::Runtime runtime;
-        require_success(runtime.Start(2));
-        mhttp::server::HttpServer server{ runtime, { .read_timeout = 5s, .write_timeout = 5s,
-            .body_bytes = 4096, .max_connections = 64 } };
-        install_routes(server);
-        auto bound = server.Bind("127.0.0.1", *port);
-        if (!bound) { throw std::runtime_error{ std::string{ mhttp::ToString(bound.error()) } }; }
-        require_success(server.Start());
-        require_success(server.WaitUntilReady());
-        std::cout << "Listening on http://127.0.0.1:" << *bound << '\n'
-            << "Press Enter to stop.\n" << std::flush;
-        std::string line;
-        std::getline(std::cin, line);
-        require_success(server.Stop());
+        auto& app = mhttp::app();
+        install_routes(app);
+        app.SetListener("127.0.0.1", *port)
+            .SetThreadNum(2)
+            .SetServerOptions({ .read_timeout = 5s, .write_timeout = 5s, .body_bytes = 4096, .max_connections = 64 })
+            .DisableSignalHandling();
+        auto running = std::async(std::launch::async, [&app] { return app.Run(); });
+        mhttp::Result<void> ready;
+        {
+            QuitOnExit quit{ app };
+            ready = app.WaitUntilReady();
+            if (auto const endpoint = app.LocalEndpoint(); ready && endpoint) {
+                std::cout << "Listening on http://" << endpoint->address << ':' << endpoint->port << '\n'
+                    << "Press Enter to stop.\n" << std::flush;
+                std::string line;
+                std::getline(std::cin, line);
+            }
+        }
+        require_success(running.get());
+        require_success(ready);
         return 0;
     } catch (std::exception const& error) {
         std::cerr << error.what() << '\n';

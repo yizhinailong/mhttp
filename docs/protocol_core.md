@@ -2,7 +2,7 @@
 
 协议核心不依赖 Asio，通过 `import mhttp;` 后可在 `mhttp::detail` 中访问。
 这些接口用于库内实现与协议测试，使用 Doxygen `@internal` 标注。
-对外的服务端、客户端和网络连接将在后续阶段建立。
+服务端会话和客户端在此之上完成网络收发，见[服务端接口基础](server_api.md)与[客户端接口](client_api.md)。
 
 ## 增量解析
 
@@ -26,7 +26,7 @@
 
 成功完成后可调用 `Reset()`，再把保留的字节交给同一个解析器，支持 pipelining。
 失败后不得通过 Reset 恢复连接，因为后续字节的消息边界已经不可信。
-关闭连接的实际操作由后续会话层负责。
+关闭连接的实际操作由服务端会话或客户端负责。
 
 响应解析器默认按 GET 的响应语义工作。解析 HEAD 的响应时，使用
 `ResponseParser{ Method::Head, limits }`。HEAD、204 和 304 在头部结束；
@@ -88,4 +88,5 @@ mcpp test chunk_encoder --timeout 30
 
 用例包含大小上限边界、二进制数据、CRLF 注入、冲突分帧头、chunk 溢出、
 trailer 隔离、中间响应上限、pipelining 和截断 EOF。
-网络关闭、读写超时与请求走私的端到端验证将在连接和会话层实现后补充。
+网络关闭、读写超时与请求走私防护的端到端验证由 `python tools/check_session.py`、
+`check_server.py` 和 `check_client.py` 使用原始回环对端执行，见[测试设施](testing.md)。

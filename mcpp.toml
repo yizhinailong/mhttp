@@ -2,7 +2,7 @@
 name = "mhttp"
 version = "0.1.0"
 standard = "c++23"
-description = "An asynchronous server built on standalone Asio"
+description = "An asynchronous HTTP library built on standalone Asio"
 license = "MIT"
 
 [toolchain]
