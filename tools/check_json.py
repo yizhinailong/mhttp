@@ -11,15 +11,18 @@ import tomllib
 def main() -> int:
     root = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--update-lock", action="store_true", help="resolve dependencies and update the JSON consumer lock")
+    parser.add_argument("--update-lock", action="store_true", help="re-resolve dependencies and replace the local JSON consumer lock")
     parser.add_argument("filters", nargs="*")
     args = parser.parse_args()
+    # The lock is generated locally and never committed; CI resolves from the manifest.
+    lock = root / "tests/json/mcpp.lock"
+    locked = lock.is_file() and not args.update_lock
     (root / "target").mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="json-tests-", dir=root / "target") as directory:
         project = Path(directory)
         shutil.copy2(root / "tests/json/mcpp.toml", project / "mcpp.toml")
-        if not args.update_lock:
-            shutil.copy2(root / "tests/json/mcpp.lock", project / "mcpp.lock")
+        if locked:
+            shutil.copy2(lock, project / "mcpp.lock")
         (project / "tests").mkdir()
         (project / "support").mkdir()
         for source in (root / "tests/json").glob("*.cpp"):
@@ -29,13 +32,13 @@ def main() -> int:
         shutil.copy2(root / "tests/support/test_support.hpp", project / "support/test_support.hpp")
         config = tomllib.loads((root / "mcpp.toml").read_text(encoding="utf-8"))
         command = ["mcpp", "test", "--toolchain", config["toolchain"]["default"], "--timeout", "30"]
-        if not args.update_lock:
+        if locked:
             command.append("--locked")
         if args.filters:
             command += ["--", *args.filters]
         result = subprocess.run(command, cwd=project, check=False).returncode
-        if result == 0 and args.update_lock:
-            shutil.copy2(project / "mcpp.lock", root / "tests/json/mcpp.lock")
+        if result == 0 and not locked:
+            shutil.copy2(project / "mcpp.lock", lock)
         return result
 
 

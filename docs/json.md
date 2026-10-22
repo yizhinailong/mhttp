@@ -75,10 +75,10 @@ if (!configured) { throw std::runtime_error{ "cannot configure error handler" };
 已经调用过的错误处理器不会递归重入。
 
 `tests/core/json_support_test.cpp` 验证仅导入 mhttp 不会隐式启用 JSON 接口。
-`python tools/check_json.py` 在独立消费者工程中从依赖侧开启 feature，运行有锁文件的测试，
+`python tools/check_json.py` 在独立消费者工程中从依赖侧开启 feature 并运行测试，
 覆盖空对象、数组、约 33 KiB 数据、15 轮随机 JSON、媒体类型、深度、无效输入和序列化失败。
-该工程的配置及自动生成锁文件保存在 tests/json；根目录锁文件保留默认无 JSON 的解析结果。
-依赖变更后使用 `python tools/check_json.py --update-lock` 由 mcpp 重新生成消费者锁文件。
+该工程的配置保存在 tests/json。首次运行由 mcpp 解析依赖，并在本地生成 tests/json/mcpp.lock（不提交），
+之后存在该锁文件时以 `--locked` 运行。依赖变更后使用 `python tools/check_json.py --update-lock` 重新解析并替换本地锁文件。
 
 同一消费者套件的 rest_crud_test 验证用户资源的创建、查询、替换、局部更新与删除，
 包含 201/Location、204、404、405/Allow、类型化路径错误、分页与过滤。

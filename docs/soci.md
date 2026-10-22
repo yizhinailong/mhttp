@@ -94,10 +94,10 @@ SQLite 的连接字符串可以只是数据库路径，也可以写成 `db="路�
 
 ## 验证
 
-`python tools/check_soci.py` 在独立消费者工程中从依赖侧开启 feature，运行有锁文件的测试。
+`python tools/check_soci.py` 在独立消费者工程中从依赖侧开启 feature 并运行测试。
 `soci_test` 覆盖 DDL、事务提交、类型化读取、NULL、只移动的函数与结果、后端异常类型和类别、
 异常回滚后会话复用、非法选项、I/O 线程拒绝连接、副本共享与 Task 持有会话、
 获取超时后恢复、四线程并发写入文件数据库时会话独占、HTTP handler 读写数据库，
 以及 Runtime 停止时执行中的函数完成并归还会话。`soci_include_test` 验证先包含 SOCI 头文件再导入模块的用法。
-该工程的配置及自动生成锁文件保存在 tests/soci；根目录锁文件保留默认无 SOCI 的解析结果。
-依赖变更后使用 `python tools/check_soci.py --update-lock` 由 mcpp 重新生成消费者锁文件。
+该工程的配置保存在 tests/soci。首次运行由 mcpp 解析依赖，并在本地生成 tests/soci/mcpp.lock（不提交），
+之后存在该锁文件时以 `--locked` 运行。依赖变更后使用 `python tools/check_soci.py --update-lock` 重新解析并替换本地锁文件。
