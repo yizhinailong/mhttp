@@ -26,7 +26,7 @@ mcpp build
 mcpp build --locked
 ```
 
-保留自动生成的 `mcpp.lock`；锁文件由 mcpp 管理。
+`mcpp.lock` 由 mcpp 在本地自动生成，不提交到仓库。
 
 ## 最小用法
 
