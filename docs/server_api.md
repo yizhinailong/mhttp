@@ -10,7 +10,7 @@ Router 只通过 `set_http_handler<METHODS...>(path, handler, aspects...)` 注�
 
 ```cpp
 mhttp::server::Router router;
-auto registered = router.set_http_handler<mhttp::method::Get>("/users/:id", [](auto& request, auto& response) {
+router.set_http_handler<mhttp::method::Get>("/users/:id", [](auto& request, auto& response) {
     auto id = request.template PathParam<unsigned>("id");
     if (!id) {
         static_cast<void>(response.SetError(mhttp::Status::BadRequest));
@@ -24,7 +24,7 @@ auto registered = router.set_http_handler<mhttp::method::Get>("/users/:id", [](a
 一次注册可以列出多个方法：
 
 ```cpp
-auto registered = router.set_http_handler<mhttp::method::Post, mhttp::method::Put>(
+router.set_http_handler<mhttp::method::Post, mhttp::method::Put>(
     "/users/:id", [](auto& request, auto& response) {
         response.SetContent(request.Body(), "text/plain").value();
     });
@@ -32,8 +32,10 @@ auto registered = router.set_http_handler<mhttp::method::Post, mhttp::method::Pu
 
 `mhttp::method` 是 `mhttp::Method` 的类型别名，两种拼写可混用；扩展方法（如 `PROPFIND`）
 同样通过模板参数注册，`OPTIONS` 可注册字面量 `*` 路径。
-`set_http_handler` 返回 `Result<void>`，支持同步 `void`、协程 `Task<void>`
-处理器及尾随的路由 aspect；`HttpServer` 继承此接口。
+`set_http_handler` 返回 `server::RouteRegistration`，支持同步 `void`、协程 `Task<void>`
+处理器及尾随的路由 aspect；`HttpServer` 继承此接口。该类型不标记 `[[nodiscard]]`，可以直接忽略；
+它提供与 `std::expected` 同名的 `has_value()`、`error()`、`value()` 和布尔转换，并可隐式转换为 `Result<void>`。
+忽略时非法路径、启动后注册等失败不会被察觉，需要确认注册成功时检查该结果。
 一次注册只复制或移动一份处理器和 aspect，所有指定方法共享这些对象，支持只可移动的捕获。
 重复方法只保留一个绑定；非法方法或路径不改变已有绑定。
 

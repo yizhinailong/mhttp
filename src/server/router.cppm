@@ -30,6 +30,54 @@ export namespace mhttp::server {
     using RouterOptions = detail::RouteLimits;
 
     /**
+     * @brief Report a route registration outcome that callers may discard without diagnostics.
+     * @note Unlike Result<void>, this type is not [[nodiscard]]. Member names mirror std::expected,
+     *       and the outcome converts implicitly to Result<void> for existing error propagation.
+     */
+    class RouteRegistration {
+    private:
+        Result<void> m_result; ///< Owned registration outcome.
+
+    public:
+        /**
+         * @brief Wrap a registration outcome.
+         * @param result Success or the registration error.
+         */
+        explicit RouteRegistration(Result<void> result) noexcept : m_result{ std::move(result) } {}
+
+        /**
+         * @brief Report whether the route was registered.
+         * @return True on success.
+         */
+        [[nodiscard]] auto has_value() const noexcept -> bool { return m_result.has_value(); }
+
+        /**
+         * @brief Report whether the route was registered.
+         * @return True on success.
+         */
+        [[nodiscard]] explicit operator bool() const noexcept { return m_result.has_value(); }
+
+        /**
+         * @brief Return the registration error.
+         * @return InvalidRequest, AlreadyRunning, or Busy.
+         * @note Requires a failed registration, as for std::expected::error.
+         */
+        [[nodiscard]] auto error() const noexcept -> Error { return m_result.error(); }
+
+        /**
+         * @brief Require a successful registration.
+         * @throws std::bad_expected_access<Error> If registration failed.
+         */
+        auto value() const -> void { m_result.value(); }
+
+        /**
+         * @brief Convert to the library-wide result type.
+         * @return Copy of the registration outcome.
+         */
+        operator Result<void>() const noexcept { return m_result; }
+    };
+
+    /**
      * @brief Own route configuration with stable identity for an asynchronous server.
      * @note Register before startup. Exact pattern/method duplicates replace the previous callback
      *       without changing priority. Frozen configuration returns AlreadyRunning; pending standalone
@@ -193,19 +241,20 @@ export namespace mhttp::server {
          * @param handler Callable copied or moved once into stable storage shared by all listed methods.
          * @param aspects Aspects copied or moved once into the same shared storage.
          * @return Success, InvalidRequest, AlreadyRunning while frozen, or Busy while requests are prepared.
+         *         Callers may discard it; a failed registration leaves existing bindings unchanged.
          * @note Captured references must outlive requests. Shared callback state may run concurrently.
          */
         template <mhttp::Method... METHODS, typename F, typename... Aspects>
             requires (sizeof...(METHODS) > 0) && detail::HttpHandlerFunction<std::decay_t<F>>
                 && (detail::HttpAspect<std::decay_t<Aspects>> && ...)
-        [[nodiscard]] auto set_http_handler(
+        auto set_http_handler(
             std::string_view path,
             F&& handler,
             Aspects&&... aspects
-        ) -> Result<void> {
+        ) -> RouteRegistration {
             constexpr std::array methods{ METHODS... };
-            return m_impl->Register(methods, path,
-                detail::make_http_handler(std::forward<F>(handler), std::forward<Aspects>(aspects)...));
+            return RouteRegistration{ m_impl->Register(methods, path,
+                detail::make_http_handler(std::forward<F>(handler), std::forward<Aspects>(aspects)...)) };
         }
 
         /**
@@ -225,14 +274,14 @@ export namespace mhttp::server {
         template <mhttp::Method... METHODS, typename F, typename... Aspects>
             requires (sizeof...(METHODS) > 0) && detail::HttpHandlerFunction<std::decay_t<F>>
                 && (detail::HttpAspect<std::decay_t<Aspects>> && ...)
-        [[nodiscard]] auto set_lazy_http_handler(
+        auto set_lazy_http_handler(
             std::string_view path,
             F&& handler,
             Aspects&&... aspects
-        ) -> Result<void> {
+        ) -> RouteRegistration {
             constexpr std::array methods{ METHODS... };
-            return m_impl->Register(methods, path,
-                detail::make_http_handler(std::forward<F>(handler), std::forward<Aspects>(aspects)...), true);
+            return RouteRegistration{ m_impl->Register(methods, path,
+                detail::make_http_handler(std::forward<F>(handler), std::forward<Aspects>(aspects)...), true) };
         }
     };
 

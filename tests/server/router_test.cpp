@@ -155,8 +155,8 @@ auto router_template_methods() -> void {
     Check(weak.expired(), "last replacement releases shared callback captures");
     CheckEq(dispatch(runtime, router, "PUT", "/shared").Body(), "replacement"sv, "template replacement dispatch");
 
-    Check(router.set_http_handler<mhttp::method::Get, mhttp::method::Post>("/head", replacement).has_value(),
-        "register template GET with another method");
+    // Registration results may be discarded; the dispatches below observe the binding.
+    router.set_http_handler<mhttp::method::Get, mhttp::method::Post>("/head", replacement);
     CheckEq(dispatch(runtime, router, "HEAD", "/head").Body(), "replacement"sv, "template GET supports HEAD fallback");
     CheckEq(dispatch(runtime, router, "DELETE", "/head").Header("Allow"), "GET, HEAD, POST"sv,
         "template GET adds implicit HEAD to Allow");
@@ -179,6 +179,14 @@ auto router_template_validation() -> void {
     auto invalid = router.set_http_handler<mhttp::method::Post, static_cast<mhttp::Method>(999), mhttp::method::Put>(
         "/validated", replacement);
     Check(!invalid && invalid.error() == mhttp::Error::InvalidRequest, "invalid template method rejects entire pack");
+    mhttp::Result<void> converted = invalid;
+    Check(!converted && converted.error() == mhttp::Error::InvalidRequest, "registration converts to Result");
+    bool thrown{};
+    try { invalid.value(); }
+    catch (std::bad_expected_access<mhttp::Error> const& exception) {
+        thrown = exception.error() == mhttp::Error::InvalidRequest;
+    }
+    Check(thrown, "failed registration value throws its error");
     CheckEq(dispatch(runtime, router, "POST", "/validated").Body(), "original"sv,
         "invalid pack preserves earlier method binding");
     CheckEq(dispatch(runtime, router, "PUT", "/validated").Status(), mhttp::Status::MethodNotAllowed,
