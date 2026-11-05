@@ -98,8 +98,8 @@ export namespace mhttp {
      */
     class RequestData {
     private:
-        mutable std::mutex m_mutex;                     ///< Guards m_values.
-        detail::StringMap<std::any> m_values;           ///< Stored values keyed by type and tag.
+        mutable std::mutex m_mutex;           ///< Guards m_values.
+        detail::StringMap<std::any> m_values; ///< Stored values keyed by type and tag.
 
     public:
         /**
@@ -335,7 +335,10 @@ export namespace mhttp {
          * @throws std::runtime_error If conversion to an arithmetic type fails.
          */
         template <typename T = std::string_view>
-            requires std::integral<T> || std::floating_point<T> || std::same_as<T, std::string> || std::same_as<T, std::string_view>
+        requires std::integral<T> ||
+            std::floating_point<T> ||
+            std::same_as<T, std::string> ||
+            std::same_as<T, std::string_view>
         [[nodiscard]] auto PathParam(std::string_view key) const -> T {
             auto const value{ pathParamRaw(key) };
             if constexpr (std::same_as<T, std::string_view>) {
@@ -368,14 +371,14 @@ namespace mhttp {
      */
     class RequestImpl : public detail::BodyReader<true> {
     private:
-        std::string m_raw_path;                                   ///< Target before '?'.
-        std::vector<std::string> m_decoded_segments;              ///< Per-segment decoded path.
-        QueryParams m_query;                                      ///< Decoded query string.
-        tcp::endpoint m_local_endpoint;                           ///< Server side of the connection.
-        tcp::endpoint m_remote_endpoint;                          ///< Client side of the connection.
+        std::string m_raw_path;                                  ///< Target before '?'.
+        std::vector<std::string> m_decoded_segments;             ///< Per-segment decoded path.
+        QueryParams m_query;                                     ///< Decoded query string.
+        tcp::endpoint m_local_endpoint;                          ///< Server side of the connection.
+        tcp::endpoint m_remote_endpoint;                         ///< Client side of the connection.
         std::shared_ptr<detail::TrustedProxies const> m_trusted; ///< Trusted proxies snapshot; null = none.
-        detail::StringMap<std::string> m_path_params;             ///< Parameters from route matching.
-        RequestData m_data;                                       ///< User data.
+        detail::StringMap<std::string> m_path_params;            ///< Parameters from route matching.
+        RequestData m_data;                                      ///< User data.
 
     public:
         /**

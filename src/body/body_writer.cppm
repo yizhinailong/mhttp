@@ -62,8 +62,9 @@ namespace mhttp::detail {
          * @brief Create a writer, optionally bound to a connection.
          * @param connection Destination; may be null and attached later.
          */
-        explicit BodyWriter(std::shared_ptr<ConnectionType> connection = nullptr)
-            : m_connection{ std::move(connection) } {}
+        explicit BodyWriter(
+            std::shared_ptr<ConnectionType> connection = nullptr
+        ) : m_connection{ std::move(connection) } {}
 
         BodyWriter(BodyWriter const&) = delete;
         auto operator=(BodyWriter const&) -> BodyWriter& = delete;

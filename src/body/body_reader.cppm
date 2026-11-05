@@ -88,8 +88,10 @@ namespace mhttp::detail {
          * @param connection Connection that supplies body bytes.
          * @param header_parser Parser after the header read; its limits carry over.
          */
-        BodyReader(std::shared_ptr<ConnectionType> connection, HeaderParser&& header_parser)
-            : m_connection{ std::move(connection) }, m_parser{ std::move(header_parser) } {}
+        BodyReader(
+            std::shared_ptr<ConnectionType> connection,
+            HeaderParser&& header_parser
+        ) : m_connection{ std::move(connection) }, m_parser{ std::move(header_parser) } {}
 
         BodyReader(BodyReader const&) = delete;
         auto operator=(BodyReader const&) -> BodyReader& = delete;

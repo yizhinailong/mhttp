@@ -41,14 +41,14 @@ export namespace mhttp::client {
      * means no global limit.
      */
     struct PoolParams {
-        std::size_t max_size{ 100 };                                                         ///< Connections per origin.
-        std::size_t max_total{ 0 };                                                          ///< Connections overall; 0 = unlimited.
+        std::size_t max_size{ 100 };                                                           ///< Connections per origin.
+        std::size_t max_total{ 0 };                                                            ///< Connections overall; 0 = unlimited.
         std::chrono::steady_clock::duration idle_timeout{ std::chrono::seconds{ 60 } };        ///< Idle age before eviction; 0 = never.
         std::chrono::steady_clock::duration idle_check_interval{ std::chrono::seconds{ 60 } }; ///< Eviction period; 0 = 60 s.
-        bool validate_on_borrow{ false };                                                    ///< Probe idle connections before lending.
-        TimeoutPolicy timeout_policy{ TimeoutPolicy::Overall };                              ///< Client timeout policy.
+        bool validate_on_borrow{ false };                                                      ///< Probe idle connections before lending.
+        TimeoutPolicy timeout_policy{ TimeoutPolicy::Overall };                                ///< Client timeout policy.
         std::chrono::steady_clock::duration timeout{ std::chrono::seconds{ 30 } };             ///< Client timeout.
-        int max_redirects{ 0 };                                                              ///< Client redirect limit.
+        int max_redirects{ 0 };                                                                ///< Client redirect limit.
     };
 
     /**
@@ -70,14 +70,16 @@ export namespace mhttp::client {
          */
         class ClientHandle {
         private:
-            std::weak_ptr<Impl> m_pool;            ///< Owning pool.
-            std::unique_ptr<HttpClient> m_client;  ///< Borrowed client; null on failure.
-            boost::system::error_code m_error;     ///< Why no client is held.
+            std::weak_ptr<Impl> m_pool;           ///< Owning pool.
+            std::unique_ptr<HttpClient> m_client; ///< Borrowed client; null on failure.
+            boost::system::error_code m_error;    ///< Why no client is held.
 
             friend class HttpClientPool::Impl;
 
-            ClientHandle(std::weak_ptr<Impl> pool, std::unique_ptr<HttpClient> client)
-                : m_pool{ std::move(pool) }, m_client{ std::move(client) } {}
+            ClientHandle(
+                std::weak_ptr<Impl> pool,
+                std::unique_ptr<HttpClient> client
+            ) : m_pool{ std::move(pool) }, m_client{ std::move(client) } {}
 
         public:
             /**
@@ -94,8 +96,9 @@ export namespace mhttp::client {
             ClientHandle(ClientHandle const&) = delete;
             auto operator=(ClientHandle const&) -> ClientHandle& = delete;
 
-            ClientHandle(ClientHandle&& other) noexcept
-                : m_pool{ std::move(other.m_pool) }, m_client{ std::move(other.m_client) }, m_error{ other.m_error } {
+            ClientHandle(
+                ClientHandle&& other
+            ) noexcept : m_pool{ std::move(other.m_pool) }, m_client{ std::move(other.m_client) }, m_error{ other.m_error } {
                 if (!other.m_error) {
                     other.m_error = make_error_code(Error::InvalidHandle);
                 }
@@ -298,16 +301,16 @@ namespace mhttp::client {
             bool wait{ false };  ///< No capacity: queue and wait.
         };
 
-        net::any_io_executor m_executor;            ///< Executor clients make their strands from.
-        net::strand<net::any_io_executor> m_strand; ///< Serializes pool state.
-        net::steady_timer m_timer;                  ///< Idle eviction timer.
-        PoolParams m_params;                        ///< Limits and client settings.
+        net::any_io_executor m_executor;                      ///< Executor clients make their strands from.
+        net::strand<net::any_io_executor> m_strand;           ///< Serializes pool state.
+        net::steady_timer m_timer;                            ///< Idle eviction timer.
+        PoolParams m_params;                                  ///< Limits and client settings.
         detail::LoggerHolder m_logger{ "mhttp.client_pool" }; ///< Replaceable logger.
-        std::atomic<bool> m_running{ true };        ///< Cleared by Stop().
-        detail::StringMap<RouteState> m_routes;     ///< Connections per origin key.
-        detail::StringMap<WaiterList> m_waiters;    ///< Waiters per origin key, FIFO.
-        std::atomic<std::size_t> m_total{ 0 };      ///< Connections created and not destroyed.
-        std::atomic<std::size_t> m_active{ 0 };     ///< Connections lent out.
+        std::atomic<bool> m_running{ true };                  ///< Cleared by Stop().
+        detail::StringMap<RouteState> m_routes;               ///< Connections per origin key.
+        detail::StringMap<WaiterList> m_waiters;              ///< Waiters per origin key, FIFO.
+        std::atomic<std::size_t> m_total{ 0 };                ///< Connections created and not destroyed.
+        std::atomic<std::size_t> m_active{ 0 };               ///< Connections lent out.
 
     public:
         /**
@@ -315,8 +318,10 @@ namespace mhttp::client {
          * @param executor Executor for the pool strand and clients.
          * @param params Limits and client settings.
          */
-        Impl(net::any_io_executor executor, PoolParams params)
-            : m_executor{ executor }, m_strand{ net::make_strand(executor) }, m_timer{ m_strand }, m_params{ std::move(params) } {}
+        Impl(
+            net::any_io_executor executor,
+            PoolParams params
+        ) : m_executor{ executor }, m_strand{ net::make_strand(executor) }, m_timer{ m_strand }, m_params{ std::move(params) } {}
 
         /**
          * @brief Start the idle eviction loop.
@@ -762,8 +767,10 @@ namespace mhttp::client {
 
     // ---- HttpClientPool ----
 
-    HttpClientPool::HttpClientPool(net::any_io_executor const& executor, PoolParams params)
-        : m_impl{ std::make_shared<Impl>(executor, std::move(params)) } {
+    HttpClientPool::HttpClientPool(
+        net::any_io_executor const& executor,
+        PoolParams params
+    ) : m_impl{ std::make_shared<Impl>(executor, std::move(params)) } {
         m_impl->Start();
     }
 

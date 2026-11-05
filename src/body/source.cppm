@@ -130,12 +130,12 @@ namespace mhttp::detail {
 
         static constexpr std::size_t FILE_BUFFER_SIZE{ 8192 };
 
-        FormData m_body;                                   ///< Form to serialize.
-        std::size_t m_field_index{ 0 };                    ///< Current part.
-        Step m_step{ Step::Header };                       ///< Position within the part.
-        std::string m_buffer;                              ///< Framing text of the last chunk.
-        std::ifstream m_file;                              ///< Open file of the current part.
-        std::uintmax_t m_file_remaining{ 0 };              ///< Unread bytes of m_file.
+        FormData m_body;                                    ///< Form to serialize.
+        std::size_t m_field_index{ 0 };                     ///< Current part.
+        Step m_step{ Step::Header };                        ///< Position within the part.
+        std::string m_buffer;                               ///< Framing text of the last chunk.
+        std::ifstream m_file;                               ///< Open file of the current part.
+        std::uintmax_t m_file_remaining{ 0 };               ///< Unread bytes of m_file.
         std::array<char, FILE_BUFFER_SIZE> m_file_buffer{}; ///< File read buffer.
 
     public:
@@ -258,15 +258,15 @@ namespace mhttp::detail {
 
         static constexpr std::size_t BUFFER_SIZE{ 64 * 1024 };
 
-        std::ifstream m_file;                          ///< Open file.
-        std::uint64_t m_file_size{ 0 };                ///< File size in bytes.
-        HttpRanges m_ranges;                           ///< Requested ranges; empty = whole file.
-        std::string m_content_type;                    ///< Part Content-Type for byteranges.
-        std::string m_boundary;                        ///< Boundary for byteranges.
-        std::size_t m_range_index{ 0 };                ///< Current range for byteranges.
-        Step m_step{ Step::Header };                   ///< Position within the current range.
-        std::optional<std::uint64_t> m_pos;            ///< Next file offset to read.
-        std::string m_framing;                         ///< Framing text of the last chunk.
+        std::ifstream m_file;                                                      ///< Open file.
+        std::uint64_t m_file_size{ 0 };                                            ///< File size in bytes.
+        HttpRanges m_ranges;                                                       ///< Requested ranges; empty = whole file.
+        std::string m_content_type;                                                ///< Part Content-Type for byteranges.
+        std::string m_boundary;                                                    ///< Boundary for byteranges.
+        std::size_t m_range_index{ 0 };                                            ///< Current range for byteranges.
+        Step m_step{ Step::Header };                                               ///< Position within the current range.
+        std::optional<std::uint64_t> m_pos;                                        ///< Next file offset to read.
+        std::string m_framing;                                                     ///< Framing text of the last chunk.
         std::unique_ptr<char[]> m_buffer{ std::make_unique<char[]>(BUFFER_SIZE) }; ///< Read buffer.
 
     public:
@@ -277,8 +277,12 @@ namespace mhttp::detail {
          * @param content_type Content-Type of the file, used in byteranges part headers.
          * @param boundary Boundary for byteranges; unused for zero or one range.
          */
-        FileSource(std::ifstream file, HttpRanges ranges, std::string content_type, std::string boundary)
-            : m_file{ std::move(file) }, m_ranges{ std::move(ranges) }, m_content_type{ std::move(content_type) }, m_boundary{ std::move(boundary) } {
+        FileSource(
+            std::ifstream file,
+            HttpRanges ranges,
+            std::string content_type,
+            std::string boundary
+        ) : m_file{ std::move(file) }, m_ranges{ std::move(ranges) }, m_content_type{ std::move(content_type) }, m_boundary{ std::move(boundary) } {
             m_file.seekg(0, std::ios::end);
             m_file_size = static_cast<std::uint64_t>(m_file.tellg());
             m_file.seekg(0, std::ios::beg);

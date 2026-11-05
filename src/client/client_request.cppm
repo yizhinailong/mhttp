@@ -158,8 +158,11 @@ export namespace mhttp::client {
 
 namespace mhttp::client {
 
-    Request::Request(Verb method, std::string_view target, Headers const& headers)
-        : m_impl{ std::make_unique<detail::BodyWriter<true>>() } {
+    Request::Request(
+        Verb method,
+        std::string_view target,
+        Headers const& headers
+    ) : m_impl{ std::make_unique<detail::BodyWriter<true>>() } {
         auto& base{ m_impl->Base() };
         base.method(method);
         base.target(target);

@@ -45,13 +45,13 @@ export namespace mhttp::url {
      * @brief Components of an absolute URL; path, query, and fragment stay percent-encoded.
      */
     struct UrlInfo {
-        std::string scheme;           ///< Scheme as written, e.g. "http" or "HTTPS".
-        std::string host;             ///< Host name or address; IPv6 literals without brackets.
-        std::uint16_t port{ 0 };      ///< Explicit port; 0 when absent.
-        std::string path;             ///< Encoded path; may be empty.
-        std::string query;            ///< Encoded query without '?'.
-        std::string fragment;         ///< Encoded fragment without '#'.
-        bool has_query{ false };      ///< A '?' was present, even with an empty query.
+        std::string scheme;      ///< Scheme as written, e.g. "http" or "HTTPS".
+        std::string host;        ///< Host name or address; IPv6 literals without brackets.
+        std::uint16_t port{ 0 }; ///< Explicit port; 0 when absent.
+        std::string path;        ///< Encoded path; may be empty.
+        std::string query;       ///< Encoded query without '?'.
+        std::string fragment;    ///< Encoded fragment without '#'.
+        bool has_query{ false }; ///< A '?' was present, even with an empty query.
 
         [[nodiscard]] auto HasPort() const noexcept -> bool {
             return port != 0;

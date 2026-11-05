@@ -58,7 +58,7 @@ namespace mhttp {
         std::atomic<std::uint32_t> header_limit{ 64 * 1024 };                                            ///< Maximum request header bytes.
         std::atomic<std::uint64_t> body_limit{ 1024ULL * 1024 * 1024 };                                  ///< Maximum request body bytes (httplib default).
         std::atomic<std::shared_ptr<FormData::Param const>> form_data_params{ defaultFormDataParams() }; ///< Multipart limits snapshot.
-        std::atomic<std::shared_ptr<detail::TrustedProxies const>> trusted_proxies;                     ///< Trusted proxies snapshot; null = none.
+        std::atomic<std::shared_ptr<detail::TrustedProxies const>> trusted_proxies;                      ///< Trusted proxies snapshot; null = none.
         Router router;                                                                                   ///< Routes; configured before Run().
 
         /**
@@ -444,8 +444,7 @@ namespace mhttp {
         net::any_io_executor executor,
         tcp::socket&& socket,
         std::shared_ptr<ServerContext> context
-    ) : m_executor{ std::move(executor) },
-        m_task{ std::make_shared<HttpTask>(HttpStream{ HttpStream::PlainStream{ std::move(socket) } }, beast::flat_buffer{}, std::move(context)) } {}
+    ) : m_executor{ std::move(executor) }, m_task{ std::make_shared<HttpTask>(HttpStream{ HttpStream::PlainStream{ std::move(socket) } }, beast::flat_buffer{}, std::move(context)) } {}
 
     auto Session::Abort() -> void {
         if (m_abort.exchange(true)) {

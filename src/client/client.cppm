@@ -494,8 +494,10 @@ namespace mhttp::client {
         m_impl = std::make_shared<detail::ClientImpl>(executor, parsed->host, parsed->EffectivePort(), parsed->Transport());
     }
 
-    HttpClient::HttpClient(net::io_context& context, std::string_view base_url)
-        : HttpClient{ context.get_executor(), base_url } {}
+    HttpClient::HttpClient(
+        net::io_context& context,
+        std::string_view base_url
+    ) : HttpClient{ context.get_executor(), base_url } {}
 
     auto HttpClient::SetTimeoutPolicy(TimeoutPolicy policy) -> void {
         m_impl->SetTimeoutPolicy(policy);

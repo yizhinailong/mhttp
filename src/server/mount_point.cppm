@@ -184,11 +184,11 @@ export namespace mhttp {
         };
 
     private:
-        std::string m_mount_point;                                            ///< URL prefix as registered.
-        std::filesystem::path m_base_dir;                                     ///< Directory being served.
-        std::vector<std::string> m_mount_segments;                            ///< Decoded prefix segments.
-        bool m_enabled_directory{ true };                                     ///< Generate listings.
-        DirFormat m_directory_format{ DirFormat::Json };                      ///< Listing format.
+        std::string m_mount_point;                                                 ///< URL prefix as registered.
+        std::filesystem::path m_base_dir;                                          ///< Directory being served.
+        std::vector<std::string> m_mount_segments;                                 ///< Decoded prefix segments.
+        bool m_enabled_directory{ true };                                          ///< Generate listings.
+        DirFormat m_directory_format{ DirFormat::Json };                           ///< Listing format.
         std::vector<std::string> m_default_documents{ "index.html", "index.htm" }; ///< Documents tried for directories.
 
     public:
@@ -197,8 +197,10 @@ export namespace mhttp {
          * @param mount_point URL prefix, e.g. "/static"; decoded text, no %XX escapes.
          * @param base_dir Directory to serve.
          */
-        MountPointEntry(std::string mount_point, std::filesystem::path base_dir)
-            : m_mount_point{ std::move(mount_point) }, m_base_dir{ std::move(base_dir) }, m_mount_segments{ detail::split_mount_point(m_mount_point) } {}
+        MountPointEntry(
+            std::string mount_point,
+            std::filesystem::path base_dir
+        ) : m_mount_point{ std::move(mount_point) }, m_base_dir{ std::move(base_dir) }, m_mount_segments{ detail::split_mount_point(m_mount_point) } {}
 
         [[nodiscard]] auto MountPoint() const noexcept -> std::string const& {
             return m_mount_point;

@@ -127,8 +127,8 @@ namespace mhttp::detail {
      */
     class QueryParamsSink : public Sink {
     private:
-        std::string m_buffer;  ///< Accumulated encoded text.
-        QueryParams m_params;  ///< Decoded parameters.
+        std::string m_buffer; ///< Accumulated encoded text.
+        QueryParams m_params; ///< Decoded parameters.
 
     public:
         auto Put(std::string_view chunk, boost::system::error_code& ec) -> void override {
@@ -161,7 +161,10 @@ namespace mhttp::detail {
          * @param content_type Content-Type with the boundary parameter.
          * @param params Limits and file handling.
          */
-        FormDataSink(std::string content_type, FormData::Param params) : m_parser{ std::move(content_type), std::move(params) } {}
+        FormDataSink(
+            std::string content_type,
+            FormData::Param params
+        ) : m_parser{ std::move(content_type), std::move(params) } {}
 
         auto Init(std::optional<std::uint64_t>, boost::system::error_code& ec) -> void override {
             m_parser.Reset(ec);

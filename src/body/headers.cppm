@@ -85,9 +85,9 @@ export namespace mhttp {
          * @brief Copy: owned collections are deep-copied, borrowed views stay views.
          * @param other Collection to copy.
          */
-        Headers(Headers const& other)
-            : m_owned{ other.m_owned ? std::make_unique<http::fields>(*other.m_owned) : nullptr },
-              m_fields{ m_owned ? m_owned.get() : other.m_fields } {}
+        Headers(
+            Headers const& other
+        ) : m_owned{ other.m_owned ? std::make_unique<http::fields>(*other.m_owned) : nullptr }, m_fields{ m_owned ? m_owned.get() : other.m_fields } {}
 
         Headers(Headers&& other) noexcept = default;
 

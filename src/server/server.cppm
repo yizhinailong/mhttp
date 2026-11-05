@@ -252,12 +252,9 @@ namespace mhttp {
          * @brief Create an idle server on a new strand.
          * @param ex Executor from which the strand is derived.
          */
-        explicit ServerImpl(net::any_io_executor const& ex)
-            : m_strand{ net::make_strand(ex) },
-              m_context{ std::make_shared<ServerContext>() },
-              m_acceptor{ m_strand },
-              m_session_event{ m_strand },
-              m_stop_event{ m_strand } {}
+        explicit ServerImpl(
+            net::any_io_executor const& ex
+        ) : m_strand{ net::make_strand(ex) }, m_context{ std::make_shared<ServerContext>() }, m_acceptor{ m_strand }, m_session_event{ m_strand }, m_stop_event{ m_strand } {}
 
         /**
          * @brief Borrow the state shared with sessions.
@@ -520,8 +517,9 @@ namespace mhttp {
 
     HttpServer::HttpServer(net::io_context& ioc) : HttpServer{ ioc.get_executor() } {}
 
-    HttpServer::HttpServer(net::any_io_executor const& ex)
-        : m_impl{ std::make_shared<ServerImpl>(ex) } {}
+    HttpServer::HttpServer(
+        net::any_io_executor const& ex
+    ) : m_impl{ std::make_shared<ServerImpl>(ex) } {}
 
     HttpServer::~HttpServer() {
         // The returned future is discarded on purpose; see the class contract.

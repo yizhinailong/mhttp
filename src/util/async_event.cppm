@@ -166,11 +166,11 @@ namespace mhttp::util {
             explicit Waiter(net::any_io_executor ex) : channel{ std::move(ex), 1 } {}
         };
 
-        net::any_io_executor m_executor;                 ///< Executor for channels and timers.
-        mutable std::mutex m_mutex;                      ///< Guards every field below.
-        std::atomic<bool> m_closed{ false };             ///< Closed flag, also read lock-free.
-        bool m_signaled{ false };                        ///< Latched notification.
-        std::deque<std::shared_ptr<Waiter>> m_waiters;   ///< Suspended waits in FIFO order.
+        net::any_io_executor m_executor;               ///< Executor for channels and timers.
+        mutable std::mutex m_mutex;                    ///< Guards every field below.
+        std::atomic<bool> m_closed{ false };           ///< Closed flag, also read lock-free.
+        bool m_signaled{ false };                      ///< Latched notification.
+        std::deque<std::shared_ptr<Waiter>> m_waiters; ///< Suspended waits in FIFO order.
 
     public:
         /**
@@ -415,8 +415,9 @@ namespace mhttp::util {
         }
     };
 
-    AsyncEvent::AsyncEvent(net::any_io_executor ex)
-        : m_state{ std::make_shared<State>(std::move(ex)) } {}
+    AsyncEvent::AsyncEvent(
+        net::any_io_executor ex
+    ) : m_state{ std::make_shared<State>(std::move(ex)) } {}
 
     AsyncEvent::~AsyncEvent() {
         // Each in-flight wait holds its own reference to m_state, so closing never races

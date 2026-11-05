@@ -61,7 +61,9 @@ export namespace mhttp {
          * @brief Bind to a response; created by Response::CreateStreamWriter().
          * @param response Response state.
          */
-        explicit StreamWriter(std::weak_ptr<ResponseImpl> response) : m_response{ std::move(response) } {}
+        explicit StreamWriter(
+            std::weak_ptr<ResponseImpl> response
+        ) : m_response{ std::move(response) } {}
 
         /**
          * @brief Send the status line and headers.
@@ -439,7 +441,11 @@ namespace mhttp {
          * @param keep_alive Keep-alive preference of the request.
          * @param connection Destination connection.
          */
-        ResponseImpl(unsigned version, bool keep_alive, std::shared_ptr<detail::Connection> connection) : BodyWriter{ std::move(connection) } {
+        ResponseImpl(
+            unsigned version,
+            bool keep_alive,
+            std::shared_ptr<detail::Connection> connection
+        ) : BodyWriter{ std::move(connection) } {
             Base().result(Status::not_found);
             Base().version(version);
             Base().set(Field::server, BOOST_BEAST_VERSION_STRING);

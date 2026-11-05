@@ -145,7 +145,7 @@ namespace mhttp::detail {
      * @throws std::runtime_error If `value` is not exactly one number of type T.
      */
     template <typename T>
-        requires std::integral<T> || std::floating_point<T>
+    requires std::integral<T> || std::floating_point<T>
     auto from_chars_strict(std::string_view value) -> T {
         T result{};
         auto const [end, ec]{ std::from_chars(value.data(), value.data() + value.size(), result) };

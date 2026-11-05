@@ -46,8 +46,7 @@ namespace mhttp::detail {
          * @brief Create the default console logger.
          * @param name Logger name shown in each record.
          */
-        explicit LoggerHolder(std::string_view name)
-            : m_default_logger{ make_console_logger(name) } {}
+        explicit LoggerHolder(std::string_view name) : m_default_logger{ make_console_logger(name) } {}
 
         /**
          * @brief Return the active logger.

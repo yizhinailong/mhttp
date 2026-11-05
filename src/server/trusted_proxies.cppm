@@ -24,7 +24,7 @@ namespace mhttp::detail {
     class TrustedProxies {
     private:
         struct Cidr {
-            net::ip::address network;   ///< Network address.
+            net::ip::address network;     ///< Network address.
             unsigned short prefix_length; ///< Significant leading bits.
         };
 

@@ -19,7 +19,7 @@ namespace mhttp::detail {
         static constexpr std::size_t MAX_RANGES_DEFAULT{ 100 };
 
     private:
-        std::vector<RangeType> m_ranges;               ///< Parsed ranges.
+        std::vector<RangeType> m_ranges;                ///< Parsed ranges.
         std::size_t m_max_ranges{ MAX_RANGES_DEFAULT }; ///< Ranges accepted before rejecting.
 
     public:

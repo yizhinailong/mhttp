@@ -1,9 +1,14 @@
-// Smoke test — verifies the project compiles + a binary runs.
-// Add more tests as tests/test_*.cpp files; mcpp test discovers them
-// automatically (one binary per file).
+/**
+ * @file test_smoke.cpp
+ * @brief Verify that the project builds and a test binary runs.
+ */
 import std;
 
-int main() {
+/**
+ * @brief Print a marker line.
+ * @return Zero.
+ */
+auto main() -> int {
     std::println("test_smoke: ok");
     return 0;
 }

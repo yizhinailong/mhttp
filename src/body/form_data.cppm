@@ -21,11 +21,11 @@ export namespace mhttp {
          * @brief One form part.
          */
         struct Field {
-            std::string name;                                ///< Field name from Content-Disposition.
-            std::string filename;                            ///< Client file name; empty for plain fields.
-            std::string content_type;                        ///< Part Content-Type; may be empty.
-            std::string content;                             ///< In-memory content.
-            std::optional<std::filesystem::path> file_path;  ///< Content stored on disk instead of memory.
+            std::string name;                               ///< Field name from Content-Disposition.
+            std::string filename;                           ///< Client file name; empty for plain fields.
+            std::string content_type;                       ///< Part Content-Type; may be empty.
+            std::string content;                            ///< In-memory content.
+            std::optional<std::filesystem::path> file_path; ///< Content stored on disk instead of memory.
 
             /**
              * @brief Report whether the part carries content.
@@ -48,9 +48,9 @@ export namespace mhttp {
          * @brief Parsing limits and file handling.
          */
         struct Param {
-            std::filesystem::path save_dir;     ///< Directory for file parts; empty keeps them in memory.
-            std::uint64_t max_file_size{ 0 };   ///< Per-part content limit for files and fields; 0 = unlimited.
-            std::size_t max_fields{ 128 };      ///< Maximum number of parts; 0 = unlimited.
+            std::filesystem::path save_dir;      ///< Directory for file parts; empty keeps them in memory.
+            std::uint64_t max_file_size{ 0 };    ///< Per-part content limit for files and fields; 0 = unlimited.
+            std::size_t max_fields{ 128 };       ///< Maximum number of parts; 0 = unlimited.
             bool remove_uploaded_files{ false }; ///< Remove every file_path on destruction.
         };
 
@@ -66,8 +66,9 @@ export namespace mhttp {
          * @brief Take over another form's parts and file ownership.
          * @param other Source; it no longer removes files.
          */
-        FormData(FormData&& other) noexcept
-            : fields{ std::move(other.fields) }, boundary{ std::move(other.boundary) }, params{ other.params } {
+        FormData(
+            FormData&& other
+        ) noexcept : fields{ std::move(other.fields) }, boundary{ std::move(other.boundary) }, params{ other.params } {
             other.params.remove_uploaded_files = false;
         }
 

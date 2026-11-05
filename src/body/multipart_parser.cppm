@@ -110,19 +110,19 @@ namespace mhttp::detail {
             Eof,
         };
 
-        FormData m_body;                        ///< Parsed parts.
-        std::string m_content_type;             ///< Content-Type carrying the boundary.
-        std::string m_boundary_line;            ///< "--boundary\r\n".
-        std::string m_boundary_line_last;       ///< "--boundary--\r\n".
-        std::string m_delim_field;              ///< "\r\n--boundary\r\n".
-        std::string m_delim_final;              ///< "\r\n--boundary--\r\n".
-        Step m_step{ Step::BoundaryLine };      ///< Parser position.
-        FormData::Field m_field;                ///< Part being parsed.
-        std::string m_pending;                  ///< Bytes that may be a split delimiter.
-        std::string m_combined;                 ///< m_pending plus the next chunk.
-        std::ofstream m_file;                   ///< Open file for the current file part.
-        std::filesystem::path m_file_path;      ///< Path of m_file.
-        std::uint64_t m_field_bytes{ 0 };       ///< Content bytes of the current part.
+        FormData m_body;                   ///< Parsed parts.
+        std::string m_content_type;        ///< Content-Type carrying the boundary.
+        std::string m_boundary_line;       ///< "--boundary\r\n".
+        std::string m_boundary_line_last;  ///< "--boundary--\r\n".
+        std::string m_delim_field;         ///< "\r\n--boundary\r\n".
+        std::string m_delim_final;         ///< "\r\n--boundary--\r\n".
+        Step m_step{ Step::BoundaryLine }; ///< Parser position.
+        FormData::Field m_field;           ///< Part being parsed.
+        std::string m_pending;             ///< Bytes that may be a split delimiter.
+        std::string m_combined;            ///< m_pending plus the next chunk.
+        std::ofstream m_file;              ///< Open file for the current file part.
+        std::filesystem::path m_file_path; ///< Path of m_file.
+        std::uint64_t m_field_bytes{ 0 };  ///< Content bytes of the current part.
 
     public:
         /**
@@ -130,7 +130,10 @@ namespace mhttp::detail {
          * @param content_type Request Content-Type including the boundary parameter.
          * @param params Limits and file handling for the parsed form.
          */
-        MultipartParser(std::string content_type, FormData::Param params) : m_content_type{ std::move(content_type) } {
+        MultipartParser(
+            std::string content_type,
+            FormData::Param params
+        ) : m_content_type{ std::move(content_type) } {
             m_body.params = std::move(params);
         }
 

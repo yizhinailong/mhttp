@@ -28,7 +28,10 @@ export namespace mhttp {
          * @throws std::runtime_error If the key is missing or the value does not convert.
          */
         template <typename T = std::string_view>
-            requires std::integral<T> || std::floating_point<T> || std::same_as<T, std::string> || std::same_as<T, std::string_view>
+        requires std::integral<T> ||
+            std::floating_point<T> ||
+            std::same_as<T, std::string> ||
+            std::same_as<T, std::string_view>
         [[nodiscard]] auto At(std::string_view key) const -> T {
             return convert<T>(atRaw(key));
         }
@@ -41,7 +44,10 @@ export namespace mhttp {
          * @throws std::runtime_error If a value does not convert.
          */
         template <typename T = std::string_view>
-            requires std::integral<T> || std::floating_point<T> || std::same_as<T, std::string> || std::same_as<T, std::string_view>
+        requires std::integral<T> ||
+            std::floating_point<T> ||
+            std::same_as<T, std::string> ||
+            std::same_as<T, std::string_view>
         [[nodiscard]] auto All(std::string_view key) const -> std::vector<T> {
             std::vector<T> out;
             auto const [first, last]{ m_params.equal_range(key) };
@@ -58,7 +64,9 @@ export namespace mhttp {
          * @param value Value to store; bool becomes "true"/"false".
          */
         template <typename T>
-            requires std::integral<T> || std::floating_point<T> || std::convertible_to<T const&, std::string_view>
+        requires std::integral<T> ||
+            std::floating_point<T> ||
+            std::convertible_to<T const&, std::string_view>
         auto Add(std::string_view key, T const& value) -> void {
             if constexpr (std::same_as<T, bool>) {
                 m_params.emplace(std::string{ key }, value ? "true" : "false");

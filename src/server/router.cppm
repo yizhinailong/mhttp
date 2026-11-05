@@ -33,10 +33,14 @@ export namespace mhttp {
 
 namespace mhttp::detail {
 
-    /// Longest accepted route regex; long patterns cost at registration and at match time.
+    /**
+     * @brief Longest accepted route regex; long patterns cost at registration and at match time.
+     */
     inline constexpr std::size_t REGEX_PATTERN_MAX{ 256 };
 
-    /// Longest path segment tested against a route regex; longer segments simply do not match.
+    /**
+     * @brief Longest path segment tested against a route regex; longer segments simply do not match.
+     */
     inline constexpr std::size_t REGEX_SUBJECT_MAX{ 1024 };
 
     /**
@@ -109,29 +113,29 @@ namespace mhttp::detail {
         };
 
         struct Node {
-            std::string key;                                 ///< Registered segment text.
-            std::string param_name;                          ///< Parameter name for ":p" and "{p:re}".
-            std::regex regex;                                ///< Pattern of "{p:re}" nodes.
-            std::map<Verb, HandlerEntry> handlers;           ///< Handlers by method.
-            StringMap<std::unique_ptr<Node>> static_children; ///< Literal segments.
+            std::string key;                                   ///< Registered segment text.
+            std::string param_name;                            ///< Parameter name for ":p" and "{p:re}".
+            std::regex regex;                                  ///< Pattern of "{p:re}" nodes.
+            std::map<Verb, HandlerEntry> handlers;             ///< Handlers by method.
+            StringMap<std::unique_ptr<Node>> static_children;  ///< Literal segments.
             std::vector<std::unique_ptr<Node>> param_children; ///< ":name" segments, in order.
             std::vector<std::unique_ptr<Node>> regex_children; ///< "{name:re}" segments, in order.
-            std::unique_ptr<Node> wildcard_child;            ///< Trailing "*".
+            std::unique_ptr<Node> wildcard_child;              ///< Trailing "*".
         };
 
         struct RouteMatch {
-            std::set<std::string> allows;           ///< Methods registered on the path when no handler matched.
-            bool lazy{ false };                     ///< Matched handler is lazy.
-            Node const* node{ nullptr };            ///< Matched node; null when nothing matched.
-            StringMap<std::string> params;          ///< Captured path parameters.
+            std::set<std::string> allows;  ///< Methods registered on the path when no handler matched.
+            bool lazy{ false };            ///< Matched handler is lazy.
+            Node const* node{ nullptr };   ///< Matched node; null when nothing matched.
+            StringMap<std::string> params; ///< Captured path parameters.
         };
 
     private:
-        std::unique_ptr<Node> m_root{ std::make_unique<Node>() };   ///< Trie root.
-        HttpHandler m_post_routing;                                  ///< Runs after every routed request.
-        HttpHandler m_not_found;                                     ///< Runs when the status is 404.
-        std::vector<MiddlewareHandler> m_global_before;              ///< Global "before" hooks.
-        std::vector<MiddlewareHandler> m_global_after;               ///< Global "after" hooks.
+        std::unique_ptr<Node> m_root{ std::make_unique<Node>() }; ///< Trie root.
+        HttpHandler m_post_routing;                               ///< Runs after every routed request.
+        HttpHandler m_not_found;                                  ///< Runs when the status is 404.
+        std::vector<MiddlewareHandler> m_global_before;           ///< Global "before" hooks.
+        std::vector<MiddlewareHandler> m_global_after;            ///< Global "after" hooks.
 
     public:
         /**
@@ -581,7 +585,7 @@ export namespace mhttp {
          * @param aspects Per-route aspects.
          */
         template <typename Func, typename... Aspects>
-            requires(!std::is_member_function_pointer_v<std::decay_t<Func>>)
+        requires(!std::is_member_function_pointer_v<std::decay_t<Func>>)
         auto SetHttpHandler(
             Verb verb,
             std::string_view key,
@@ -599,7 +603,7 @@ export namespace mhttp {
          * @param aspects Per-route aspects, copied per method.
          */
         template <Verb... Verbs, typename Func, typename... Aspects>
-            requires(sizeof...(Verbs) >= 1 && !std::is_member_function_pointer_v<std::decay_t<Func>>)
+        requires(sizeof...(Verbs) >= 1 && !std::is_member_function_pointer_v<std::decay_t<Func>>)
         auto SetHttpHandler(std::string_view key, Func handler, Aspects&&... aspects) -> void {
             (SetHttpHandler(Verbs, key, handler, aspects...), ...);
         }
@@ -613,7 +617,7 @@ export namespace mhttp {
          * @param aspects Per-route aspects.
          */
         template <Verb... Verbs, typename Func, typename Owner, typename... Aspects>
-            requires(sizeof...(Verbs) >= 1 && std::is_member_function_pointer_v<Func>)
+        requires(sizeof...(Verbs) >= 1 && std::is_member_function_pointer_v<Func>)
         auto SetHttpHandler(
             std::string_view key,
             Func handler,
@@ -631,7 +635,7 @@ export namespace mhttp {
          * @param aspects Per-route aspects.
          */
         template <typename Func, typename... Aspects>
-            requires(!std::is_member_function_pointer_v<std::decay_t<Func>>)
+        requires(!std::is_member_function_pointer_v<std::decay_t<Func>>)
         auto SetLazyHttpHandler(
             Verb verb,
             std::string_view key,
@@ -642,13 +646,13 @@ export namespace mhttp {
         }
 
         template <Verb... Verbs, typename Func, typename... Aspects>
-            requires(sizeof...(Verbs) >= 1 && !std::is_member_function_pointer_v<std::decay_t<Func>>)
+        requires(sizeof...(Verbs) >= 1 && !std::is_member_function_pointer_v<std::decay_t<Func>>)
         auto SetLazyHttpHandler(std::string_view key, Func handler, Aspects&&... aspects) -> void {
             (SetLazyHttpHandler(Verbs, key, handler, aspects...), ...);
         }
 
         template <Verb... Verbs, typename Func, typename Owner, typename... Aspects>
-            requires(sizeof...(Verbs) >= 1 && std::is_member_function_pointer_v<Func>)
+        requires(sizeof...(Verbs) >= 1 && std::is_member_function_pointer_v<Func>)
         auto SetLazyHttpHandler(
             std::string_view key,
             Func handler,

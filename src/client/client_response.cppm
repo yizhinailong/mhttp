@@ -40,10 +40,10 @@ export namespace mhttp::client {
      * @brief One Server-Sent Event.
      */
     struct SseEvent {
-        std::string id;                           ///< "id" field of this event.
-        std::string event;                        ///< "event" field; empty means "message".
-        std::string data;                         ///< "data" lines joined with '\n'.
-        std::chrono::milliseconds retry{ 0 };     ///< "retry" field; 0 when absent.
+        std::string id;                       ///< "id" field of this event.
+        std::string event;                    ///< "event" field; empty means "message".
+        std::string data;                     ///< "data" lines joined with '\n'.
+        std::chrono::milliseconds retry{ 0 }; ///< "retry" field; 0 when absent.
     };
 
 } // namespace mhttp::client
@@ -166,7 +166,9 @@ export namespace mhttp::client {
          * @brief Take over a response body.
          * @param response Response state.
          */
-        explicit SseReader(std::shared_ptr<ResponseImpl> response) : m_response{ std::move(response) } {}
+        explicit SseReader(
+            std::shared_ptr<ResponseImpl> response
+        ) : m_response{ std::move(response) } {}
 
         /**
          * @brief Read the next event.
@@ -197,7 +199,9 @@ export namespace mhttp::client {
          * @brief Take over a response body.
          * @param response Response state.
          */
-        explicit NdjsonReader(std::shared_ptr<ResponseImpl> response) : m_response{ std::move(response) } {}
+        explicit NdjsonReader(
+            std::shared_ptr<ResponseImpl> response
+        ) : m_response{ std::move(response) } {}
 
         /**
          * @brief Read the next document; blank lines are skipped, a final unterminated line counts.
