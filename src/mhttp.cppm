@@ -36,6 +36,7 @@ export import :mount_point;
 export import :router;
 export import :reverse_proxy;
 export import :proxy_common;
+export import :upstream_group;
 export import :ws_forward;
 export import :http_stream;
 export import :session;

@@ -35,6 +35,7 @@ import :trusted_proxies;
 import :router;
 import :reverse_proxy;
 import :ws_forward;
+import :upstream_group;
 import :session;
 
 namespace mhttp {
@@ -152,6 +153,19 @@ export namespace mhttp {
         ) -> void;
 
         /**
+         * @brief Forward HTTP requests to a balanced list of backends.
+         * @param upstreams Nonempty HTTP URL list with positive weights and no duplicates.
+         * @param config Includes balancing policy and failure cooldown.
+         * @note Configuration phase only. Returns 503 when every backend is cooling or probing.
+         *       Failed requests keep the usual 502/504 response; selection applies per request.
+         */
+        auto SetReverseProxy(
+            std::string prefix,
+            std::vector<UpstreamBackend> upstreams,
+            ReverseProxyConfig config = {}
+        ) -> void;
+
+        /**
          * @brief Forward WebSocket upgrades at a literal prefix to one ws:// upstream.
          * @param prefix Prefix such as "/socket"; also registers the bare path.
          * @param upstream WebSocket origin with an optional base path; no query or fragment.
@@ -163,6 +177,18 @@ export namespace mhttp {
         auto SetWsForward(
             std::string prefix,
             std::string_view upstream,
+            WsForwardConfig config = {}
+        ) -> void;
+
+        /**
+         * @brief Forward WebSocket upgrades to a balanced backend list.
+         * @param upstreams Nonempty ws:// URL list with positive weights and no duplicates.
+         * @param config Includes balancing policy and failure cooldown.
+         * @note A backend remains active through handshake, session, and shutdown drain.
+         */
+        auto SetWsForward(
+            std::string prefix,
+            std::vector<UpstreamBackend> upstreams,
             WsForwardConfig config = {}
         ) -> void;
 
@@ -597,7 +623,19 @@ namespace mhttp {
         std::string_view upstream,
         ReverseProxyConfig config
     ) -> void {
-        auto proxy{ std::make_shared<detail::ReverseProxy>(m_impl->BaseExecutor(), std::move(prefix), upstream, config) };
+        config.balancing.failure_cooldown = std::chrono::steady_clock::duration::zero();
+        SetReverseProxy(std::move(prefix), std::vector<UpstreamBackend>{
+                                               { std::string{ upstream }, 1 }
+        },
+                        config);
+    }
+
+    auto HttpServer::SetReverseProxy(
+        std::string prefix,
+        std::vector<UpstreamBackend> upstreams,
+        ReverseProxyConfig config
+    ) -> void {
+        auto proxy{ std::make_shared<detail::ReverseProxy>(m_impl->BaseExecutor(), std::move(prefix), std::move(upstreams), config) };
         auto const handler{ [proxy](Request& request, Response& response) -> net::awaitable<void> {
             co_await proxy->Run(request, response);
         } };
@@ -611,7 +649,19 @@ namespace mhttp {
         std::string_view upstream,
         WsForwardConfig config
     ) -> void {
-        auto forward{ std::make_shared<detail::WsForward>(std::move(prefix), upstream, config) };
+        config.balancing.failure_cooldown = std::chrono::steady_clock::duration::zero();
+        SetWsForward(std::move(prefix), std::vector<UpstreamBackend>{
+                                            { std::string{ upstream }, 1 }
+        },
+                     config);
+    }
+
+    auto HttpServer::SetWsForward(
+        std::string prefix,
+        std::vector<UpstreamBackend> upstreams,
+        WsForwardConfig config
+    ) -> void {
+        auto forward{ std::make_shared<detail::WsForward>(std::move(prefix), std::move(upstreams), config) };
         auto prepare{ [forward](Request& request) -> net::awaitable<std::expected<detail::WsHandlerEntry, Status>> {
             co_return co_await forward->Prepare(request);
         } };

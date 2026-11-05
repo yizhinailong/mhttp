@@ -38,6 +38,7 @@ import :client_pool;
 import :lazy_request;
 import :client_response;
 import :proxy_common;
+import :upstream_group;
 
 export namespace mhttp {
 
@@ -52,6 +53,7 @@ export namespace mhttp {
         std::chrono::steady_clock::duration acquire_timeout{ std::chrono::seconds{ 3 } }; ///< Pool capacity wait.
         std::uint32_t header_limit{ 64 * 1024 };                                          ///< Maximum upstream response header bytes.
         std::uint64_t body_limit{ 1024ULL * 1024 * 1024 };                                ///< Maximum upstream response body bytes.
+        UpstreamGroupConfig balancing;                                                    ///< Backend-list selection and passive recovery.
     };
 
 } // namespace mhttp
@@ -82,6 +84,7 @@ namespace mhttp::detail {
         std::shared_ptr<Connection> m_connection;       ///< Downstream transport.
         std::shared_ptr<client::HttpClientPool> m_pool; ///< Shared route pool.
         client::HttpClientPool::ClientHandle m_client;  ///< Exclusive upstream lease.
+        UpstreamLease m_backend;                        ///< Active backend reservation through the full exchange.
         net::cancellation_signal m_acquire_cancel;      ///< Cancels a capacity waiter.
         net::cancellation_signal m_watch_cancel;        ///< Stops the non-consuming peer monitor.
         util::AsyncEvent m_watch_done;                  ///< Monitor completion before the next request may read.
@@ -95,8 +98,9 @@ namespace mhttp::detail {
          */
         ProxyExchange(
             std::shared_ptr<Connection> connection,
-            std::shared_ptr<client::HttpClientPool> pool
-        ) : m_connection{ std::move(connection) }, m_pool{ std::move(pool) }, m_watch_done{ m_connection->Executor() } {}
+            std::shared_ptr<client::HttpClientPool> pool,
+            UpstreamLease backend
+        ) : m_connection{ std::move(connection) }, m_pool{ std::move(pool) }, m_backend{ std::move(backend) }, m_watch_done{ m_connection->Executor() } {}
 
         /**
          * @brief Cancel acquisition and close any borrowed upstream without blocking the strand.
@@ -138,6 +142,8 @@ namespace mhttp::detail {
             if (m_cancelled && m_client) {
                 co_await m_client->AsyncClose();
             }
+            m_client.Release();
+            m_backend.Release();
         }
 
         /**
@@ -190,7 +196,7 @@ namespace mhttp::detail {
             auto writer{ m_client->CreateLazyRequest() };
             co_await writer->WriteHeader(request.Method(), target, headers, chunked ? client::LazyRequest::Mode::Chunked : client::LazyRequest::Mode::Relay, ec);
             if (ec) {
-                fail(response, ec);
+                fail(response, ec, true);
                 co_return;
             }
             std::array<char, 64 * 1024> buffer{};
@@ -205,7 +211,7 @@ namespace mhttp::detail {
                 if (size != 0) {
                     co_await writer->WriteBody(net::buffer(buffer.data(), size), !request.IsBodyDone(), ec);
                     if (ec) {
-                        fail(response, ec);
+                        fail(response, ec, true);
                         co_return;
                     }
                 }
@@ -213,7 +219,7 @@ namespace mhttp::detail {
             if (!writer->IsBodyDone()) {
                 co_await writer->WriteBody({}, false, ec);
                 if (ec) {
-                    fail(response, ec);
+                    fail(response, ec, true);
                     co_return;
                 }
             }
@@ -222,7 +228,7 @@ namespace mhttp::detail {
             }
             auto result{ co_await writer->ReadResponseLazy() };
             if (!result) {
-                fail(response, result.error());
+                fail(response, result.error(), true);
                 co_return;
             }
             if (m_cancelled) {
@@ -230,9 +236,10 @@ namespace mhttp::detail {
             }
             auto& received{ *result };
             if (received.ResultInt() == 101 || !proxy_transfer_supported(received.Base())) {
-                fail(response, make_error_code(Error::ProtocolViolation));
+                fail(response, make_error_code(Error::ProtocolViolation), true);
                 co_return;
             }
+            m_backend.Success();
             auto forwarded{ proxy_headers(received.Base()) };
             forwarded.Erase(Field::content_length);
             auto& outgoing{ get_impl(response) };
@@ -255,6 +262,10 @@ namespace mhttp::detail {
             co_await stream->WriteHeader(received.Result(), forwarded, reframe ? StreamWriter::Mode::Chunked : StreamWriter::Mode::Relay, ec);
             while (!ec && !received.IsBodyDone()) {
                 auto const size{ co_await received.ReadSomeRaw(net::buffer(buffer), ec) };
+                if (ec) {
+                    fail(response, ec, true);
+                    co_return;
+                }
                 if (!ec && size != 0) {
                     co_await stream->WriteBody(net::buffer(buffer.data(), size), !received.IsBodyDone(), ec);
                 }
@@ -271,7 +282,14 @@ namespace mhttp::detail {
         /**
          * @brief Send an error before headers; abort a partially sent response without a terminator.
          */
-        auto fail(Response& response, boost::system::error_code ec) -> void {
+        auto fail(
+            Response& response,
+            boost::system::error_code ec,
+            bool upstream_failure = false
+        ) -> void {
+            if (upstream_failure && !m_cancelled && ec != net::error::operation_aborted) {
+                m_backend.Failure();
+            }
             get_impl(response).KeepAlive(false);
             if (get_impl(response).HeaderSent()) {
                 m_connection->Abort();
@@ -285,33 +303,27 @@ namespace mhttp::detail {
     };
 
     /**
-     * @brief One configured upstream and connection pool shared by a prefix's routes.
+     * @brief Configured upstream group and connection pool shared by a prefix's routes.
      */
     class ReverseProxy {
     private:
         std::string m_prefix;                           ///< Normalized literal route prefix.
-        url::UrlInfo m_upstream;                        ///< Validated HTTP origin and encoded base path.
+        std::shared_ptr<UpstreamGroup> m_upstreams;     ///< Validated HTTP backends and shared accounting.
         ReverseProxyConfig m_config;                    ///< Configuration snapshot.
         std::shared_ptr<client::HttpClientPool> m_pool; ///< Pool on the server executor.
 
     public:
         /**
-         * @brief Validate route settings before allocating a live connection pool.
-         * @throws std::invalid_argument For a non-literal prefix, invalid HTTP URL, or invalid limits.
+         * @brief Validate and own a load-balanced HTTP backend list before registration.
          */
         ReverseProxy(
             net::any_io_executor executor,
             std::string prefix,
-            std::string_view upstream,
+            std::vector<UpstreamBackend> upstreams,
             ReverseProxyConfig config
-        ) : m_prefix{ proxy_prefix(std::move(prefix)) }, m_config{ config } {
-            auto parsed{ url::parse_url(upstream) };
-            if (!parsed || !iequals(parsed->scheme, "http") || parsed->has_query || upstream.find('#') != std::string_view::npos || config.max_connections == 0 || config.timeout <= std::chrono::steady_clock::duration::zero() || config.acquire_timeout <= std::chrono::steady_clock::duration::zero()) {
+        ) : m_prefix{ proxy_prefix(std::move(prefix)) }, m_upstreams{ std::make_shared<UpstreamGroup>(std::move(upstreams), "http", config.balancing) }, m_config{ config } {
+            if (config.max_connections == 0 || config.timeout <= std::chrono::steady_clock::duration::zero() || config.acquire_timeout <= std::chrono::steady_clock::duration::zero()) {
                 throw std::invalid_argument{ "mhttp: reverse proxy requires a literal path prefix, an HTTP upstream URL, and positive limits" };
-            }
-            m_upstream = std::move(*parsed);
-            while (!m_upstream.path.empty() && m_upstream.path.back() == '/') {
-                m_upstream.path.pop_back();
             }
             client::PoolParams params;
             params.max_size = config.max_connections;
@@ -338,26 +350,24 @@ namespace mhttp::detail {
                 response.SetErrorContent(Status::not_implemented);
                 co_return;
             }
+            auto backend{ m_upstreams->Acquire() };
+            if (!backend) {
+                response.SetErrorContent(Status::service_unavailable);
+                co_return;
+            }
+            auto const& upstream{ backend->Url() };
             auto connection{ get_impl(request).GetConnection() };
-            auto exchange{ std::make_shared<ProxyExchange>(connection, m_pool) };
+            auto exchange{ std::make_shared<ProxyExchange>(connection, m_pool, std::move(*backend)) };
             connection->SetAbortHandler([weak = std::weak_ptr{ exchange }] { if (auto state{ weak.lock() }) { state->Cancel(); } });
             try {
-                auto const target{ rewrite(request) };
-                co_await exchange->Run(request, response, m_upstream, target, m_config);
+                auto const target{ proxy_target(request, m_prefix, upstream.path, m_config.strip_prefix) };
+                co_await exchange->Run(request, response, upstream, target, m_config);
             } catch (std::exception const&) {
                 exchange->Cancel();
                 response.SetErrorContent(Status::bad_gateway);
                 get_impl(response).KeepAlive(false);
             }
             co_await exchange->Finish();
-        }
-
-    private:
-        /**
-         * @brief Replace matched raw path segments without decoding reserved bytes or the query.
-         */
-        auto rewrite(Request const& request) const -> std::string {
-            return proxy_target(request, m_prefix, m_upstream.path, m_config.strip_prefix);
         }
     };
 

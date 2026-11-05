@@ -36,9 +36,9 @@ server.SetReverseProxy("/api", "http://127.0.0.1:8080/v1");
 
 请求与响应以 64 KiB 缓冲区逐段转发，支持固定长度、分块上传、大文件和 SSE。逐跳字段、所有 Connection 指定的字段及 trailers 不会转发，传输分帧在每一跳重新生成；重复的 Set-Cookie 等端到端字段会保留。X-Forwarded-For 使用 `GetClientIp()` 的可信代理规则，X-Forwarded-Host、Proto、Port 由当前请求重新生成，来路的 Forwarded 字段移除。
 
-每条代理配置持有独立的上游连接池。`max_connections` 限制连接数，`acquire_timeout` 限制容量等待，`timeout` 限制每步上游 I/O；持续有数据的流可以长时间保持。`header_limit` / `body_limit` 限制上游响应，客户端请求仍受服务器自身限制。代理保留上游状态和重定向响应，不自动重放请求或跟随重定向。
+每条代理配置持有独立的上游连接池。`max_connections` 限制每个上游 origin 的连接数，`acquire_timeout` 限制容量等待，`timeout` 限制每步上游 I/O；持续有数据的流可以长时间保持。`header_limit` / `body_limit` 限制上游响应，客户端请求仍受服务器自身限制。代理保留上游状态和重定向响应，不自动重放请求或跟随重定向。
 
-连接失败在响应头发出前返回 502，容量等待或上游 I/O 超时返回 504；响应已开始后发生错误则中断连接，避免把截断内容当作成功响应。下游关闭或服务器停机会取消上游操作，停机会等待代理会话排空。当前上游 URL 仅支持 HTTP，不能带查询或片段；WebSocket 升级通过 `SetWsForward` 单独注册，负载均衡属于后续扩展。
+连接失败在响应头发出前返回 502，容量等待或上游 I/O 超时返回 504；响应已开始后发生错误则中断连接，避免把截断内容当作成功响应。下游关闭或服务器停机会取消上游操作，停机会等待代理会话排空。当前上游 URL 仅支持 HTTP，不能带查询或片段；WebSocket 升级通过 `SetWsForward` 单独注册。
 
 ## WebSocket 反向代理
 
@@ -55,7 +55,36 @@ server.SetWsForward("/socket", "ws://127.0.0.1:8080/chat");
 
 每个方向一次读取一条完整消息，并等待目标发送完成后继续读取，保留 text / binary 类型；控制帧由每一跳各自处理 Ping / Pong，关闭帧的状态码和原因会传递。`message_limit` 默认 16 MiB，必须为正，限制两个方向；下游接收还受服务器 `SetBodyLimit` 限制。会话没有空闲超时；下游断开或服务器停机时取消上游，并等待转发协程排空。
 
-当前仅支持 `ws://` 单上游，不支持 URL 查询、片段、WSS、扩展协商或 WebSocket 压缩。
+当前仅支持 `ws://` 上游，不支持 URL 查询、片段、WSS、扩展协商或 WebSocket 压缩。
+
+## 多上游负载均衡
+
+`SetReverseProxy` 和 `SetWsForward` 都接受 `std::vector<UpstreamBackend>`；每项包含 `url` 和正整数 `weight`（默认 1），每个上游可以配置自己的基础路径。例如：
+
+```cpp
+mhttp::ReverseProxyConfig config;
+config.balancing.strategy = mhttp::UpstreamStrategy::WeightedRoundRobin;
+config.balancing.failure_cooldown = std::chrono::seconds{ 5 };
+server.SetReverseProxy("/api", std::vector<mhttp::UpstreamBackend>{
+    { "http://127.0.0.1:8081/v1", 3 },
+    { "http://127.0.0.1:8082/v2", 1 }
+}, config);
+
+mhttp::WsForwardConfig ws_config;
+ws_config.balancing.strategy = mhttp::UpstreamStrategy::LeastConnections;
+server.SetWsForward("/socket", std::vector<mhttp::UpstreamBackend>{
+    { "ws://127.0.0.1:8081/chat" },
+    { "ws://127.0.0.1:8082/chat" }
+}, ws_config);
+```
+
+`balancing` 使用共用的 `UpstreamGroupConfig`，每次注册拥有独立的选择状态。`RoundRobin`（默认）在健康节点间轮询，`WeightedRoundRobin` 使用平滑加权轮询，`LeastConnections` 选择活动数最少的节点并轮转处理平局。HTTP 每个请求重新选择，活动数包含连接池等待、连接建立和整个响应体；WebSocket 从选中、握手到会话关闭及转发排空都保持计数。空闲的 HTTP keep-alive 连接不计为活动请求。
+
+上游传输或协议失败后，节点进入 `failure_cooldown`（默认 5 秒）；零表示关闭冷却，负数无效。冷却到期后由下一次真实请求探测该节点，每个节点同时最多一个探测，其他请求继续使用健康节点。有效 HTTP 响应头或经过验证的 WebSocket 握手会恢复节点；HTTP 4xx/5xx 作为应用响应原样转发。响应体截断会计入上游故障，下游断开、服务器停机、下游写入失败和连接池容量超时不会。
+
+全部节点正在冷却或探测时返回 503。选中节点发生故障时，当前请求按原有规则返回 502/504 或中断已开始的响应，后续请求跳过该节点。不会自动向其他节点重放请求。取消探测会释放其名额，允许下一次请求立即探测；较早请求的成功结果不会覆盖后来的故障。
+
+列表必须非空，权重必须为正，归一化后重复的 origin + 基础路径会在注册时报错。HTTP 列表仅接受 `http://`，WebSocket 列表仅接受 `ws://`；URL 不能带查询或片段。原有单 URL 重载保留直接尝试上游的行为，冷却仅作用于后端列表重载。
 
 ## WebSocket 服务端
 
@@ -108,4 +137,5 @@ server.GetRouter().SetWsHandler(
 - `mcpp test websocket`：服务端升级路由、预读首帧、文本与二进制、控制帧、消息限制及停机排空。
 - `mcpp test reverse_proxy`：路径与请求头、连接复用、上传与 SSE、HEAD、网关错误和取消排空。
 - `mcpp test ws_forward`：升级前准备、子协议与响应头、双向消息与关闭状态、预读帧、消息限制和停机取消。
+- `mcpp test load_balance`：HTTP / WebSocket 分配比例、最少活动请求、握手计数、故障冷却与单次探测、取消和并发分配。
 - `mcpp test`：全部回归测试。

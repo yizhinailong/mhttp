@@ -17,6 +17,7 @@ export module mhttp:ws_forward;
 
 import std;
 import :config;
+import :error;
 import :strings;
 import :url;
 import :headers;
@@ -27,6 +28,7 @@ import :websocket_message;
 import :websocket_conn;
 import :ws_client;
 import :proxy_common;
+import :upstream_group;
 
 export namespace mhttp {
 
@@ -38,6 +40,7 @@ export namespace mhttp {
         bool preserve_host{ false };                                                       ///< Retain the public Host in the upstream handshake.
         std::chrono::steady_clock::duration connect_timeout{ std::chrono::seconds{ 30 } }; ///< DNS, TCP, and handshake deadline.
         std::uint64_t message_limit{ 16 * 1024 * 1024 };                                   ///< Maximum complete message bytes in either direction; must be positive.
+        UpstreamGroupConfig balancing;                                                     ///< Backend-list selection and passive recovery.
     };
 
 } // namespace mhttp
@@ -51,6 +54,7 @@ namespace mhttp::detail {
     private:
         net::any_io_executor m_executor;         ///< Downstream strand and relay completion executor.
         std::shared_ptr<Connection> m_http;      ///< HTTP transport, released after the peer observer drains.
+        UpstreamLease m_backend;                 ///< Active reservation through handshake, relay, and drain.
         client::WsClient m_upstream;             ///< Dedicated upstream connection, with serialized writes.
         WebSocketConn::WeakPtr m_downstream;     ///< Avoid a cycle with downstream callbacks.
         net::cancellation_signal m_watch_cancel; ///< Interrupt the HTTP peer observer.
@@ -68,9 +72,9 @@ namespace mhttp::detail {
          */
         WsForwardState(
             std::shared_ptr<Connection> connection,
-            url::UrlInfo const& upstream,
+            UpstreamLease backend,
             std::uint64_t message_limit
-        ) : m_executor{ connection->Executor() }, m_http{ std::move(connection) }, m_upstream{ m_executor, upstream.host, upstream.EffectivePort() }, m_watch_done{ m_executor }, m_reader_done{ m_executor } {
+        ) : m_executor{ connection->Executor() }, m_http{ std::move(connection) }, m_backend{ std::move(backend) }, m_upstream{ m_executor, m_backend.Url().host, m_backend.Url().EffectivePort() }, m_watch_done{ m_executor }, m_reader_done{ m_executor } {
             m_upstream.SetMessageLimit(message_limit);
         }
 
@@ -132,6 +136,20 @@ namespace mhttp::detail {
         auto HandshakeHeaders() const -> Headers { return m_upstream.HandshakeHeaders(); }
 
         /**
+         * @brief Restore a backend after the complete upstream negotiation was validated.
+         */
+        auto Accepted() -> void { m_backend.Success(); }
+
+        /**
+         * @brief Report attributable upstream failures before local cancellation changes state.
+         */
+        auto Failed(boost::system::error_code ec) -> void {
+            if (!m_cancelled && ec && ec != net::error::operation_aborted && ec != beast::websocket::error::closed) {
+                m_backend.Failure();
+            }
+        }
+
+        /**
          * @brief Start one upstream read loop after the downstream upgrade succeeds.
          */
         auto Open(WebSocketConn::WeakPtr downstream) -> void {
@@ -155,6 +173,7 @@ namespace mhttp::detail {
             boost::system::error_code ec;
             co_await m_upstream.AsyncSend(message, ec);
             if (ec) {
+                Failed(ec);
                 Cancel();
                 if (auto downstream{ m_downstream.lock() }) {
                     co_await downstream->AsyncAbort();
@@ -172,6 +191,7 @@ namespace mhttp::detail {
                 if (valid_ws_close_code(reason.code)) {
                     boost::system::error_code ec;
                     co_await m_upstream.AsyncClose(reason, ec);
+                    Failed(ec);
                 }
             }
         }
@@ -185,6 +205,7 @@ namespace mhttp::detail {
             while (m_reader_started && !m_reader_finished) {
                 static_cast<void>(co_await m_reader_done.Wait());
             }
+            m_backend.Release();
         }
 
     private:
@@ -208,6 +229,7 @@ namespace mhttp::detail {
                         }
                         co_await downstream->AsyncClose(reason, ec);
                     } else {
+                        Failed(ec);
                         co_await downstream->AsyncAbort();
                     }
                     co_return;
@@ -226,26 +248,21 @@ namespace mhttp::detail {
      */
     class WsForward {
     private:
-        std::string m_prefix;     ///< Normalized literal prefix.
-        url::UrlInfo m_upstream;  ///< Validated plain WebSocket authority and base path.
-        WsForwardConfig m_config; ///< Immutable per-route settings.
+        std::string m_prefix;                       ///< Normalized literal prefix.
+        std::shared_ptr<UpstreamGroup> m_upstreams; ///< Validated WS backends and shared accounting.
+        WsForwardConfig m_config;                   ///< Immutable per-route settings.
 
     public:
         /**
-         * @brief Validate configuration before the server starts.
+         * @brief Validate and own a load-balanced WebSocket backend list before registration.
          */
         WsForward(
             std::string prefix,
-            std::string_view upstream,
+            std::vector<UpstreamBackend> upstreams,
             WsForwardConfig config
-        ) : m_prefix{ proxy_prefix(std::move(prefix)) }, m_config{ config } {
-            auto parsed{ url::parse_url(upstream) };
-            if (!parsed || !iequals(parsed->scheme, "ws") || parsed->has_query || upstream.find('#') != std::string_view::npos || config.connect_timeout <= std::chrono::steady_clock::duration::zero() || config.message_limit == 0) {
+        ) : m_prefix{ proxy_prefix(std::move(prefix)) }, m_upstreams{ std::make_shared<UpstreamGroup>(std::move(upstreams), "ws", config.balancing) }, m_config{ config } {
+            if (config.connect_timeout <= std::chrono::steady_clock::duration::zero() || config.message_limit == 0) {
                 throw std::invalid_argument{ "mhttp: WebSocket forwarding requires a ws:// upstream and positive limits" };
-            }
-            m_upstream = std::move(*parsed);
-            while (!m_upstream.path.empty() && m_upstream.path.back() == '/') {
-                m_upstream.path.pop_back();
             }
         }
 
@@ -261,26 +278,33 @@ namespace mhttp::detail {
             if (auto const status{ validateHandshake(request) }; status != Status::switching_protocols) {
                 co_return std::unexpected{ status };
             }
-            auto state{ std::make_shared<WsForwardState>(get_impl(request).GetConnection(), m_upstream, m_config.message_limit) };
+            auto backend{ m_upstreams->Acquire() };
+            if (!backend) {
+                co_return std::unexpected{ Status::service_unavailable };
+            }
+            auto const& upstream{ backend->Url() };
+            auto state{ std::make_shared<WsForwardState>(get_impl(request).GetConnection(), std::move(*backend), m_config.message_limit) };
             auto headers{ proxy_headers(request.Base()) };
             for (auto const field : { Field::sec_websocket_key, Field::sec_websocket_accept, Field::sec_websocket_version, Field::sec_websocket_extensions, Field::content_length, Field::expect }) {
                 headers.Erase(field);
             }
             headers.Erase("Forwarded");
-            headers.Set(Field::host, m_config.preserve_host ? std::string{ request[Field::host] } : url::make_host_value(m_upstream.host, m_upstream.EffectivePort(), url::Scheme::Plain));
+            headers.Set(Field::host, m_config.preserve_host ? std::string{ request[Field::host] } : url::make_host_value(upstream.host, upstream.EffectivePort(), url::Scheme::Plain));
             headers.Set("X-Forwarded-For", request.GetClientIp().to_string());
             headers.Set("X-Forwarded-Host", request[Field::host]);
             headers.Set("X-Forwarded-Proto", "http");
             headers.Set("X-Forwarded-Port", std::to_string(request.LocalEndpoint().port()));
-            auto const target{ proxy_target(request, m_prefix, m_upstream.path, m_config.strip_prefix) };
+            auto const target{ proxy_target(request, m_prefix, upstream.path, m_config.strip_prefix) };
             state->Watch();
             boost::system::error_code ec;
             co_await state->Connect(target, headers, m_config.connect_timeout, ec);
             auto response{ state->HandshakeHeaders() };
             if (ec || !validNegotiation(headers, response)) {
+                state->Failed(ec ? ec : make_error_code(Error::ProtocolViolation));
                 co_await state->Finish();
                 co_return std::unexpected{ ec == net::error::timed_out || ec == beast::error::timeout ? Status::gateway_timeout : Status::bad_gateway };
             }
+            state->Accepted();
             WsHandlerEntry handlers;
             handlers.open = [state](WebSocketConn::WeakPtr weak) -> net::awaitable<void> {
                 state->Open(std::move(weak));
