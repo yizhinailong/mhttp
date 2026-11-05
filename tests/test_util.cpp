@@ -209,6 +209,55 @@ namespace {
     }
 
     /**
+     * @brief Absolute URLs split into components; relative references resolve per RFC 3986.
+     * @return Whether all checks passed.
+     */
+    auto test_url_parsing() -> bool {
+        bool passed{ true };
+        auto const full{ mhttp::url::parse_url("HTTPS://user:pw@Example.com:8443/a/b?x=1&y#frag") };
+        passed &= check(full.has_value(), "a full URL must parse");
+        if (full) {
+            passed &= check(full->IsTls() && full->host == "Example.com" && full->EffectivePort() == 8443, "scheme, host, and port must be extracted; userinfo dropped");
+            passed &= check(full->Target() == "/a/b?x=1&y" && full->Target(true) == "/a/b?x=1&y#frag", "the target must exclude the fragment unless asked");
+        }
+        auto const bare{ mhttp::url::parse_url("http://h") };
+        passed &= check(bare && bare->Target() == "/" && bare->EffectivePort() == 80, "an empty path must become \"/\" with the default port");
+        auto const ipv6{ mhttp::url::parse_url("http://[::1]:81/x") };
+        passed &= check(ipv6 && ipv6->host == "::1" && ipv6->port == 81, "IPv6 literals must lose their brackets");
+        for (auto const bad : { "", "/relative", "http://", "http://h:99999/", "http://h:x/", "http://a b/", "mailto:x" }) {
+            auto const parsed{ mhttp::url::parse_url(bad) };
+            passed &= check(!parsed && parsed.error() == mhttp::Error::InvalidUrl, std::format("'{}' must be rejected", bad));
+        }
+
+        // RFC 3986 §5.4.1 normal examples, base "http://a/b/c/d;p?q" reduced to its target.
+        std::pair<std::string_view, std::string_view> const cases[]{
+            { "g", "/b/c/g" },
+            { "./g", "/b/c/g" },
+            { "g/", "/b/c/g/" },
+            { "/g", "/g" },
+            { "?y", "/b/c/d;p?y" },
+            { "g?y", "/b/c/g?y" },
+            { "#s", "/b/c/d;p?q" },
+            { "", "/b/c/d;p?q" },
+            { ".", "/b/c/" },
+            { "..", "/b/" },
+            { "../g", "/b/g" },
+            { "../..", "/" },
+            { "../../../g", "/g" },
+            { "http://other/x/../y", "/y" },
+        };
+        for (auto const& [reference, expected] : cases) {
+            auto const resolved{ mhttp::url::resolve("/b/c/d;p?q", reference) };
+            passed &= check(resolved == expected, std::format("resolve('{}') must give '{}', got '{}'", reference, expected, resolved));
+        }
+
+        passed &= check(mhttp::url::make_host_value("::1", 8080, mhttp::url::Scheme::Plain) == "[::1]:8080", "IPv6 hosts need brackets in Host");
+        passed &= check(mhttp::url::make_host_value("h", 443, mhttp::url::Scheme::Tls) == "h", "default ports must be omitted");
+        passed &= check(mhttp::url::make_url_value("h", 81, mhttp::url::Scheme::Plain, "/p") == "http://h:81/p", "make_url_value must join the parts");
+        return passed;
+    }
+
+    /**
      * @brief Owned headers deep-copy; borrowed views alias; iteration keeps duplicates.
      * @return Whether all checks passed.
      */
@@ -292,6 +341,7 @@ auto main() -> int {
     passed &= run(test_when_all_order);
     passed &= test_query_params();
     passed &= test_url_coding();
+    passed &= test_url_parsing();
     passed &= test_headers();
     passed &= test_form_data();
     passed &= test_error_codes();

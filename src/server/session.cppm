@@ -177,7 +177,7 @@ namespace mhttp {
             auto& table{ route_table(m_context->router) };
 
             for (;;) {
-                detail::BodyReader::HeaderParser parser;
+                detail::BodyReader<true>::HeaderParser parser;
                 parser.header_limit(m_context->header_limit.load());
                 parser.body_limit(m_context->body_limit.load());
 
@@ -263,7 +263,7 @@ namespace mhttp {
         }
 
         auto ReadSome(
-            RequestParser& parser,
+            Parser& parser,
             boost::system::error_code& ec
         ) -> net::awaitable<void> override {
             co_await net::co_spawn(
@@ -278,7 +278,7 @@ namespace mhttp {
         }
 
         auto WriteHeader(
-            ResponseSerializer& serializer,
+            Serializer& serializer,
             boost::system::error_code& ec
         ) -> net::awaitable<void> override {
             co_await net::co_spawn(
@@ -293,7 +293,7 @@ namespace mhttp {
         }
 
         auto Write(
-            ResponseSerializer& serializer,
+            Serializer& serializer,
             boost::system::error_code& ec
         ) -> net::awaitable<void> override {
             co_await net::co_spawn(
@@ -314,7 +314,7 @@ namespace mhttp {
          * @param ec Receives the read error, including end_of_stream when the peer closed.
          */
         auto readHeader(
-            detail::BodyReader::HeaderParser& parser,
+            detail::BodyReader<true>::HeaderParser& parser,
             boost::system::error_code& ec
         ) -> net::awaitable<void> {
             m_stream.ExpiresAfter(m_context->read_timeout.load());

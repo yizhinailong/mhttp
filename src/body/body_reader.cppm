@@ -1,6 +1,6 @@
 /**
  * @file body_reader.cppm
- * @brief Read a request body lazily: raw streaming, or materialized into a typed BodyState.
+ * @brief Read a message body lazily: raw streaming, or materialized into a typed BodyState.
  */
 module;
 
@@ -53,51 +53,84 @@ namespace mhttp::detail {
     };
 
     /**
-     * @brief Lazy request-body reader (port of httplib::detail::body_reader, request side).
+     * @brief Lazy body reader (port of httplib::detail::body_reader).
      *
      * The header parser is converted into a buffer_body parser so the body can be streamed
      * into caller buffers or fed to a Sink. Content-Encoding is not decoded (compression is not
      * ported). httplib serializes concurrent reads with an async mutex; here every reader runs
      * on the connection strand, so a second overlapping read fails with
      * Error::OperationInProgress instead of queuing.
+     *
+     * @tparam IsRequest True to read requests (server side), false to read responses (client).
      */
+    template <bool IsRequest>
     class BodyReader {
     public:
-        using HeaderParser = http::request_parser<http::empty_body>;
-        using RawParser = Connection::RequestParser;
+        using ConnectionType = BasicConnection<IsRequest>;
+        using HeaderParser = http::parser<IsRequest, http::empty_body>;
+        using RawParser = typename ConnectionType::Parser;
+        using MessageType = http::message<IsRequest, http::buffer_body>;
 
         static constexpr std::size_t STAGING_SIZE{ 64 * 1024 };
 
     private:
-        std::shared_ptr<Connection> m_connection; ///< Source of body bytes.
-        RawParser m_parser;                       ///< Parser holding the header and body state.
-        FormData::Param m_form_params;            ///< Limits for automatic multipart parsing.
-        BodyState m_state;                        ///< Materialized body.
-        bool m_stream_started{ false };           ///< Raw bytes were handed to the caller.
-        bool m_busy{ false };                     ///< A read is in flight.
+        std::shared_ptr<ConnectionType> m_connection; ///< Source of body bytes.
+        RawParser m_parser;                           ///< Parser holding the header and body state.
+        FormData::Param m_form_params;                ///< Limits for automatic multipart parsing.
+        BodyState m_state;                            ///< Materialized body.
+        std::function<void()> m_on_complete;          ///< Called once when the parser finishes.
+        bool m_stream_started{ false };               ///< Raw bytes were handed to the caller.
+        bool m_busy{ false };                         ///< A read is in flight.
 
     public:
         /**
          * @brief Take over a parser whose header is complete.
          * @param connection Connection that supplies body bytes.
-         * @param header_parser Parser after async_read_header; its limits carry over.
+         * @param header_parser Parser after the header read; its limits carry over.
          */
-        BodyReader(std::shared_ptr<Connection> connection, HeaderParser&& header_parser)
+        BodyReader(std::shared_ptr<ConnectionType> connection, HeaderParser&& header_parser)
             : m_connection{ std::move(connection) }, m_parser{ std::move(header_parser) } {}
 
         BodyReader(BodyReader const&) = delete;
         auto operator=(BodyReader const&) -> BodyReader& = delete;
 
         /**
-         * @brief Borrow the request header (start line and fields).
+         * @brief Borrow the message header (start line and fields).
          * @return Message owned by the parser.
          */
-        [[nodiscard]] auto Message() -> http::request<http::buffer_body>& {
+        [[nodiscard]] auto Message() -> MessageType& {
             return m_parser.get();
         }
 
-        [[nodiscard]] auto Message() const -> http::request<http::buffer_body> const& {
+        [[nodiscard]] auto Message() const -> MessageType const& {
             return m_parser.get();
+        }
+
+        /**
+         * @brief Report whether the parser has consumed the whole message.
+         * @return True once the last body byte was read, regardless of materialization.
+         */
+        [[nodiscard]] auto IsParserDone() const -> bool {
+            return m_parser.is_done();
+        }
+
+        /**
+         * @brief Return the declared Content-Length.
+         * @return Length, or std::nullopt for chunked, close-delimited, or invalid framing.
+         */
+        [[nodiscard]] auto ContentLength() const -> std::optional<std::uint64_t> {
+            if (auto const length{ m_parser.content_length() }) {
+                return *length;
+            }
+            return std::nullopt;
+        }
+
+        /**
+         * @brief Register a callback run once when the parser consumes the last body byte.
+         * @param callback Callback; it does not run for a message that was already complete.
+         */
+        auto OnComplete(std::function<void()> callback) -> void {
+            m_on_complete = std::move(callback);
         }
 
         /**
@@ -188,6 +221,15 @@ namespace mhttp::detail {
         auto ReadFormData() -> net::awaitable<Result<FormData>> {
             std::string content_type{ to_sv(m_parser.get()[http::field::content_type]) };
             co_return co_await readAs<FormData>(std::make_unique<FormDataSink>(std::move(content_type), m_form_params));
+        }
+
+        /**
+         * @brief Stream the rest of the body into a file.
+         * @param path Destination; replaced if it exists, removed again if the read fails.
+         * @return Error code.
+         */
+        auto ReadToFile(std::filesystem::path path) -> net::awaitable<boost::system::error_code> {
+            co_return co_await readBody(std::make_unique<FileSink>(std::move(path)));
         }
 
     private:
@@ -295,6 +337,9 @@ namespace mhttp::detail {
                 co_await m_connection->ReadSome(m_parser, ec);
                 if (ec == http::error::need_buffer) {
                     ec = {};
+                }
+                if (m_parser.is_done() && m_on_complete) {
+                    std::exchange(m_on_complete, nullptr)();
                 }
                 auto const consumed{ buffer.size() - body.size };
                 if (consumed > 0) {

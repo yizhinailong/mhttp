@@ -6,9 +6,13 @@ module;
 
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/buffer.hpp>
+#include <boost/asio/error.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/redirect_error.hpp>
 #include <boost/asio/socket_base.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/use_awaitable.hpp>
 #include <boost/beast/core/basic_stream.hpp>
 #include <boost/beast/core/rate_policy.hpp>
 #include <boost/beast/core/stream_traits.hpp>
@@ -106,6 +110,71 @@ namespace mhttp {
         }
 
         /**
+         * @brief Connect to one endpoint, bounded by the pending timeout.
+         * @param endpoint Server endpoint.
+         * @param ec Receives the connect error.
+         */
+        auto AsyncConnect(
+            tcp::endpoint const& endpoint,
+            boost::system::error_code& ec
+        ) -> net::awaitable<void> {
+            co_await m_stream.async_connect(endpoint, net::redirect_error(net::use_awaitable, ec));
+            configureConnected(ec);
+        }
+
+        /**
+         * @brief Connect to the first reachable endpoint of a resolver result.
+         * @tparam EndpointSequence Range of endpoints, such as tcp::resolver::results_type.
+         * @param endpoints Candidate endpoints, tried in order.
+         * @param ec Receives the error of the last attempt.
+         */
+        template <typename EndpointSequence>
+        auto AsyncConnect(
+            EndpointSequence const& endpoints,
+            boost::system::error_code& ec
+        ) -> net::awaitable<void> {
+            co_await m_stream.async_connect(endpoints, net::redirect_error(net::use_awaitable, ec));
+            configureConnected(ec);
+        }
+
+        /**
+         * @brief Probe an idle connection without consuming data.
+         * @return True when the peer has not closed it and no stray bytes are waiting.
+         * @note Only call while no asynchronous operation is pending on the stream. httplib also
+         *       reported a connection with unread bytes as alive; those bytes belong to no
+         *       request and would be parsed as the next response.
+         */
+        [[nodiscard]] auto IsPeerAlive() -> bool {
+            auto& socket{ m_stream.socket() };
+            boost::system::error_code ec;
+            socket.non_blocking(true, ec);
+            if (ec) {
+                return false;
+            }
+            char byte{};
+            socket.receive(net::buffer(&byte, 1), net::socket_base::message_peek, ec);
+            boost::system::error_code restore_ec;
+            socket.non_blocking(false, restore_ec);
+            return ec == net::error::would_block || ec == net::error::try_again;
+        }
+
+        /**
+         * @brief Cap the throughput of later reads and writes.
+         * @param read_bytes_per_second Read limit; 0 means unlimited.
+         * @param write_bytes_per_second Write limit; 0 means unlimited.
+         */
+        auto SetRateLimits(
+            std::uint64_t read_bytes_per_second,
+            std::uint64_t write_bytes_per_second
+        ) -> void {
+            auto const to_limit{ [](std::uint64_t value) {
+                return value == 0 ? (std::numeric_limits<std::size_t>::max)() : static_cast<std::size_t>(value);
+            } };
+            m_stream.rate_policy().read_limit(to_limit(read_bytes_per_second));
+            m_stream.rate_policy().write_limit(to_limit(write_bytes_per_second));
+        }
+
+        /**
          * @brief Release the socket immediately.
          * @param ec Receives the last error; failures are not actionable at this point.
          * @note Shuts down only the send direction before closing. Shutting down the receive
@@ -125,6 +194,20 @@ namespace mhttp {
             boost::system::error_code ec;
             Close(ec);
             co_return;
+        }
+
+    private:
+        /**
+         * @brief Apply client socket options after a successful connect.
+         * @param ec Connect result; options are skipped on failure.
+         */
+        auto configureConnected(boost::system::error_code const& ec) -> void {
+            if (ec) {
+                return;
+            }
+            boost::system::error_code option_ec;
+            m_stream.socket().set_option(tcp::no_delay{ true }, option_ec);
+            m_stream.socket().set_option(net::socket_base::keep_alive{ true }, option_ec);
         }
     };
 

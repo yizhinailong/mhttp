@@ -36,6 +36,14 @@ namespace mhttp::detail {
         virtual auto Next(boost::system::error_code& ec) -> Chunk = 0;
 
         /**
+         * @brief Restart production from the first byte, so a request can be sent again.
+         * @return False when the source cannot be replayed.
+         * @note httplib had no rewind: a request re-sent after a 307/308 redirect announced its
+         *       old Content-Length but carried no body.
+         */
+        virtual auto Rewind() -> bool = 0;
+
+        /**
          * @brief Report the total size when known in advance.
          * @return Body size, or std::nullopt for multipart/byteranges and other unknown sizes.
          */
@@ -70,6 +78,11 @@ namespace mhttp::detail {
             return std::pair{ std::string_view{ m_data }, false };
         }
 
+        auto Rewind() -> bool override {
+            m_done = false;
+            return true;
+        }
+
         [[nodiscard]] auto ContentLength() const -> std::optional<std::uint64_t> override {
             return m_data.size();
         }
@@ -83,6 +96,10 @@ namespace mhttp::detail {
         auto Next(boost::system::error_code& ec) -> Chunk override {
             ec = {};
             return std::nullopt;
+        }
+
+        auto Rewind() -> bool override {
+            return true;
         }
 
         [[nodiscard]] auto ContentLength() const -> std::optional<std::uint64_t> override {
@@ -170,6 +187,15 @@ namespace mhttp::detail {
                 break;
             }
             return std::nullopt;
+        }
+
+        auto Rewind() -> bool override {
+            m_file.close();
+            m_file.clear();
+            m_file_remaining = 0;
+            m_field_index = 0;
+            m_step = Step::Header;
+            return true;
         }
 
     private:
@@ -293,6 +319,14 @@ namespace mhttp::detail {
                 return std::pair{ *chunk, more };
             }
             return nextByterange(ec);
+        }
+
+        auto Rewind() -> bool override {
+            m_file.clear();
+            m_range_index = 0;
+            m_step = Step::Header;
+            m_pos.reset();
+            return m_file.is_open();
         }
 
     private:

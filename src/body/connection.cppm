@@ -1,6 +1,6 @@
 /**
  * @file connection.cppm
- * @brief Declare the connection interface through which request and response bodies do I/O.
+ * @brief Declare the connection interface through which message bodies are read and written.
  */
 module;
 
@@ -19,19 +19,23 @@ import :config;
 namespace mhttp::detail {
 
     /**
-     * @brief Connection-level I/O used by lazy request bodies and response writers.
+     * @brief Connection-level I/O used by lazy body readers and body writers.
      *
-     * The HTTP session implements it. Request and response objects only see this interface,
-     * which keeps their partitions free of a cyclic import on the session. Every operation is
-     * spawned onto the connection strand and applies the server's read or write timeout, so it
-     * may be started from any executor; object state is still strand-only.
+     * A server connection reads requests and writes responses; a client connection does the
+     * opposite. Message objects only see this interface, which keeps their partitions free of a
+     * cyclic import on the session or client that owns the socket. Every operation is spawned
+     * onto the connection strand and applies the owner's timeouts, so it may be started from any
+     * executor; message object state is still strand-only.
+     *
+     * @tparam IsServer True for the server side (reads requests), false for the client side.
      */
-    class Connection {
+    template <bool IsServer>
+    class BasicConnection {
     public:
-        using RequestParser = http::request_parser<http::buffer_body>;
-        using ResponseSerializer = http::response_serializer<http::buffer_body>;
+        using Parser = http::parser<IsServer, http::buffer_body>;          ///< Incoming message parser.
+        using Serializer = http::serializer<!IsServer, http::buffer_body>; ///< Outgoing message serializer.
 
-        virtual ~Connection() = default;
+        virtual ~BasicConnection() = default;
 
         /**
          * @brief Return the connection strand.
@@ -40,34 +44,37 @@ namespace mhttp::detail {
         [[nodiscard]] virtual auto Executor() -> net::any_io_executor = 0;
 
         /**
-         * @brief Read more of the request body into the parser's attached buffer.
+         * @brief Read more of the incoming body into the parser's attached buffer.
          * @param parser Parser with a buffer_body buffer attached.
          * @param ec Receives the read error; need_buffer means the buffer is full.
          */
         virtual auto ReadSome(
-            RequestParser& parser,
+            Parser& parser,
             boost::system::error_code& ec
         ) -> net::awaitable<void> = 0;
 
         /**
-         * @brief Write only the response header.
-         * @param serializer Serializer of the response.
+         * @brief Write only the outgoing header.
+         * @param serializer Serializer of the outgoing message.
          * @param ec Receives the write error.
          */
         virtual auto WriteHeader(
-            ResponseSerializer& serializer,
+            Serializer& serializer,
             boost::system::error_code& ec
         ) -> net::awaitable<void> = 0;
 
         /**
          * @brief Write until the attached body buffer is consumed or the message is done.
-         * @param serializer Serializer of the response.
+         * @param serializer Serializer of the outgoing message.
          * @param ec Receives the write error; need_buffer means more body is expected.
          */
         virtual auto Write(
-            ResponseSerializer& serializer,
+            Serializer& serializer,
             boost::system::error_code& ec
         ) -> net::awaitable<void> = 0;
     };
+
+    using Connection = BasicConnection<true>;        ///< Server side: reads requests, writes responses.
+    using ClientConnection = BasicConnection<false>; ///< Client side: writes requests, reads responses.
 
 } // namespace mhttp::detail

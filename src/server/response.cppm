@@ -428,7 +428,7 @@ namespace mhttp {
     /**
      * @brief Response state behind mhttp::Response: message, body source, and stream writer.
      */
-    class ResponseImpl : public detail::BodyWriter {
+    class ResponseImpl : public detail::BodyWriter<false> {
     private:
         std::shared_ptr<StreamWriter> m_stream_writer; ///< Lazily created writer.
 

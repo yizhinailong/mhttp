@@ -366,7 +366,7 @@ namespace mhttp {
     /**
      * @brief Request state behind mhttp::Request: parsed target, routing data, and body reader.
      */
-    class RequestImpl : public detail::BodyReader {
+    class RequestImpl : public detail::BodyReader<true> {
     private:
         std::string m_raw_path;                                   ///< Target before '?'.
         std::vector<std::string> m_decoded_segments;              ///< Per-segment decoded path.

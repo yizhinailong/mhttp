@@ -181,6 +181,66 @@ namespace mhttp::detail {
     };
 
     /**
+     * @brief Write the body to a file; commits nothing to the body state.
+     *
+     * A body that fails part-way leaves no file behind (httplib kept the partial file).
+     */
+    class FileSink : public Sink {
+    private:
+        std::filesystem::path m_path; ///< Destination file.
+        std::ofstream m_file;         ///< Open destination.
+        bool m_opened{ false };       ///< Init() created the file.
+        bool m_finished{ false };     ///< The whole body was written.
+
+    public:
+        /**
+         * @brief Create a sink for one body.
+         * @param path Destination file; replaced if it exists.
+         */
+        explicit FileSink(std::filesystem::path path) : m_path{ std::move(path) } {}
+
+        FileSink(FileSink const&) = delete;
+        auto operator=(FileSink const&) -> FileSink& = delete;
+
+        ~FileSink() override {
+            if (m_opened && !m_finished) {
+                m_file.close();
+                std::error_code ec;
+                std::filesystem::remove(m_path, ec);
+            }
+        }
+
+        auto Init(std::optional<std::uint64_t>, boost::system::error_code& ec) -> void override {
+            ec = {};
+            m_file.open(m_path, std::ios::out | std::ios::binary | std::ios::trunc);
+            m_opened = m_file.is_open();
+            if (!m_opened) {
+                ec = boost::system::errc::make_error_code(boost::system::errc::permission_denied);
+            }
+        }
+
+        auto Put(std::string_view chunk, boost::system::error_code& ec) -> void override {
+            ec = {};
+            m_file.write(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+            if (!m_file) {
+                ec = boost::system::errc::make_error_code(boost::system::errc::io_error);
+            }
+        }
+
+        auto Finish(boost::system::error_code& ec) -> void override {
+            ec = {};
+            m_file.close();
+            if (m_file.fail()) {
+                ec = boost::system::errc::make_error_code(boost::system::errc::io_error);
+                return;
+            }
+            m_finished = true;
+        }
+
+        auto Commit(BodyState&) -> void override {}
+    };
+
+    /**
      * @brief Choose the default sink for a Content-Type.
      * @param content_type Request Content-Type.
      * @param params Multipart limits and file handling.
