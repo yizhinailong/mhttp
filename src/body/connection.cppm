@@ -6,6 +6,7 @@ module;
 
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/cancellation_signal.hpp>
 #include <boost/beast/http/buffer_body.hpp>
 #include <boost/beast/http/parser.hpp>
 #include <boost/beast/http/serializer.hpp>
@@ -74,7 +75,31 @@ namespace mhttp::detail {
         ) -> net::awaitable<void> = 0;
     };
 
-    using Connection = BasicConnection<true>;        ///< Server side: reads requests, writes responses.
     using ClientConnection = BasicConnection<false>; ///< Client side: writes requests, reads responses.
+
+    /**
+     * @brief Server transport hooks used to cancel a streaming relay with its downstream.
+     */
+    class Connection : public BasicConnection<true> {
+    public:
+        /**
+         * @brief Install or clear the current request's abort hook; connection strand only.
+         */
+        virtual auto SetAbortHandler(std::function<void()> handler) -> void = 0;
+
+        /**
+         * @brief Observe peer closure after the request body; never consume pipelined bytes.
+         * @note Success means another request is readable; errors indicate closure or cancellation.
+         */
+        virtual auto WatchDisconnect(
+            net::cancellation_slot slot,
+            boost::system::error_code& ec
+        ) -> net::awaitable<void> = 0;
+
+        /**
+         * @brief Abort the transport and its relay; connection strand only.
+         */
+        virtual auto Abort() -> void = 0;
+    };
 
 } // namespace mhttp::detail

@@ -470,7 +470,12 @@ namespace mhttp::client {
                 if (remaining <= std::chrono::steady_clock::duration::zero()) {
                     continue;
                 }
-                serving = co_await node->event.WaitFor(remaining) == util::AsyncEvent::WaitResult::Notified;
+                auto const waited{ co_await node->event.WaitFor(remaining) };
+                if (waited == util::AsyncEvent::WaitResult::Cancelled || waited == util::AsyncEvent::WaitResult::Closed) {
+                    self->removeWaiter(key, node);
+                    co_return ClientHandle{ canceled };
+                }
+                serving = waited == util::AsyncEvent::WaitResult::Notified;
             }
         }
 

@@ -66,7 +66,7 @@ namespace mhttp::detail {
     template <bool IsRequest>
     class BodyReader {
     public:
-        using ConnectionType = BasicConnection<IsRequest>;
+        using ConnectionType = std::conditional_t<IsRequest, Connection, ClientConnection>;
         using HeaderParser = http::parser<IsRequest, http::empty_body>;
         using RawParser = typename ConnectionType::Parser;
         using MessageType = http::message<IsRequest, http::buffer_body>;
@@ -95,6 +95,13 @@ namespace mhttp::detail {
 
         BodyReader(BodyReader const&) = delete;
         auto operator=(BodyReader const&) -> BodyReader& = delete;
+
+        /**
+         * @brief Borrow the transport for internal session lifecycle coordination.
+         */
+        [[nodiscard]] auto GetConnection() const -> std::shared_ptr<ConnectionType> const& {
+            return m_connection;
+        }
 
         /**
          * @brief Borrow the message header (start line and fields).

@@ -68,6 +68,13 @@ export namespace mhttp::client {
         }
 
         /**
+         * @brief Report whether the current request's body has been fully serialized.
+         */
+        [[nodiscard]] auto IsBodyDone() const -> bool {
+            return m_writer.MessageDone();
+        }
+
+        /**
          * @brief Admit the request and send its header.
          * @param method Method.
          * @param target Origin-form target.

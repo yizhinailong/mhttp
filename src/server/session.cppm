@@ -8,7 +8,9 @@ module;
 
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/bind_cancellation_slot.hpp>
 #include <boost/asio/co_spawn.hpp>
+#include <boost/asio/error.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
@@ -186,6 +188,8 @@ namespace mhttp {
         std::shared_ptr<ServerContext> m_context; ///< Shared server state.
         HttpStream m_stream;                      ///< Connection stream.
         beast::flat_buffer m_buffer;              ///< Read buffer kept across keep-alive requests.
+        std::function<void()> m_abort_handler;    ///< Active relay's cancellation hook; strand only.
+        bool m_aborted{ false };                  ///< Abort latch for late hook registration.
 
     public:
         /**
@@ -296,8 +300,34 @@ namespace mhttp {
         }
 
         auto Abort() -> void override {
+            m_aborted = true;
+            if (auto handler{ std::exchange(m_abort_handler, {}) }) {
+                handler();
+            }
             boost::system::error_code ec;
             m_stream.Close(ec);
+        }
+
+        auto SetAbortHandler(std::function<void()> handler) -> void override {
+            m_abort_handler = std::move(handler);
+            if (m_aborted && m_abort_handler) {
+                std::exchange(m_abort_handler, {})();
+            }
+        }
+
+        auto WatchDisconnect(
+            net::cancellation_slot slot,
+            boost::system::error_code& ec
+        ) -> net::awaitable<void> override {
+            ec = {};
+            if (m_buffer.size() != 0) {
+                co_return;
+            }
+            std::array<char, 1> peek{};
+            auto const size{ co_await m_stream.Socket().async_receive(net::buffer(peek), tcp::socket::message_peek, net::bind_cancellation_slot(slot, net::redirect_error(net::use_awaitable, ec))) };
+            if (!ec && size == 0) {
+                ec = net::error::eof;
+            }
         }
 
         auto Executor() -> net::any_io_executor override {

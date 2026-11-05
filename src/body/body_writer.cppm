@@ -44,7 +44,7 @@ namespace mhttp::detail {
     template <bool IsRequest>
     class BodyWriter {
     public:
-        using ConnectionType = BasicConnection<!IsRequest>;
+        using ConnectionType = std::conditional_t<IsRequest, ClientConnection, Connection>;
         using MessageType = http::message<IsRequest, http::buffer_body>;
         using HeaderType = typename MessageType::header_type;
         using Serializer = typename ConnectionType::Serializer;

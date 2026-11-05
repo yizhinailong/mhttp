@@ -23,6 +23,23 @@ mcpp test
 
 `Cache` 是与 HTTP 无关的 body + 不透明 metadata 接口，允许自定义存储。`DiskCache` 支持持久化、大小上限、最近使用顺序淘汰、默认有效期、单项截止时间、清空和清理。已经取出的 `Entry` 在替换或淘汰后仍可读取原内容，包括 Windows。目录由独占锁保护，同一目录无法被第二个缓存实例同时打开；创建或锁定失败抛出 `std::runtime_error`。
 
+## HTTP 反向代理
+
+在启动前注册单上游代理，前缀本身和其子路径都会匹配，普通 HTTP 中间件仍会执行：
+
+```cpp
+server.SetReverseProxy("/api", "http://127.0.0.1:8080/v1");
+// /api/users?q=1 -> /v1/users?q=1
+```
+
+`ReverseProxyConfig` 默认移除匹配前缀并换成上游 URL 的路径；`strip_prefix = false` 保留原路径。改写保留百分号编码和原始查询字符串。`preserve_host = true` 保留客户端 Host，否则使用上游地址。支持 GET、HEAD、POST、PUT、PATCH、DELETE、OPTIONS、TRACE，固定路径路由可覆盖代理的通配路由。
+
+请求与响应以 64 KiB 缓冲区逐段转发，支持固定长度、分块上传、大文件和 SSE。逐跳字段、所有 Connection 指定的字段及 trailers 不会转发，传输分帧在每一跳重新生成；重复的 Set-Cookie 等端到端字段会保留。X-Forwarded-For 使用 `GetClientIp()` 的可信代理规则，X-Forwarded-Host、Proto、Port 由当前请求重新生成，来路的 Forwarded 字段移除。
+
+每条代理配置持有独立的上游连接池。`max_connections` 限制连接数，`acquire_timeout` 限制容量等待，`timeout` 限制每步上游 I/O；持续有数据的流可以长时间保持。`header_limit` / `body_limit` 限制上游响应，客户端请求仍受服务器自身限制。代理保留上游状态和重定向响应，不自动重放请求或跟随重定向。
+
+连接失败在响应头发出前返回 502，容量等待或上游 I/O 超时返回 504；响应已开始后发生错误则中断连接，避免把截断内容当作成功响应。下游关闭或服务器停机会取消上游操作，停机会等待代理会话排空。当前上游 URL 仅支持 HTTP，不能带查询或片段；WebSocket 转发和负载均衡属于后续扩展。
+
 ## WebSocket 服务端
 
 `Router::SetWsHandler(path, open, message, close)` 注册升级路由，三个回调均支持同步函数或 Asio 协程。回调收到 `WebSocketConn::WeakPtr`，锁定后可读取握手请求、发送消息或关闭连接。例如：
@@ -68,4 +85,5 @@ server.GetRouter().SetWsHandler(
 - `mcpp test disk_cache`：持久化、元数据、活动句柄、过期与淘汰。
 - `mcpp test proxy_ws`：CONNECT、WebSocket 消息、排队写入、握手取消与超时、重连。
 - `mcpp test websocket`：服务端升级路由、预读首帧、文本与二进制、控制帧、消息限制及停机排空。
+- `mcpp test reverse_proxy`：路径与请求头、连接复用、上传与 SSE、HEAD、网关错误和取消排空。
 - `mcpp test`：全部回归测试。

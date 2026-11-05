@@ -34,6 +34,7 @@ export import :websocket_conn;
 export import :websocket_conn_impl;
 export import :mount_point;
 export import :router;
+export import :reverse_proxy;
 export import :http_stream;
 export import :session;
 export import :server;

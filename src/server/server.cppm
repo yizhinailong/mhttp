@@ -33,6 +33,7 @@ import :when_all;
 import :form_data;
 import :trusted_proxies;
 import :router;
+import :reverse_proxy;
 import :session;
 
 namespace mhttp {
@@ -133,6 +134,21 @@ export namespace mhttp {
          * @note Configuration phase only: the router is not synchronized.
          */
         [[nodiscard]] auto GetRouter() -> Router&;
+
+        /**
+         * @brief Forward a literal prefix and its descendants to one HTTP upstream.
+         * @param prefix Prefix such as "/api"; also registers the bare path.
+         * @param upstream HTTP origin with an optional base path; no query or fragment.
+         * @param config Streaming, path rewrite, timeout, and upstream pool settings.
+         * @throws std::invalid_argument For invalid settings.
+         * @note Configuration phase only; HTTP middleware applies. Supports GET, HEAD, POST,
+         *       PUT, PATCH, DELETE, OPTIONS, and TRACE. Upgrades use SetWsHandler separately.
+         */
+        auto SetReverseProxy(
+            std::string prefix,
+            std::string_view upstream,
+            ReverseProxyConfig config = {}
+        ) -> void;
 
         /**
          * @brief Replace the multipart/form-data limits for subsequent requests.
@@ -261,6 +277,13 @@ namespace mhttp {
          */
         auto Context() -> ServerContext& {
             return *m_context;
+        }
+
+        /**
+         * @brief Return the executor shared by server-owned upstream pools.
+         */
+        auto BaseExecutor() const -> net::any_io_executor {
+            return m_strand.get_inner_executor();
         }
 
         /**
@@ -551,6 +574,20 @@ namespace mhttp {
 
     auto HttpServer::GetRouter() -> Router& {
         return m_impl->Context().router;
+    }
+
+    auto HttpServer::SetReverseProxy(
+        std::string prefix,
+        std::string_view upstream,
+        ReverseProxyConfig config
+    ) -> void {
+        auto proxy{ std::make_shared<detail::ReverseProxy>(m_impl->BaseExecutor(), std::move(prefix), upstream, config) };
+        auto const handler{ [proxy](Request& request, Response& response) -> net::awaitable<void> {
+            co_await proxy->Run(request, response);
+        } };
+        auto const& base{ proxy->Prefix() };
+        GetRouter().SetLazyHttpHandler<Verb::get, Verb::head, Verb::post, Verb::put, Verb::patch, Verb::delete_, Verb::options, Verb::trace>(base == "/" ? "/*" : base + "/*", handler);
+        GetRouter().SetLazyHttpHandler<Verb::get, Verb::head, Verb::post, Verb::put, Verb::patch, Verb::delete_, Verb::options, Verb::trace>(base, handler);
     }
 
     auto HttpServer::SetFormDataConfig(FormData::Param const& params) -> void {
