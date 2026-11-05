@@ -158,7 +158,9 @@ server.GetRouter().SetWsHandler(
 
 `mhttp::client::ProxyClient::AsyncConnect("host:port", headers, ec)` 通过 HTTP 代理建立 CONNECT 隧道，支持 Proxy-Authorization。成功后用 `AsyncReadSome` / `AsyncWrite` 转发字节。读取保留与 CONNECT 响应一起收到的隧道数据，并跳过 1xx 中间响应。`SetTimeout` 限制 DNS、TCP 和 CONNECT 交换，`Close` / `AsyncClose` 可以取消握手及在途 I/O。同方向重叠 I/O 或重叠握手返回 `Error::OperationInProgress`。
 
-这两个客户端的操作在各自 strand 上执行，可以从其他 executor 发起；`IsOpen()` 提供线程安全的握手完成状态快照。TLS / WSS、WebSocket 压缩尚未移植，TLS 连接返回 `operation_not_supported`。
+这两个客户端的操作在各自 strand 上执行，可以从其他 executor 发起；`IsOpen()` 提供线程安全的握手完成状态快照。WebSocket 压缩尚未移植。
+
+`WsClient` 的 `url::Scheme::Tls` 启用 WSS，并通过 `SetTlsContext` 复用 `TlsClientContext` 的系统或自定义 CA 信任；默认校验证书及主机名。连接超时也涵盖 TLS 握手。服务端启用 `TlsServerContext` 后，同一 WebSocket 路由通过 WSS 访问，关闭握手会完成 TLS 关闭。CONNECT 代理的 TLS 传输将在后续阶段接入。
 
 ## 测试
 
@@ -171,4 +173,6 @@ server.GetRouter().SetWsHandler(
 - `mcpp test reverse_proxy`：路径与请求头、连接复用、上传与 SSE、HEAD、网关错误和取消排空。
 - `mcpp test ws_forward`：升级前准备、子协议与响应头、双向消息与关闭状态、预读帧、消息限制和停机取消。
 - `mcpp test load_balance`：HTTP / WebSocket 分配比例、最少活动请求、握手计数、故障冷却与单次探测、取消和并发分配。
+- `mcpp test tls`：HTTPS 客户端和服务端、证书与主机名校验、连接池与重定向、握手超时和停机。
+- `mcpp test wss`：加密 WebSocket 消息与控制帧、关闭状态、证书校验、超时取消和停机。
 - `mcpp test`：全部回归测试。

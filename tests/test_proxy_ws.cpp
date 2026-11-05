@@ -339,9 +339,9 @@ namespace {
             co_await refused.AsyncConnect("/reject", mhttp::Headers{}, std::chrono::seconds{ 5 }, ec);
             check(ec && !refused.IsOpen(), "a declined upgrade must fail the connect");
 
-            WsClient tls{ ioc, "127.0.0.1", server.Port(), mhttp::url::Scheme::Tls };
+            WsClient tls{ ioc, "127.0.0.1", 1, mhttp::url::Scheme::Tls };
             co_await tls.AsyncConnect("/ws", mhttp::Headers{}, std::chrono::seconds{ 5 }, ec);
-            check(ec == net::error::operation_not_supported, "wss must fail clearly until TLS is ported");
+            check(ec && !tls.IsOpen(), "an unreachable WSS endpoint must fail without opening a session");
         });
     }
 

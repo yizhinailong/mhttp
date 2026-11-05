@@ -38,6 +38,8 @@ import :error;
 import :logging;
 import :handler_traits;
 import :url;
+import :tls;
+import :http_stream;
 import :headers;
 import :websocket_message;
 import :strand_mutex;
@@ -56,8 +58,8 @@ export namespace mhttp::client {
      * Every operation runs on the client's own strand and may be started from any executor.
      * Writes (messages, pings, pongs, close) are queued in call order, so several coroutines
      * may send concurrently; reads must not overlap (a second read fails with
-     * Error::OperationInProgress). Permessage-deflate and TLS are not ported: a wss client
-     * fails to connect with net::error::operation_not_supported.
+     * Error::OperationInProgress). WSS verifies certificates and host names by default.
+     * Permessage-deflate is not supported.
      */
     class WsClient {
     private:
@@ -218,6 +220,12 @@ export namespace mhttp::client {
         auto SetLogger(std::shared_ptr<spdlog::logger> logger) -> void;
 
         /**
+         * @brief Select trust for future WSS connections; null uses system roots.
+         * @note The active WebSocket retains its context until it closes.
+         */
+        auto SetTlsContext(std::shared_ptr<TlsClientContext> context) -> void;
+
+        /**
          * @brief Connect and run a session in the background.
          *
          * Calls `open(ec)` after connecting (also on failure), then `message(msg)` for every
@@ -301,7 +309,7 @@ namespace mhttp::client {
      */
     class WsClientImpl : public std::enable_shared_from_this<WsClientImpl> {
     public:
-        using StreamType = websocket::stream<beast::basic_stream<tcp, net::any_io_executor, beast::simple_rate_policy>>;
+        using StreamType = websocket::stream<HttpStream>;
 
         static constexpr std::size_t MAX_CONTROL_PAYLOAD{ 125 }; ///< RFC 6455 §5.5.
         static constexpr std::size_t MAX_CLOSE_REASON{ 123 };    ///< Control payload minus the code.
@@ -314,6 +322,7 @@ namespace mhttp::client {
         url::Scheme const m_scheme;                                            ///< Transport.
         detail::LoggerHolder m_logger{ "mhttp.ws_client" };                    ///< Replaceable logger.
         std::atomic<std::shared_ptr<StreamType>> m_stream;                     ///< Open connection; null when closed.
+        std::atomic<std::shared_ptr<TlsClientContext>> m_tls_context;          ///< Shared trust for future WSS connections.
         std::atomic<bool> m_open{ false };                                     ///< Thread-safe snapshot of handshake completion.
         std::atomic<std::shared_ptr<Headers const>> m_handshake_headers;       ///< Owned handshake snapshot.
         std::atomic<std::shared_ptr<WebSocketCloseReason const>> m_peer_close; ///< Peer close snapshot.
@@ -337,6 +346,13 @@ namespace mhttp::client {
 
         auto SetLogger(std::shared_ptr<spdlog::logger> logger) -> void {
             m_logger.SetLogger(std::move(logger));
+        }
+
+        /**
+         * @brief Replace the trust snapshot used by the next connection.
+         */
+        auto SetTlsContext(std::shared_ptr<TlsClientContext> context) -> void {
+            m_tls_context.store(std::move(context));
         }
 
         [[nodiscard]] auto IsOpen() const -> bool {
@@ -558,11 +574,17 @@ namespace mhttp::client {
                 m_logger.GetLogger()->warn("ws connect ignored: already connected to {}:{}, target {} ignored (close first)", m_host, m_port, target);
                 co_return;
             }
+            std::shared_ptr<StreamType> stream;
             if (m_scheme == url::Scheme::Tls) {
-                ec = net::error::operation_not_supported;
-                co_return;
+                auto prepared{ HttpStream::MakeTlsClient(m_strand, m_host, m_tls_context.load()) };
+                if (!prepared) {
+                    ec = prepared.error();
+                    co_return;
+                }
+                stream = std::make_shared<StreamType>(std::move(**prepared));
+            } else {
+                stream = std::make_shared<StreamType>(HttpStream{ HttpStream::PlainStream{ m_strand } });
             }
-            auto const stream{ std::make_shared<StreamType>(m_strand) };
             stream->read_message_max(m_message_limit.load());
             m_handshake_headers.store(nullptr);
             m_peer_close.store(nullptr);
@@ -618,6 +640,16 @@ namespace mhttp::client {
             }
             boost::system::error_code option_ec;
             lowest.socket().set_option(tcp::no_delay{ true }, option_ec);
+
+            co_await stream->next_layer().AsyncClientHandshake(ec);
+            if (*timed_out) {
+                ec = beast::error::timeout;
+            } else if (m_stream.load() != stream) {
+                ec = net::error::operation_aborted;
+            }
+            if (ec) {
+                co_return;
+            }
 
             // The decorator outlives this call inside the stream: give it owned copies.
             Headers extra;
@@ -852,6 +884,10 @@ namespace mhttp::client {
 
     auto WsClient::SetLogger(std::shared_ptr<spdlog::logger> logger) -> void {
         m_impl->SetLogger(std::move(logger));
+    }
+
+    auto WsClient::SetTlsContext(std::shared_ptr<TlsClientContext> context) -> void {
+        m_impl->SetTlsContext(std::move(context));
     }
 
     namespace {
