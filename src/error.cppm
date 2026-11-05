@@ -27,6 +27,10 @@ export namespace mhttp {
         InvalidHandle,       ///< A pool handle owns no connection (default, moved, or released).
         NotInitialized,      ///< The object is not bound to a connection (e.g. an empty response).
         AlreadyInUse,        ///< The client has a request in flight or an unread response body.
+        HttpStatus,          ///< The server answered with a non-success status (see the caller's status accessor).
+        ProtocolViolation,   ///< The peer broke the protocol, e.g. a 206 starting at the wrong offset.
+        TruncatedBody,       ///< A body ended before its declared length, even after retries.
+        CacheUnavailable,    ///< The server keeps answering 304 for a cached body that cannot be read.
     };
 
     /**
@@ -77,6 +81,14 @@ namespace mhttp {
                 return "object is not bound to a connection";
             case Error::AlreadyInUse:
                 return "client already has an active request";
+            case Error::HttpStatus:
+                return "server returned a non-success status";
+            case Error::ProtocolViolation:
+                return "protocol violation";
+            case Error::TruncatedBody:
+                return "response body is shorter than declared";
+            case Error::CacheUnavailable:
+                return "cached body is unavailable for revalidation";
             }
             return "unknown mhttp error";
         }
