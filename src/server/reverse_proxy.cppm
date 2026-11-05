@@ -37,6 +37,7 @@ import :client;
 import :client_pool;
 import :lazy_request;
 import :client_response;
+import :proxy_common;
 
 export namespace mhttp {
 
@@ -56,31 +57,6 @@ export namespace mhttp {
 } // namespace mhttp
 
 namespace mhttp::detail {
-
-    /**
-     * @brief Copy end-to-end fields, removing all Connection nominations before reframing.
-     */
-    auto proxy_headers(Headers const& source) -> Headers {
-        Headers result;
-        std::vector<std::string> nominated;
-        for (auto const header : source) {
-            result.Insert(header.name_string, header.value);
-            if (iequals(header.name_string, "Connection")) {
-                for (auto const token : split(header.value, ",")) {
-                    if (auto const name{ trim(token) }; !name.empty()) {
-                        nominated.emplace_back(name);
-                    }
-                }
-            }
-        }
-        for (auto const& name : nominated) {
-            result.Erase(name);
-        }
-        for (std::string_view const name : { "Connection", "Keep-Alive", "Proxy-Connection", "Proxy-Authenticate", "Proxy-Authorization", "TE", "Trailer", "Transfer-Encoding", "Upgrade" }) {
-            result.Erase(name);
-        }
-        return result;
-    }
 
     /**
      * @brief The body reader removes chunk framing but cannot decode other transfer codings.
@@ -328,13 +304,10 @@ namespace mhttp::detail {
             std::string prefix,
             std::string_view upstream,
             ReverseProxyConfig config
-        ) : m_prefix{ std::move(prefix) }, m_config{ config } {
+        ) : m_prefix{ proxy_prefix(std::move(prefix)) }, m_config{ config } {
             auto parsed{ url::parse_url(upstream) };
-            if (m_prefix.empty() || m_prefix.front() != '/' || m_prefix.find_first_of("*:{}?#%\\") != std::string::npos || m_prefix.find("//") != std::string::npos || std::ranges::any_of(m_prefix, [](unsigned char c) { return c <= 32 || c == 127; }) || !parsed || !iequals(parsed->scheme, "http") || parsed->has_query || upstream.find('#') != std::string_view::npos || config.max_connections == 0 || config.timeout <= std::chrono::steady_clock::duration::zero() || config.acquire_timeout <= std::chrono::steady_clock::duration::zero()) {
+            if (!parsed || !iequals(parsed->scheme, "http") || parsed->has_query || upstream.find('#') != std::string_view::npos || config.max_connections == 0 || config.timeout <= std::chrono::steady_clock::duration::zero() || config.acquire_timeout <= std::chrono::steady_clock::duration::zero()) {
                 throw std::invalid_argument{ "mhttp: reverse proxy requires a literal path prefix, an HTTP upstream URL, and positive limits" };
-            }
-            while (m_prefix.size() > 1 && m_prefix.back() == '/') {
-                m_prefix.pop_back();
             }
             m_upstream = std::move(*parsed);
             while (!m_upstream.path.empty() && m_upstream.path.back() == '/') {
@@ -384,20 +357,7 @@ namespace mhttp::detail {
          * @brief Replace matched raw path segments without decoding reserved bytes or the query.
          */
         auto rewrite(Request const& request) const -> std::string {
-            auto path{ request.Path() };
-            if (m_config.strip_prefix && m_prefix != "/") {
-                auto const segments{ std::ranges::count(m_prefix, '/') };
-                std::size_t position{ 0 };
-                for (std::ptrdiff_t i{ 0 }; i < segments; ++i) {
-                    position = path.find_first_not_of('/', position);
-                    position = position == std::string_view::npos ? path.size() : path.find('/', position);
-                    if (position == std::string_view::npos) {
-                        position = path.size();
-                    }
-                }
-                path.remove_prefix(position);
-            }
-            return m_upstream.path + std::string{ path.empty() ? "/" : path } + std::string{ request.Target().substr(request.Path().size()) };
+            return proxy_target(request, m_prefix, m_upstream.path, m_config.strip_prefix);
         }
     };
 

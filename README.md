@@ -38,7 +38,24 @@ server.SetReverseProxy("/api", "http://127.0.0.1:8080/v1");
 
 每条代理配置持有独立的上游连接池。`max_connections` 限制连接数，`acquire_timeout` 限制容量等待，`timeout` 限制每步上游 I/O；持续有数据的流可以长时间保持。`header_limit` / `body_limit` 限制上游响应，客户端请求仍受服务器自身限制。代理保留上游状态和重定向响应，不自动重放请求或跟随重定向。
 
-连接失败在响应头发出前返回 502，容量等待或上游 I/O 超时返回 504；响应已开始后发生错误则中断连接，避免把截断内容当作成功响应。下游关闭或服务器停机会取消上游操作，停机会等待代理会话排空。当前上游 URL 仅支持 HTTP，不能带查询或片段；WebSocket 转发和负载均衡属于后续扩展。
+连接失败在响应头发出前返回 502，容量等待或上游 I/O 超时返回 504；响应已开始后发生错误则中断连接，避免把截断内容当作成功响应。下游关闭或服务器停机会取消上游操作，停机会等待代理会话排空。当前上游 URL 仅支持 HTTP，不能带查询或片段；WebSocket 升级通过 `SetWsForward` 单独注册，负载均衡属于后续扩展。
+
+## WebSocket 反向代理
+
+启动前用 `HttpServer::SetWsForward` 注册字面量前缀及其子路径：
+
+```cpp
+server.SetWsForward("/socket", "ws://127.0.0.1:8080/chat");
+// /socket/room?q=1 -> /chat/room?q=1
+```
+
+`WsForwardConfig` 的 `strip_prefix`、`preserve_host` 与 HTTP 代理含义相同，路径改写保留编码及原始查询。普通 HTTP 和本地 WebSocket 路由可与转发共存；更具体的本地 WebSocket 路由优先。匹配到的升级请求与本地 WebSocket 一样绕过 HTTP 中间件，需要在上游完成认证。
+
+上游握手成功后才向下游发送 101。连接、握手拒绝和非法子协议协商返回 502，`connect_timeout`（默认 30 秒，涵盖 DNS、TCP、握手）超时返回 504；下游非法握手返回 400，版本不支持返回带版本提示的 426。保留 Origin、Authorization、Cookie、上游选择的子协议及重复 Set-Cookie；逐跳头移除，X-Forwarded-* 按 HTTP 代理规则重新生成。
+
+每个方向一次读取一条完整消息，并等待目标发送完成后继续读取，保留 text / binary 类型；控制帧由每一跳各自处理 Ping / Pong，关闭帧的状态码和原因会传递。`message_limit` 默认 16 MiB，必须为正，限制两个方向；下游接收还受服务器 `SetBodyLimit` 限制。会话没有空闲超时；下游断开或服务器停机时取消上游，并等待转发协程排空。
+
+当前仅支持 `ws://` 单上游，不支持 URL 查询、片段、WSS、扩展协商或 WebSocket 压缩。
 
 ## WebSocket 服务端
 
@@ -67,11 +84,15 @@ server.GetRouter().SetWsHandler(
 
 `SetBodyLimit` 为新升级连接设置单条接收消息的大小上限，零只允许空消息；`WriteTimeout` 的快照用于升级握手。已建立连接不设置空闲超时。`HttpServer::Stop` 取消连接并等待在途写操作及关闭回调完成，回调本身应及时结束。
 
+`AsyncClose(WebSocketCloseReason{code, reason}, ec)` 支持显式关闭码；保留码返回 `invalid_argument`。`CloseReason()` 返回线程安全的对端关闭状态快照，`code == 0` 表示没有可用的对端关闭码（尚未收到关闭帧或帧中未携带状态码）。
+
 ## WebSocket 客户端与 CONNECT 隧道
 
 `mhttp::client::WsClient` 提供 `AsyncConnect`、`AsyncSend`、`AsyncRead`、`AsyncPing`、`AsyncPong`、`AsyncClose` 和 `AsyncAbort`，另有发送、控制帧、关闭的 future API。`WebSocketMessage` 持有消息字节及 text / binary 标志。
 
 `Run` / `AsyncRun` 支持同步或协程消息回调。发送及控制帧排队执行，重叠读取返回 `Error::OperationInProgress`。连接超时涵盖 DNS、TCP 和升级握手；`Abort` 可取消握手及在途读取。正常关闭握手最多等待 5 秒，关闭后可重连。
+
+`HandshakeHeaders()` 返回成功握手响应头的自有副本。`SetMessageLimit` 设置后续连接的接收上限（默认 16 MiB，零表示不限），`AsyncClose(WebSocketCloseReason, ec)` 和 `CloseReason()` 支持关闭状态的发送与线程安全查询。
 
 `mhttp::client::ProxyClient::AsyncConnect("host:port", headers, ec)` 通过 HTTP 代理建立 CONNECT 隧道，支持 Proxy-Authorization。成功后用 `AsyncReadSome` / `AsyncWrite` 转发字节。读取保留与 CONNECT 响应一起收到的隧道数据，并跳过 1xx 中间响应。`SetTimeout` 限制 DNS、TCP 和 CONNECT 交换，`Close` / `AsyncClose` 可以取消握手及在途 I/O。同方向重叠 I/O 或重叠握手返回 `Error::OperationInProgress`。
 
@@ -86,4 +107,5 @@ server.GetRouter().SetWsHandler(
 - `mcpp test proxy_ws`：CONNECT、WebSocket 消息、排队写入、握手取消与超时、重连。
 - `mcpp test websocket`：服务端升级路由、预读首帧、文本与二进制、控制帧、消息限制及停机排空。
 - `mcpp test reverse_proxy`：路径与请求头、连接复用、上传与 SSE、HEAD、网关错误和取消排空。
+- `mcpp test ws_forward`：升级前准备、子协议与响应头、双向消息与关闭状态、预读帧、消息限制和停机取消。
 - `mcpp test`：全部回归测试。

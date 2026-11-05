@@ -191,6 +191,29 @@ export namespace mhttp::client {
          */
         [[nodiscard]] auto IsOpen() const -> bool;
 
+        /**
+         * @brief Return owned handshake response fields, including a selected subprotocol.
+         */
+        [[nodiscard]] auto HandshakeHeaders() const -> Headers;
+
+        /**
+         * @brief Return a thread-safe peer close snapshot; zero means no status code is available.
+         */
+        [[nodiscard]] auto CloseReason() const -> WebSocketCloseReason;
+
+        /**
+         * @brief Set the receive limit for subsequent connections; zero means unlimited.
+         */
+        auto SetMessageLimit(std::uint64_t bytes) -> void;
+
+        /**
+         * @brief Close with an explicit wire status and reason; reserved codes are rejected.
+         */
+        auto AsyncClose(
+            WebSocketCloseReason const& reason,
+            boost::system::error_code& ec
+        ) -> net::awaitable<void>;
+
         [[nodiscard]] auto Logger() const -> std::shared_ptr<spdlog::logger>;
         auto SetLogger(std::shared_ptr<spdlog::logger> logger) -> void;
 
@@ -284,17 +307,21 @@ namespace mhttp::client {
         static constexpr std::size_t MAX_CLOSE_REASON{ 123 };    ///< Control payload minus the code.
 
     private:
-        net::strand<net::any_io_executor> m_strand;         ///< Serializes all I/O.
-        tcp::resolver m_resolver;                           ///< Cancellable name resolution.
-        std::string const m_host;                           ///< Server host.
-        std::uint16_t const m_port;                         ///< Server port.
-        url::Scheme const m_scheme;                         ///< Transport.
-        detail::LoggerHolder m_logger{ "mhttp.ws_client" }; ///< Replaceable logger.
-        std::atomic<std::shared_ptr<StreamType>> m_stream;  ///< Open connection; null when closed.
-        std::atomic<bool> m_open{ false };                  ///< Thread-safe snapshot of handshake completion.
-        detail::StrandMutex m_write_mutex;                  ///< Queues writes and control frames.
-        bool m_reading{ false };                            ///< A read is in flight; strand only.
-        bool m_connecting{ false };                         ///< A handshake is in flight; strand only.
+        net::strand<net::any_io_executor> m_strand;                            ///< Serializes all I/O.
+        tcp::resolver m_resolver;                                              ///< Cancellable name resolution.
+        std::string const m_host;                                              ///< Server host.
+        std::uint16_t const m_port;                                            ///< Server port.
+        url::Scheme const m_scheme;                                            ///< Transport.
+        detail::LoggerHolder m_logger{ "mhttp.ws_client" };                    ///< Replaceable logger.
+        std::atomic<std::shared_ptr<StreamType>> m_stream;                     ///< Open connection; null when closed.
+        std::atomic<bool> m_open{ false };                                     ///< Thread-safe snapshot of handshake completion.
+        std::atomic<std::shared_ptr<Headers const>> m_handshake_headers;       ///< Owned handshake snapshot.
+        std::atomic<std::shared_ptr<WebSocketCloseReason const>> m_peer_close; ///< Peer close snapshot.
+        std::atomic<std::uint64_t> m_message_limit{ 16 * 1024 * 1024 };        ///< Bound for new streams.
+        detail::StrandMutex m_write_mutex;                                     ///< Queues writes and control frames.
+        bool m_reading{ false };                                               ///< A read is in flight; strand only.
+        bool m_connecting{ false };                                            ///< A handshake is in flight; strand only.
+        bool m_closing{ false };                                               ///< Graceful close owns stream teardown.
 
     public:
         WsClientImpl(
@@ -315,6 +342,18 @@ namespace mhttp::client {
         [[nodiscard]] auto IsOpen() const -> bool {
             return m_open.load();
         }
+
+        auto HandshakeHeaders() const -> Headers {
+            auto const headers{ m_handshake_headers.load() };
+            return headers ? *headers : Headers{};
+        }
+
+        auto CloseReason() const -> WebSocketCloseReason {
+            auto const reason{ m_peer_close.load() };
+            return reason ? *reason : WebSocketCloseReason{};
+        }
+
+        auto SetMessageLimit(std::uint64_t bytes) -> void { m_message_limit.store(bytes); }
 
         auto Connect(
             std::string_view target,
@@ -370,10 +409,16 @@ namespace mhttp::client {
                 co_await stream->async_read(buffer, net::redirect_error(net::use_awaitable, ec));
                 m_reading = false;
                 if (ec) {
+                    if (ec == websocket::error::closed) {
+                        auto const& reason{ stream->reason() };
+                        m_peer_close.store(std::make_shared<WebSocketCloseReason const>(WebSocketCloseReason{ static_cast<std::uint16_t>(reason.code), std::string{ reason.reason } }));
+                    }
                     if (ec != websocket::error::closed) {
                         m_logger.GetLogger()->warn("ws read failed: {}", ec.message());
                     }
-                    abortStream(stream);
+                    if (!m_closing) {
+                        abortStream(stream);
+                    }
                     co_return;
                 }
                 message.SetBinary(stream->got_binary());
@@ -420,6 +465,22 @@ namespace mhttp::client {
             std::string_view reason,
             boost::system::error_code& ec
         ) -> net::awaitable<void> {
+            WebSocketCloseReason const status{ 1000, std::string{ reason.substr(0, MAX_CLOSE_REASON) } };
+            co_await CloseGracefully(status, ec);
+        }
+
+        auto CloseGracefully(
+            WebSocketCloseReason const& reason,
+            boost::system::error_code& ec
+        ) -> net::awaitable<void> {
+            if (!detail::valid_ws_close_code(reason.code)) {
+                ec = net::error::invalid_argument;
+                co_return;
+            }
+            if (reason.reason.size() > MAX_CLOSE_REASON) {
+                ec = net::error::message_size;
+                co_return;
+            }
             co_await onStrand([&]() -> net::awaitable<void> {
                 auto const stream{ openStream(ec) };
                 if (!stream) {
@@ -434,9 +495,11 @@ namespace mhttp::client {
                     co_return;
                 }
                 m_open.store(false);
-                websocket::close_reason close_reason{ websocket::close_code::normal };
-                close_reason.reason.assign(reason.data(), std::min(reason.size(), MAX_CLOSE_REASON));
+                m_closing = true;
+                websocket::close_reason close_reason{ reason.code };
+                close_reason.reason = reason.reason;
                 co_await stream->async_close(close_reason, net::redirect_error(net::use_awaitable, ec));
+                m_closing = false;
                 if (ec && ec != net::error::operation_aborted) {
                     m_logger.GetLogger()->warn("ws close failed: {}", ec.message());
                 }
@@ -487,7 +550,7 @@ namespace mhttp::client {
             boost::system::error_code& ec
         ) -> net::awaitable<void> {
             ec = {};
-            if (m_connecting || (!IsOpen() && m_reading)) {
+            if (m_connecting || m_closing || (!IsOpen() && m_reading)) {
                 ec = Error::OperationInProgress;
                 co_return;
             }
@@ -500,6 +563,9 @@ namespace mhttp::client {
                 co_return;
             }
             auto const stream{ std::make_shared<StreamType>(m_strand) };
+            stream->read_message_max(m_message_limit.load());
+            m_handshake_headers.store(nullptr);
+            m_peer_close.store(nullptr);
             m_stream.store(stream);
             m_connecting = true;
             auto const timed_out{ std::make_shared<bool>(false) };
@@ -560,10 +626,14 @@ namespace mhttp::client {
                 request.set(http::field::origin, origin);
                 request.set(http::field::user_agent, std::string{ BOOST_BEAST_VERSION_STRING } + " mhttp-ws-client");
                 for (auto const& header : extra) {
-                    request.set(header.name_string, header.value);
+                    request.erase(header.name_string);
+                }
+                for (auto const& header : extra) {
+                    request.insert(header.name_string, header.value);
                 }
             }));
-            co_await stream->async_handshake(url::make_host_value(m_host, m_port, m_scheme), target, net::redirect_error(net::use_awaitable, ec));
+            websocket::response_type response;
+            co_await stream->async_handshake(response, url::make_host_value(m_host, m_port, m_scheme), target, net::redirect_error(net::use_awaitable, ec));
             if (*timed_out) {
                 ec = beast::error::timeout;
             } else if (m_stream.load() != stream) {
@@ -581,6 +651,9 @@ namespace mhttp::client {
             options.idle_timeout = websocket::stream_base::none();
             options.keep_alive_pings = false;
             stream->set_option(options);
+            Headers received;
+            received.Merge(Headers::Borrow(response.base()));
+            m_handshake_headers.store(std::make_shared<Headers const>(std::move(received)));
             m_open.store(true);
             m_logger.GetLogger()->debug("ws connected to {}:{}{}", m_host, m_port, target);
         }
@@ -670,6 +743,26 @@ namespace mhttp::client {
     ) -> net::awaitable<void> {
         auto const impl{ m_impl };
         co_await impl->Read(message, ec);
+    }
+
+    auto WsClient::HandshakeHeaders() const -> Headers {
+        return m_impl->HandshakeHeaders();
+    }
+
+    auto WsClient::CloseReason() const -> WebSocketCloseReason {
+        return m_impl->CloseReason();
+    }
+
+    auto WsClient::SetMessageLimit(std::uint64_t bytes) -> void {
+        m_impl->SetMessageLimit(bytes);
+    }
+
+    auto WsClient::AsyncClose(
+        WebSocketCloseReason const& reason,
+        boost::system::error_code& ec
+    ) -> net::awaitable<void> {
+        auto const impl{ m_impl };
+        co_await impl->CloseGracefully(reason, ec);
     }
 
     auto WsClient::AsyncPing(

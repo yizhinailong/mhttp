@@ -96,19 +96,21 @@ namespace mhttp::detail {
      */
     class WebSocketConnImpl final : public WebSocketConn {
     private:
-        net::any_io_executor m_executor;                         ///< Accepted connection strand.
-        Request m_request;                                       ///< Handshake request and user state.
-        beast::websocket::stream<WebSocketTransport> m_stream;   ///< Upgraded transport.
-        WsHandlerEntry m_handlers;                               ///< Matched route callbacks.
-        std::shared_ptr<LoggerHolder> m_logger;                  ///< Aliased server logger; keeps its owner alive.
-        StrandMutex m_write_mutex;                               ///< Backpressure for messages and control frames.
-        util::AsyncEvent m_write_done;                           ///< Wakes the receive loop as writes drain.
-        std::atomic<bool> m_open{ false };                       ///< Thread-safe public state snapshot.
-        bool m_aborted{ false };                                 ///< Terminal state; strand only.
-        bool m_closing{ false };                                 ///< A graceful close is in progress; strand only.
-        std::size_t m_pending_writes{ 0 };                       ///< Active and queued write operations; strand only.
-        std::chrono::steady_clock::duration m_handshake_timeout; ///< Upgrade response deadline.
-        std::uint64_t m_message_limit;                           ///< Maximum received message size.
+        net::any_io_executor m_executor;                                       ///< Accepted connection strand.
+        Request m_request;                                                     ///< Handshake request and user state.
+        beast::websocket::stream<WebSocketTransport> m_stream;                 ///< Upgraded transport.
+        WsHandlerEntry m_handlers;                                             ///< Matched route callbacks.
+        std::shared_ptr<LoggerHolder> m_logger;                                ///< Aliased server logger; keeps its owner alive.
+        StrandMutex m_write_mutex;                                             ///< Backpressure for messages and control frames.
+        util::AsyncEvent m_write_done;                                         ///< Wakes the receive loop as writes drain.
+        std::atomic<bool> m_open{ false };                                     ///< Thread-safe public state snapshot.
+        std::atomic<std::shared_ptr<WebSocketCloseReason const>> m_peer_close; ///< Peer close snapshot.
+        bool m_aborted{ false };                                               ///< Terminal state; strand only.
+        bool m_abort_notified{ false };                                        ///< Forced-abort hook was delivered.
+        bool m_closing{ false };                                               ///< A graceful close is in progress; strand only.
+        std::size_t m_pending_writes{ 0 };                                     ///< Active and queued write operations; strand only.
+        std::chrono::steady_clock::duration m_handshake_timeout;               ///< Upgrade response deadline.
+        std::uint64_t m_message_limit;                                         ///< Maximum received message size.
 
         /**
          * @brief Count an operation until its coroutine leaves the connection strand.
@@ -138,11 +140,16 @@ namespace mhttp::detail {
             std::shared_ptr<LoggerHolder> logger,
             std::chrono::steady_clock::duration handshake_timeout,
             std::uint64_t message_limit
-        ) : m_executor{ stream.get_executor() }, m_request{ std::move(request) }, m_stream{ std::move(stream), std::move(buffered) }, m_handlers{ std::move(handlers) }, m_logger{ std::move(logger) }, m_write_mutex{ m_executor }, m_write_done{ m_executor }, m_handshake_timeout{ handshake_timeout }, m_message_limit{ message_limit } {}
+        ) : m_executor{ stream.get_executor() }, m_request{ std::move(request) }, m_stream{ std::move(stream), std::move(buffered) }, m_handlers{ std::move(handlers) }, m_logger{ std::move(logger) }, m_write_mutex{ m_executor }, m_write_done{ m_executor }, m_handshake_timeout{ handshake_timeout }, m_message_limit{ std::min(message_limit, m_handlers.message_limit.value_or(message_limit)) } {}
 
         auto Executor() const noexcept -> net::any_io_executor override { return m_executor; }
 
         auto IsOpen() const noexcept -> bool override { return m_open.load(); }
+
+        auto CloseReason() const -> WebSocketCloseReason override {
+            auto const reason{ m_peer_close.load() };
+            return reason ? *reason : WebSocketCloseReason{};
+        }
 
         auto HttpRequest() -> Request& override { return m_request; }
 
@@ -207,6 +214,23 @@ namespace mhttp::detail {
             co_await closeOperation(close_reason, ec);
         }
 
+        auto AsyncClose(
+            WebSocketCloseReason const& reason,
+            boost::system::error_code& ec
+        ) -> net::awaitable<void> override {
+            if (!detail::valid_ws_close_code(reason.code)) {
+                ec = net::error::invalid_argument;
+                co_return;
+            }
+            if (reason.reason.size() > 123) {
+                ec = net::error::message_size;
+                co_return;
+            }
+            beast::websocket::close_reason close_reason{ reason.code };
+            close_reason.reason = reason.reason;
+            co_await closeOperation(close_reason, ec);
+        }
+
         auto Close(
             std::string reason = "normal"
         ) -> std::future<boost::system::error_code> override {
@@ -233,6 +257,28 @@ namespace mhttp::detail {
          * @note Must run on Executor(); the session holds this object throughout the call.
          */
         auto Run() -> net::awaitable<void> {
+            try {
+                co_await runSession();
+            } catch (std::exception const& e) {
+                m_logger->GetLogger()->error("websocket session failed: {}", e.what());
+                AbortNow();
+            } catch (...) {
+                m_logger->GetLogger()->error("websocket session failed with an unknown exception");
+                AbortNow();
+            }
+            while (m_pending_writes > 0) {
+                static_cast<void>(co_await m_write_done.Wait());
+            }
+            if (m_handlers.finish) {
+                co_await m_handlers.finish();
+            }
+        }
+
+    private:
+        /**
+         * @brief Perform one handshake and receive loop; Run also drains prepared resources.
+         */
+        auto runSession() -> net::awaitable<void> {
             if (m_aborted) {
                 co_return;
             }
@@ -244,8 +290,14 @@ namespace mhttp::detail {
             m_stream.set_option(options);
             // Beast treats zero as unlimited; preserve SetBodyLimit(0)'s empty-only meaning.
             m_stream.read_message_max(std::max<std::uint64_t>(m_message_limit, 1));
-            m_stream.set_option(beast::websocket::stream_base::decorator([](beast::websocket::response_type& response) {
+            m_stream.set_option(beast::websocket::stream_base::decorator([headers = m_handlers.response_headers](beast::websocket::response_type& response) {
                 response.set(Field::server, std::string{ BOOST_BEAST_VERSION_STRING } + " mhttp");
+                for (auto const field : headers) {
+                    response.erase(field.name_string);
+                }
+                for (auto const field : headers) {
+                    response.insert(field.name_string, field.value);
+                }
             }));
 
             boost::system::error_code ec;
@@ -272,6 +324,10 @@ namespace mhttp::detail {
                 WebSocketMessage message;
                 auto buffer{ net::dynamic_buffer(message.Data()) };
                 co_await m_stream.async_read(buffer, net::redirect_error(net::use_awaitable, ec));
+                if (ec == beast::websocket::error::closed) {
+                    auto const& reason{ m_stream.reason() };
+                    m_peer_close.store(std::make_shared<WebSocketCloseReason const>(WebSocketCloseReason{ static_cast<std::uint16_t>(reason.code), std::string{ reason.reason } }));
+                }
                 if (ec || !m_open.load()) {
                     break;
                 }
@@ -291,7 +347,7 @@ namespace mhttp::detail {
                 }
             }
             if (!m_closing) {
-                AbortNow();
+                AbortNow(ec != beast::websocket::error::closed);
             }
             while (m_pending_writes > 0) {
                 co_await m_write_done.Wait();
@@ -305,11 +361,15 @@ namespace mhttp::detail {
             }
         }
 
+    public:
         /**
          * @brief Interrupt the handshake, pending reads, and queued writes; connection strand only.
          */
-        auto AbortNow() -> void {
+        auto AbortNow(bool notify = true) -> void {
             m_open.store(false);
+            if (notify && !std::exchange(m_abort_notified, true) && m_handlers.abort) {
+                m_handlers.abort();
+            }
             if (!std::exchange(m_aborted, true)) {
                 beast::get_lowest_layer(m_stream).close();
                 m_write_mutex.Close();
@@ -329,7 +389,7 @@ namespace mhttp::detail {
                 m_open.store(false);
                 co_await m_stream.async_close(reason, net::redirect_error(net::use_awaitable, ec));
                 m_closing = false;
-                AbortNow();
+                AbortNow(false);
             },
                                     ec);
         }

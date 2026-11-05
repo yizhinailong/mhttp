@@ -34,6 +34,7 @@ import :form_data;
 import :trusted_proxies;
 import :router;
 import :reverse_proxy;
+import :ws_forward;
 import :session;
 
 namespace mhttp {
@@ -142,12 +143,27 @@ export namespace mhttp {
          * @param config Streaming, path rewrite, timeout, and upstream pool settings.
          * @throws std::invalid_argument For invalid settings.
          * @note Configuration phase only; HTTP middleware applies. Supports GET, HEAD, POST,
-         *       PUT, PATCH, DELETE, OPTIONS, and TRACE. Upgrades use SetWsHandler separately.
+         *       PUT, PATCH, DELETE, OPTIONS, and TRACE. WebSockets use SetWsForward separately.
          */
         auto SetReverseProxy(
             std::string prefix,
             std::string_view upstream,
             ReverseProxyConfig config = {}
+        ) -> void;
+
+        /**
+         * @brief Forward WebSocket upgrades at a literal prefix to one ws:// upstream.
+         * @param prefix Prefix such as "/socket"; also registers the bare path.
+         * @param upstream WebSocket origin with an optional base path; no query or fragment.
+         * @param config Path, Host, handshake deadline, and complete-message limits.
+         * @throws std::invalid_argument For invalid settings.
+         * @note Configuration phase only. Upstream negotiation finishes before downstream 101.
+         *       Like local WebSocket routes, matched upgrades bypass HTTP middleware.
+         */
+        auto SetWsForward(
+            std::string prefix,
+            std::string_view upstream,
+            WsForwardConfig config = {}
         ) -> void;
 
         /**
@@ -588,6 +604,21 @@ namespace mhttp {
         auto const& base{ proxy->Prefix() };
         GetRouter().SetLazyHttpHandler<Verb::get, Verb::head, Verb::post, Verb::put, Verb::patch, Verb::delete_, Verb::options, Verb::trace>(base == "/" ? "/*" : base + "/*", handler);
         GetRouter().SetLazyHttpHandler<Verb::get, Verb::head, Verb::post, Verb::put, Verb::patch, Verb::delete_, Verb::options, Verb::trace>(base, handler);
+    }
+
+    auto HttpServer::SetWsForward(
+        std::string prefix,
+        std::string_view upstream,
+        WsForwardConfig config
+    ) -> void {
+        auto forward{ std::make_shared<detail::WsForward>(std::move(prefix), upstream, config) };
+        auto prepare{ [forward](Request& request) -> net::awaitable<std::expected<detail::WsHandlerEntry, Status>> {
+            co_return co_await forward->Prepare(request);
+        } };
+        auto const& base{ forward->Prefix() };
+        auto& table{ route_table(GetRouter()) };
+        table.AddWsForward(base == "/" ? "/*" : base + "/*", prepare);
+        table.AddWsForward(base, std::move(prepare));
     }
 
     auto HttpServer::SetFormDataConfig(FormData::Param const& params) -> void {

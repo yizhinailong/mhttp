@@ -118,7 +118,7 @@ namespace mhttp::detail {
             std::string param_name;                            ///< Parameter name for ":p" and "{p:re}".
             std::regex regex;                                  ///< Pattern of "{p:re}" nodes.
             std::map<Verb, HandlerEntry> handlers;             ///< Handlers by method.
-            std::optional<WsHandlerEntry> ws_handler;          ///< WebSocket callbacks at this path.
+            std::optional<WsRouteEntry> ws_handler;            ///< WebSocket callbacks or prepare factory.
             StringMap<std::unique_ptr<Node>> static_children;  ///< Literal segments.
             std::vector<std::unique_ptr<Node>> param_children; ///< ":name" segments, in order.
             std::vector<std::unique_ptr<Node>> regex_children; ///< "{name:re}" segments, in order.
@@ -163,14 +163,21 @@ namespace mhttp::detail {
          * @brief Register WebSocket callbacks independently of the HTTP methods at this path.
          */
         auto AddWsHandler(std::string_view key, WsHandlerEntry handlers) -> void {
-            insert(m_root.get(), split_path_segments(key), 0)->ws_handler = std::move(handlers);
+            insert(m_root.get(), split_path_segments(key), 0)->ws_handler = WsRouteEntry{ std::move(handlers), {} };
+        }
+
+        /**
+         * @brief Register a per-session factory that runs before the upgrade response is sent.
+         */
+        auto AddWsForward(std::string_view key, WsRouteEntry::Prepare prepare) -> void {
+            insert(m_root.get(), split_path_segments(key), 0)->ws_handler = WsRouteEntry{ {}, std::move(prepare) };
         }
 
         /**
          * @brief Match an upgrade request and preserve its decoded path parameters.
          * @return Callback set, or no value so ordinary HTTP routing can handle the request.
          */
-        [[nodiscard]] auto QueryWsHandler(Request& req) const -> std::optional<WsHandlerEntry> {
+        [[nodiscard]] auto QueryWsHandler(Request& req) const -> std::optional<WsRouteEntry> {
             StringMap<std::string> params;
             auto const* node{ matchNodes(m_root.get(), req.DecodedSegments(), 0, params, [](Node const* candidate) { return candidate->ws_handler.has_value(); }) };
             if (!node) {

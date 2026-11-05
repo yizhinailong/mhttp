@@ -9,6 +9,14 @@ import std;
 export namespace mhttp {
 
     /**
+     * @brief Peer close status; code zero means no peer status code is available.
+     */
+    struct WebSocketCloseReason {
+        std::uint16_t code{ 0 }; ///< RFC 6455 close code, or zero when no code is available.
+        std::string reason;      ///< UTF-8 reason text.
+    };
+
+    /**
      * @brief One WebSocket message (port of httplib::websocket_message).
      *
      * Carrying the text/binary flag with the bytes avoids separate got_text()/got_binary()
@@ -67,3 +75,14 @@ export namespace mhttp {
     };
 
 } // namespace mhttp
+
+namespace mhttp::detail {
+
+    /**
+     * @brief Validate a close code that may appear on the wire.
+     */
+    constexpr auto valid_ws_close_code(std::uint16_t code) noexcept -> bool {
+        return (code >= 1000 && code <= 1014 && code != 1004 && code != 1005 && code != 1006) || (code >= 3000 && code <= 4999);
+    }
+
+} // namespace mhttp::detail

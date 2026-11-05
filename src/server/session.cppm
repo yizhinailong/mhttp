@@ -226,9 +226,22 @@ namespace mhttp {
 
                 auto req{ RequestImpl::Make(shared_from_this(), std::move(parser), local, remote, m_context->trusted_proxies.load(), *m_context->form_data_params.load()) };
                 if (beast::websocket::is_upgrade(get_impl(req).Message())) {
-                    if (auto handlers{ table.QueryWsHandler(req) }; handlers && req.IsBodyDone()) {
-                        co_return std::make_shared<WebSocketTask>(std::move(m_stream), std::move(m_buffer), std::move(req), std::move(*handlers), m_context);
-                    } else if (handlers) {
+                    if (auto route{ table.QueryWsHandler(req) }; route && req.IsBodyDone()) {
+                        if (route->prepare) {
+                            auto prepared{ co_await route->prepare(req) };
+                            if (!prepared) {
+                                auto rejected{ ResponseImpl::Create(req.Version(), false, shared_from_this()) };
+                                rejected.SetErrorContent(prepared.error());
+                                if (prepared.error() == Status::upgrade_required) {
+                                    rejected.Base().Set(Field::sec_websocket_version, "13");
+                                }
+                                static_cast<void>(co_await writeResponse(req, rejected, peer));
+                                co_return nullptr;
+                            }
+                            route->handlers = std::move(*prepared);
+                        }
+                        co_return std::make_shared<WebSocketTask>(std::move(m_stream), std::move(m_buffer), std::move(req), std::move(route->handlers), m_context);
+                    } else if (route) {
                         // A body must never be mistaken for prefetched WebSocket frames.
                         auto rejected{ ResponseImpl::Create(req.Version(), false, shared_from_this()) };
                         rejected.SetErrorContent(Status::bad_request);
@@ -529,10 +542,11 @@ namespace mhttp {
     }
 
     auto Session::Run() -> net::awaitable<void> {
-        while (!m_abort.load()) {
+        while (m_task) {
             auto const task{ m_task };
-            if (!task) {
-                break;
+            if (m_abort.load()) {
+                // A prepared upgrade still has to drain its upstream if stop wins the handoff.
+                task->Abort();
             }
             m_task = co_await task->Then();
         }

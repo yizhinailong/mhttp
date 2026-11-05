@@ -14,6 +14,7 @@ import std;
 import :config;
 import :request;
 import :websocket_message;
+import :headers;
 
 export namespace mhttp {
 
@@ -42,6 +43,11 @@ export namespace mhttp {
          * @brief Return a thread-safe snapshot of the upgraded connection's open state.
          */
         [[nodiscard]] virtual auto IsOpen() const noexcept -> bool = 0;
+
+        /**
+         * @brief Return a thread-safe snapshot of the peer's close code and reason.
+         */
+        [[nodiscard]] virtual auto CloseReason() const -> WebSocketCloseReason { return {}; }
 
         /**
          * @brief Borrow the handshake request, including path parameters and per-session Data().
@@ -98,6 +104,17 @@ export namespace mhttp {
         ) -> std::future<boost::system::error_code> = 0;
 
         /**
+         * @brief Close with an explicit wire status and UTF-8 reason.
+         * @note Implementations predating this overload fall back to their normal close method.
+         */
+        virtual auto AsyncClose(
+            WebSocketCloseReason const& reason,
+            boost::system::error_code& ec
+        ) -> net::awaitable<void> {
+            co_await AsyncClose(reason.reason, ec);
+        }
+
+        /**
          * @brief Close with the default reason, "normal".
          */
         auto AsyncClose(boost::system::error_code& ec) -> net::awaitable<void> {
@@ -119,9 +136,22 @@ namespace mhttp::detail {
      * @brief Callback set copied from a matched WebSocket route into its connection.
      */
     struct WsHandlerEntry {
-        WebSocketConn::OpenHandler open;       ///< Runs once after a successful handshake.
-        WebSocketConn::MessageHandler message; ///< Runs sequentially for complete messages.
-        WebSocketConn::CloseHandler close;     ///< Runs once after an established session ends.
+        WebSocketConn::OpenHandler open;              ///< Runs once after a successful handshake.
+        WebSocketConn::MessageHandler message;        ///< Runs sequentially for complete messages.
+        WebSocketConn::CloseHandler close;            ///< Runs once after an established session ends.
+        Headers response_headers;                     ///< Extra handshake response fields.
+        std::function<void()> abort;                  ///< Interrupt a prepared upstream on forced abort.
+        std::function<net::awaitable<void>()> finish; ///< Drain prepared resources even if upgrade fails.
+        std::optional<std::uint64_t> message_limit;   ///< Optional route-specific receive bound.
+    };
+
+    /**
+     * @brief WebSocket route with optional work performed before sending the downstream 101.
+     */
+    struct WsRouteEntry {
+        using Prepare = std::function<net::awaitable<std::expected<WsHandlerEntry, Status>>(Request&)>;
+        WsHandlerEntry handlers; ///< Ordinary local WebSocket callbacks.
+        Prepare prepare;         ///< Per-session upstream handshake and callback factory.
     };
 
 } // namespace mhttp::detail
