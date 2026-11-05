@@ -210,6 +210,11 @@ export namespace mhttp {
         [[nodiscard]] auto Version() const -> unsigned;
 
         /**
+         * @brief Report the accepted transport's encryption, independent of forwarded headers.
+         */
+        [[nodiscard]] auto IsTls() const noexcept -> bool;
+
+        /**
          * @brief Borrow every request header.
          * @return View whose writes land on this request.
          */
@@ -379,8 +384,19 @@ namespace mhttp {
         std::shared_ptr<detail::TrustedProxies const> m_trusted; ///< Trusted proxies snapshot; null = none.
         detail::StringMap<std::string> m_path_params;            ///< Parameters from route matching.
         RequestData m_data;                                      ///< User data.
+        bool m_tls{ false };                                     ///< Accepted transport was encrypted.
 
     public:
+        /**
+         * @brief Snapshot the accepted transport before dispatching this request.
+         */
+        auto SetTls(bool value) noexcept -> void { m_tls = value; }
+
+        /**
+         * @brief Return the snapshotted transport encryption state.
+         */
+        [[nodiscard]] auto IsTls() const noexcept -> bool { return m_tls; }
+
         /**
          * @brief Build request state from a parsed header.
          * @param connection Connection supplying the body.
@@ -513,6 +529,10 @@ namespace mhttp {
 
     auto Request::Version() const -> unsigned {
         return m_impl->Message().version();
+    }
+
+    auto Request::IsTls() const noexcept -> bool {
+        return m_impl->IsTls();
     }
 
     auto Request::Base() const -> Headers {

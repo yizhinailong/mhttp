@@ -27,6 +27,7 @@ export module mhttp:server;
 
 import std;
 import :config;
+import :tls;
 import :logging;
 import :async_event;
 import :when_all;
@@ -209,6 +210,13 @@ export namespace mhttp {
          * @note Configuration phase only.
          */
         auto SetTrustedProxies(std::vector<std::string> const& cidrs) -> void;
+
+        /**
+         * @brief Select TLS identity for new connections; null selects plain TCP.
+         * @param context Validated context from TlsServerContext::Create().
+         * @note Thread-safe; accepted connections retain their original identity.
+         */
+        auto SetTlsContext(std::shared_ptr<TlsServerContext> context) -> void;
 
         /**
          * @brief Return the endpoint cached by Listen().
@@ -690,6 +698,10 @@ namespace mhttp {
 
     auto HttpServer::SetReadTimeout(std::chrono::steady_clock::duration timeout) -> void {
         m_impl->Context().read_timeout.store(timeout);
+    }
+
+    auto HttpServer::SetTlsContext(std::shared_ptr<TlsServerContext> context) -> void {
+        m_impl->Context().tls_context.store(std::move(context));
     }
 
     auto HttpServer::SetWriteTimeout(std::chrono::steady_clock::duration timeout) -> void {

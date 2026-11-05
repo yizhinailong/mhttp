@@ -68,6 +68,17 @@ namespace test_support {
             }
             return *result;
         }
+
+        /**
+         * @brief Load this identity for an mhttp HTTPS listener.
+         */
+        auto ServerContext() const -> std::shared_ptr<mhttp::TlsServerContext> {
+            auto result{ mhttp::TlsServerContext::Create({ .certificate_chain_pem = certificate, .private_key_pem = key }) };
+            if (!result) {
+                throw std::runtime_error{ result.error().message() };
+            }
+            return *result;
+        }
     };
 
     /**

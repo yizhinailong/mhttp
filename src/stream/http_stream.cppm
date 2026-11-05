@@ -19,6 +19,8 @@ module;
 #include <boost/beast/core/basic_stream.hpp>
 #include <boost/beast/core/rate_policy.hpp>
 #include <boost/beast/core/stream_traits.hpp>
+#include <boost/beast/websocket/ssl.hpp>
+#include <boost/beast/websocket/teardown.hpp>
 #include <boost/system/error_code.hpp>
 
 export module mhttp:http_stream;
@@ -51,6 +53,63 @@ namespace mhttp {
          * @param stream Stream to own.
          */
         explicit HttpStream(PlainStream&& stream) : m_stream{ std::move(stream) } {}
+
+        /**
+         * @brief Wrap an accepted connection, optionally encrypting it with a server identity.
+         */
+        HttpStream(
+            PlainStream&& stream,
+            std::shared_ptr<TlsServerContext> const& context
+        ) : m_context{ context }, m_stream{ makeServerStream(std::move(stream), context) } {}
+
+        /**
+         * @brief Return whether this connection uses TLS.
+         */
+        [[nodiscard]] auto IsTls() const noexcept -> bool {
+            return std::holds_alternative<TlsStream>(m_stream);
+        }
+
+        /**
+         * @brief Expose the TCP layer for Beast's socket and deadline customization points.
+         * @note Reads and writes must use HttpStream so encrypted connections retain TLS.
+         */
+        auto next_layer() -> PlainStream& { return plain(); }
+
+        /**
+         * @brief Borrow the TCP layer for const state queries.
+         */
+        auto next_layer() const -> PlainStream const& { return plain(); }
+
+        /**
+         * @brief Forward synchronous WebSocket teardown through the active protocol layer.
+         */
+        friend auto teardown(
+            beast::role_type role,
+            HttpStream& stream,
+            boost::system::error_code& ec
+        ) -> void {
+            std::visit([&](auto& transport) {
+                using beast::websocket::teardown;
+                teardown(role, transport, ec);
+            },
+                       stream.m_stream);
+        }
+
+        /**
+         * @brief Forward asynchronous WebSocket teardown, including TLS close_notify.
+         */
+        template <typename Handler>
+        friend auto async_teardown(
+            beast::role_type role,
+            HttpStream& stream,
+            Handler&& handler
+        ) -> void {
+            std::visit([&](auto& transport) {
+                using beast::websocket::async_teardown;
+                async_teardown(role, transport, std::forward<Handler>(handler));
+            },
+                       stream.m_stream);
+        }
 
         /**
          * @brief Create a TLS client stream and configure SNI and host verification.
@@ -101,6 +160,15 @@ namespace mhttp {
         }
 
         /**
+         * @brief Complete an accepted TLS handshake under the current connection deadline.
+         */
+        auto AsyncServerHandshake(boost::system::error_code& ec) -> net::awaitable<void> {
+            if (auto* tls{ std::get_if<TlsStream>(&m_stream) }) {
+                co_await tls->async_handshake(net::ssl::stream_base::server, net::redirect_error(net::use_awaitable, ec));
+            }
+        }
+
+        /**
          * @brief Return the executor the stream's operations complete on.
          * @return The connection's executor (its strand on the server side).
          */
@@ -136,14 +204,6 @@ namespace mhttp {
          */
         auto Socket() -> tcp::socket& {
             return plain().socket();
-        }
-
-        /**
-         * @brief Transfer the plain stream to the next protocol phase.
-         * @return Stream retaining its executor and socket; this wrapper is left moved from.
-         */
-        auto Release() && -> PlainStream {
-            return std::move(std::get<PlainStream>(m_stream));
         }
 
         /**
@@ -264,6 +324,19 @@ namespace mhttp {
         }
 
     private:
+        /**
+         * @brief Build the selected server transport while retaining its certificate context.
+         */
+        static auto makeServerStream(
+            PlainStream&& stream,
+            std::shared_ptr<TlsServerContext> const& context
+        ) -> std::variant<PlainStream, TlsStream> {
+            if (context) {
+                return std::variant<PlainStream, TlsStream>{ std::in_place_type<TlsStream>, std::move(stream), context->m_context };
+            }
+            return std::variant<PlainStream, TlsStream>{ std::in_place_type<PlainStream>, std::move(stream) };
+        }
+
         /**
          * @brief Build an encrypted stream whose context has already been validated.
          */

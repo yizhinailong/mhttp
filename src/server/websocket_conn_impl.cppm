@@ -50,9 +50,9 @@ namespace mhttp::detail {
      * header stay in the next layer and are consumed by the first frame read.
      */
     class WebSocketTransport
-        : public beast::buffered_read_stream<HttpStream::PlainStream, beast::flat_buffer> {
+        : public beast::buffered_read_stream<HttpStream, beast::flat_buffer> {
     private:
-        using BufferedStream = beast::buffered_read_stream<HttpStream::PlainStream, beast::flat_buffer>;
+        using BufferedStream = beast::buffered_read_stream<HttpStream, beast::flat_buffer>;
 
     public:
         /**
@@ -61,7 +61,7 @@ namespace mhttp::detail {
         WebSocketTransport(
             HttpStream&& stream,
             beast::flat_buffer&& buffered
-        ) : BufferedStream{ std::move(stream).Release() } {
+        ) : BufferedStream{ std::move(stream) } {
             buffer() = std::move(buffered);
         }
     };

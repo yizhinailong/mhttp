@@ -155,6 +155,70 @@ export namespace mhttp {
         }
     };
 
+    /**
+     * @brief Server identity supplied as PEM files or PEM text, one source per field.
+     */
+    struct TlsServerConfig {
+        std::string certificate_chain_file; ///< PEM leaf certificate followed by intermediates.
+        std::string private_key_file;       ///< Unencrypted PEM private key file.
+        std::string certificate_chain_pem;  ///< In-memory alternative to certificate_chain_file.
+        std::string private_key_pem;        ///< In-memory alternative to private_key_file.
+    };
+
+    /**
+     * @brief Validated, shared server certificate and key; immutable after construction.
+     */
+    class TlsServerContext {
+    private:
+        net::ssl::context m_context{ net::ssl::context::tls_server }; ///< Server identity.
+
+        friend class HttpStream;
+
+        TlsServerContext() = default;
+
+    public:
+        /**
+         * @brief Load a certificate chain and matching private key before accepting clients.
+         * @return Shared context or an input, file, PEM, or key-mismatch error.
+         */
+        [[nodiscard]] static auto Create(
+            TlsServerConfig const& config
+        ) -> Result<std::shared_ptr<TlsServerContext>> {
+            if (config.certificate_chain_file.empty() == config.certificate_chain_pem.empty() || config.private_key_file.empty() == config.private_key_pem.empty()) {
+                return std::unexpected{ boost::system::error_code{ net::error::invalid_argument } };
+            }
+            try {
+                auto context{ std::shared_ptr<TlsServerContext>{ new TlsServerContext } };
+                if (auto result{ detail::configure_tls(context->m_context) }; !result) {
+                    return std::unexpected{ result.error() };
+                }
+                boost::system::error_code ec;
+                if (!config.certificate_chain_file.empty()) {
+                    context->m_context.use_certificate_chain_file(config.certificate_chain_file, ec);
+                } else {
+                    context->m_context.use_certificate_chain(net::buffer(config.certificate_chain_pem), ec);
+                }
+                if (ec) {
+                    return std::unexpected{ ec };
+                }
+                if (!config.private_key_file.empty()) {
+                    context->m_context.use_private_key_file(config.private_key_file, net::ssl::context::pem, ec);
+                } else {
+                    context->m_context.use_private_key(net::buffer(config.private_key_pem), net::ssl::context::pem, ec);
+                }
+                if (ec) {
+                    return std::unexpected{ ec };
+                }
+                if (::SSL_CTX_check_private_key(context->m_context.native_handle()) != 1) {
+                    return std::unexpected{ detail::tls_error() };
+                }
+                return context;
+            } catch (boost::system::system_error const& error) {
+                return std::unexpected{ error.code() };
+            }
+        }
+    };
+
 } // namespace mhttp
 
 namespace mhttp::detail {

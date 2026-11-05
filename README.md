@@ -24,6 +24,24 @@ client.SetTlsContext(*trust);
 
 `TlsClientConfig::ca_pem` 接受内存中的 PEM 证书，`use_system_ca = false` 仅使用自定义信任源。`verify_peer = false` 显式关闭证书及主机名校验，供开发测试使用。上下文在创建后共享使用；修改 `SetTlsContext` 后，下一次请求会重新建立连接，正在执行的请求继续完成。跨源重定向继承同一信任配置，下载器通过其连接池使用 HTTPS。TLS 握手受请求超时约束，关闭客户端会取消在途握手。
 
+## HTTPS 服务端
+
+在 `Listen` / `Run` 前加载服务器证书并配置 TLS：
+
+```cpp
+auto identity = mhttp::TlsServerContext::Create({
+    .certificate_chain_file = "fullchain.pem",
+    .private_key_file = "privkey.pem",
+});
+if (!identity) { /* 处理配置错误并返回 */ }
+server.SetTlsContext(*identity);
+server.Listen("127.0.0.1", 8443);
+```
+
+也可以用 `certificate_chain_pem` / `private_key_pem` 提供内存中的 PEM。证书和未加密私钥必须匹配，配置错误在创建上下文时返回。握手使用服务器的读超时；`Stop` 会中止并排空握手中的连接。正常 HTTP 关闭发送 TLS `close_notify`，停机和异常直接中止传输。
+
+`SetTlsContext` 可从其他线程替换，新接受的连接使用新上下文，已有连接保留原上下文；传入空指针让新连接使用普通 TCP。`Request::IsTls()` 报告实际传输，与客户端提供的转发头无关，代理的 `X-Forwarded-Proto` 也据此生成。
+
 ## 下载器与缓存
 
 `mhttp::client::Downloader` 从共享 `HttpClientPool` 借用连接。`AsyncDownload(url, path, headers)` 返回错误码，`Download(...)` 返回同一结果的 future；运行 future API 时，需要让传入的 executor 持续运行。

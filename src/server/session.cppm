@@ -33,6 +33,7 @@ export module mhttp:session;
 
 import std;
 import :config;
+import :tls;
 import :error;
 import :strings;
 import :logging;
@@ -64,6 +65,7 @@ namespace mhttp {
         std::atomic<std::shared_ptr<FormData::Param const>> form_data_params{ defaultFormDataParams() }; ///< Multipart limits snapshot.
         std::atomic<std::shared_ptr<detail::TrustedProxies const>> trusted_proxies;                      ///< Trusted proxies snapshot; null = none.
         Router router;                                                                                   ///< Routes; configured before Run().
+        std::atomic<std::shared_ptr<TlsServerContext>> tls_context;                                      ///< Identity snapshot for new connections; null = TCP.
 
         /**
          * @brief Return httplib's server defaults: 10 MiB per part, uploaded files removed.
@@ -206,6 +208,13 @@ namespace mhttp {
 
         auto Then() -> net::awaitable<Ptr> override {
             boost::system::error_code ec;
+            m_stream.ExpiresAfter(m_context->read_timeout.load());
+            co_await m_stream.AsyncServerHandshake(ec);
+            m_stream.ExpiresNever();
+            if (ec) {
+                m_context->logger.GetLogger()->trace("TLS server handshake failed: {}", ec.message());
+                co_return nullptr;
+            }
             auto const remote{ m_stream.Socket().remote_endpoint(ec) };
             auto const local{ m_stream.Socket().local_endpoint(ec) };
             auto const peer{ std::format("({}:{} -> {}:{})", remote.address().to_string(), remote.port(), local.address().to_string(), local.port()) };
@@ -225,6 +234,7 @@ namespace mhttp {
                 auto const start{ std::chrono::steady_clock::now() };
 
                 auto req{ RequestImpl::Make(shared_from_this(), std::move(parser), local, remote, m_context->trusted_proxies.load(), *m_context->form_data_params.load()) };
+                get_impl(req).SetTls(m_stream.IsTls());
                 if (beast::websocket::is_upgrade(get_impl(req).Message())) {
                     if (auto route{ table.QueryWsHandler(req) }; route && req.IsBodyDone()) {
                         if (route->prepare) {
@@ -337,7 +347,17 @@ namespace mhttp {
                 co_return;
             }
             std::array<char, 1> peek{};
-            auto const size{ co_await m_stream.Socket().async_receive(net::buffer(peek), tcp::socket::message_peek, net::bind_cancellation_slot(slot, net::redirect_error(net::use_awaitable, ec))) };
+            std::size_t size{};
+            if (m_stream.IsTls()) {
+                // Decrypt close_notify and retain any pipelined application byte for readHeader.
+                size = co_await m_stream.async_read_some(net::buffer(peek), net::bind_cancellation_slot(slot, net::redirect_error(net::use_awaitable, ec)));
+                if (size != 0) {
+                    net::buffer_copy(m_buffer.prepare(size), net::buffer(peek.data(), size));
+                    m_buffer.commit(size);
+                }
+            } else {
+                size = co_await m_stream.Socket().async_receive(net::buffer(peek), tcp::socket::message_peek, net::bind_cancellation_slot(slot, net::redirect_error(net::use_awaitable, ec)));
+            }
             if (!ec && size == 0) {
                 ec = net::error::eof;
             }
@@ -528,7 +548,7 @@ namespace mhttp {
         net::any_io_executor executor,
         tcp::socket&& socket,
         std::shared_ptr<ServerContext> context
-    ) : m_executor{ std::move(executor) }, m_task{ std::make_shared<HttpTask>(HttpStream{ HttpStream::PlainStream{ std::move(socket) } }, beast::flat_buffer{}, std::move(context)) } {}
+    ) : m_executor{ std::move(executor) }, m_task{ std::make_shared<HttpTask>(HttpStream{ HttpStream::PlainStream{ std::move(socket) }, context->tls_context.load() }, beast::flat_buffer{}, context) } {}
 
     auto Session::Abort() -> void {
         if (m_abort.exchange(true)) {

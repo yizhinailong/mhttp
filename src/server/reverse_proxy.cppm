@@ -186,7 +186,7 @@ namespace mhttp::detail {
             headers.Set(Field::host, config.preserve_host && !request[Field::host].empty() ? std::string{ request[Field::host] } : url::make_host_value(upstream.host, upstream.EffectivePort(), url::Scheme::Plain));
             headers.Set("X-Forwarded-For", request.GetClientIp().to_string());
             headers.Set("X-Forwarded-Host", request[Field::host]);
-            headers.Set("X-Forwarded-Proto", "http");
+            headers.Set("X-Forwarded-Proto", request.IsTls() ? "https" : "http");
             headers.Set("X-Forwarded-Port", std::to_string(request.LocalEndpoint().port()));
             auto const length{ get_impl(request).ContentLength() };
             bool const chunked{ !length && !request.IsBodyDone() };

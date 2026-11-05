@@ -292,7 +292,7 @@ namespace mhttp::detail {
             headers.Set(Field::host, m_config.preserve_host ? std::string{ request[Field::host] } : url::make_host_value(upstream.host, upstream.EffectivePort(), url::Scheme::Plain));
             headers.Set("X-Forwarded-For", request.GetClientIp().to_string());
             headers.Set("X-Forwarded-Host", request[Field::host]);
-            headers.Set("X-Forwarded-Proto", "http");
+            headers.Set("X-Forwarded-Proto", request.IsTls() ? "https" : "http");
             headers.Set("X-Forwarded-Port", std::to_string(request.LocalEndpoint().port()));
             auto const target{ proxy_target(request, m_prefix, upstream.path, m_config.strip_prefix) };
             state->Watch();
