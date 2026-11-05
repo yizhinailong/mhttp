@@ -1,0 +1,16 @@
+[package]
+name        = "mhttp"
+version     = "0.1.0"
+description = "A coroutine-first HTTP library on Boost.Beast, built with C++23 modules"
+license     = "Apache-2.0"
+
+[lib]
+path = "src/mhttp.cppm"
+
+[dependencies.compat]
+spdlog = "1.17.0"
+boost-beast = "1.92.0"
+boost-asio = "1.92.0"
+
+[dependencies.nlohmann]
+json = "3.12.0"
