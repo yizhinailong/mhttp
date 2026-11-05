@@ -29,6 +29,7 @@ import :config;
 import :error;
 import :strings;
 import :url;
+import :tls;
 import :query_params;
 import :headers;
 import :body_writer;
@@ -54,8 +55,7 @@ export namespace mhttp::client {
      * a time: a second request while one is in flight, or while a lazy response body is unread,
      * fails with Error::AlreadyInUse. A request that fails because the server closed a reused
      * idle connection is sent once more on a new connection. Settings are atomic and may change
-     * from any thread. TLS is not ported: an HTTPS client fails to connect with
-     * net::error::operation_not_supported.
+     * from any thread. HTTPS verifies the server's certificate chain and host by default.
      */
     class HttpClient {
     private:
@@ -104,6 +104,13 @@ export namespace mhttp::client {
          * @param timeout Timeout; default 30 s.
          */
         auto SetTimeout(std::chrono::steady_clock::duration timeout) -> void;
+
+        /**
+         * @brief Select shared trust configuration for future HTTPS connections and redirects.
+         * @param context Context from TlsClientContext::Create(); null uses system roots.
+         * @note A changed context reconnects before the next request; in-flight requests finish.
+         */
+        auto SetTlsContext(std::shared_ptr<TlsClientContext> context) -> void;
 
         [[nodiscard]] auto Host() const -> std::string_view;
         [[nodiscard]] auto Port() const -> std::uint16_t;
@@ -337,8 +344,8 @@ namespace mhttp::detail {
         }
         auto const scheme{ reference.substr(0, separator) };
         return std::isalpha(static_cast<unsigned char>(scheme.front())) != 0 && std::ranges::all_of(scheme, [](char c) {
-            return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '+' || c == '-' || c == '.';
-        });
+                   return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '+' || c == '-' || c == '.';
+               });
     }
 
     /**
@@ -505,6 +512,10 @@ namespace mhttp::client {
 
     auto HttpClient::SetTimeout(std::chrono::steady_clock::duration timeout) -> void {
         m_impl->SetTimeout(timeout);
+    }
+
+    auto HttpClient::SetTlsContext(std::shared_ptr<TlsClientContext> context) -> void {
+        m_impl->SetTlsContext(std::move(context));
     }
 
     auto HttpClient::Host() const -> std::string_view {

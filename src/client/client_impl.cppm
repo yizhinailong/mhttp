@@ -14,6 +14,7 @@ module;
 #include <boost/asio/ip/address.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/redirect_error.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/use_future.hpp>
@@ -38,6 +39,7 @@ import :logging;
 import :url;
 import :connection;
 import :http_stream;
+import :tls;
 
 export namespace mhttp::client {
 
@@ -87,6 +89,8 @@ namespace mhttp::detail {
         std::atomic<std::uint64_t> m_download_rate_limit{ 0 };                                    ///< Read cap in bytes/s; 0 = none.
         std::atomic<std::uint64_t> m_upload_rate_limit{ 0 };                                      ///< Write cap in bytes/s; 0 = none.
         std::atomic<std::shared_ptr<HttpStream>> m_stream;                                        ///< Current connection; null when closed.
+        std::atomic<std::shared_ptr<TlsClientContext>> m_tls_context;                             ///< Trust for future TLS connections.
+        std::shared_ptr<TlsClientContext> m_connection_tls_context;                               ///< Trust snapshot for the current connection; strand only.
         beast::flat_buffer m_buffer;                                                              ///< Read buffer; strand only.
         bool m_deadline_active{ false };                                                          ///< Overall deadline armed; strand only.
         std::size_t m_responses_on_connection{ 0 };                                               ///< Responses read since connect; strand only.
@@ -102,7 +106,7 @@ namespace mhttp::detail {
          * @param executor Executor for the client's own strand.
          * @param host Host name or address.
          * @param port Port.
-         * @param scheme Transport; TLS fails at connect time until it is ported.
+         * @param scheme Plain TCP or TLS transport.
          */
         ClientImpl(
             net::any_io_executor executor,
@@ -156,6 +160,13 @@ namespace mhttp::detail {
             m_timeout.store(timeout);
         }
 
+        /**
+         * @brief Replace trust configuration for future connections; null uses system roots.
+         */
+        auto SetTlsContext(std::shared_ptr<TlsClientContext> context) -> void {
+            m_tls_context.store(std::move(context));
+        }
+
         auto SetMaxRedirects(int count) -> void {
             m_max_redirects.store(count);
         }
@@ -206,6 +217,7 @@ namespace mhttp::detail {
             m_body_limit.store(other.m_body_limit.load());
             m_download_rate_limit.store(other.m_download_rate_limit.load());
             m_upload_rate_limit.store(other.m_upload_rate_limit.load());
+            m_tls_context.store(other.m_tls_context.load());
             m_logger.SetLogger(other.m_logger.GetLogger());
         }
 
@@ -440,6 +452,9 @@ namespace mhttp::detail {
                 m_strand,
                 [&, self = shared_from_this()]() -> net::awaitable<void> {
                     finishIo();
+                    if (m_scheme == url::Scheme::Tls && m_connection_tls_context != m_tls_context.load()) {
+                        closeNow();
+                    }
                     m_attempt_reused = isOpenNow() && m_responses_on_connection > 0;
                     if (!isOpenNow()) {
                         co_await connect(ec);
@@ -499,15 +514,42 @@ namespace mhttp::detail {
          */
         auto connect(boost::system::error_code& ec) -> net::awaitable<void> {
             closeNow();
+            std::shared_ptr<HttpStream> stream;
             if (m_scheme == url::Scheme::Tls) {
-                // TLS is not ported yet; fail before any byte reaches a TLS port.
-                ec = net::error::operation_not_supported;
-                co_return;
+                m_connection_tls_context = m_tls_context.load();
+                auto prepared{ HttpStream::MakeTlsClient(m_strand, m_host, m_connection_tls_context) };
+                if (!prepared) {
+                    ec = prepared.error();
+                    co_return;
+                }
+                stream = std::move(*prepared);
+            } else {
+                stream = std::make_shared<HttpStream>(HttpStream::PlainStream{ m_strand });
             }
-            auto const stream{ std::make_shared<HttpStream>(HttpStream::PlainStream{ m_strand }) };
             m_stream.store(stream);
             m_responses_on_connection = 0;
             applyRateLimits(*stream);
+
+            auto const timed_out{ std::make_shared<bool>(false) };
+            net::steady_timer deadline{ m_strand };
+            if (m_timeout_policy.load() != client::TimeoutPolicy::Never) {
+                deadline.expires_after(m_timeout.load());
+                deadline.async_wait([self = shared_from_this(), stream, timed_out](boost::system::error_code timer_ec) {
+                    if (!timer_ec && self->m_stream.load() == stream) {
+                        *timed_out = true;
+                        self->closeNow();
+                    }
+                });
+            }
+
+            /**
+             * @brief Disarm the connect deadline on every exit, including cancellation.
+             */
+            struct ConnectGuard {
+                net::steady_timer& deadline; ///< Covers DNS, TCP, and TLS negotiation.
+
+                ~ConnectGuard() { deadline.cancel(); }
+            } const guard{ deadline };
 
             beginIo(*stream);
             boost::system::error_code address_ec;
@@ -516,9 +558,17 @@ namespace mhttp::detail {
                 co_await stream->AsyncConnect(tcp::endpoint{ address, m_port }, ec);
             } else {
                 auto const endpoints{ co_await m_resolver.async_resolve(m_host, std::to_string(m_port), net::redirect_error(net::use_awaitable, ec)) };
-                if (!ec) {
+                if (!ec && m_stream.load() == stream) {
                     co_await stream->AsyncConnect(endpoints, ec);
                 }
+            }
+            if (!ec && m_stream.load() == stream) {
+                co_await stream->AsyncClientHandshake(ec);
+            }
+            if (*timed_out) {
+                ec = beast::error::timeout;
+            } else if (m_stream.load() != stream) {
+                ec = net::error::operation_aborted;
             }
             endIo(*stream);
             if (ec) {
@@ -568,18 +618,18 @@ namespace mhttp::detail {
          */
         auto beginIo(HttpStream& stream) -> void {
             switch (m_timeout_policy.load()) {
-            case client::TimeoutPolicy::Overall:
-                if (!m_deadline_active) {
+                case client::TimeoutPolicy::Overall:
+                    if (!m_deadline_active) {
+                        stream.ExpiresAfter(m_timeout.load());
+                        m_deadline_active = true;
+                    }
+                    break;
+                case client::TimeoutPolicy::Step:
                     stream.ExpiresAfter(m_timeout.load());
-                    m_deadline_active = true;
-                }
-                break;
-            case client::TimeoutPolicy::Step:
-                stream.ExpiresAfter(m_timeout.load());
-                break;
-            case client::TimeoutPolicy::Never:
-                stream.ExpiresNever();
-                break;
+                    break;
+                case client::TimeoutPolicy::Never:
+                    stream.ExpiresNever();
+                    break;
             }
         }
 

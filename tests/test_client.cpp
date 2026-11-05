@@ -45,8 +45,7 @@ namespace {
         bool finished{ false };
         net::co_spawn(ioc, [&]() -> net::awaitable<void> {
             co_await body(ioc);
-            finished = true;
-        }, net::detached);
+            finished = true; }, net::detached);
         ioc.run();
         check(finished, "the client coroutine must run to completion");
     }
@@ -64,17 +63,17 @@ namespace {
     auto echo_handler(mhttp::Request& req, mhttp::Response& resp) -> net::awaitable<void> {
         auto const body{ co_await req.ReadString() };
         resp.SetJsonContent(Json{
-            { "method", std::string{ req.MethodString() } },
-            { "target", std::string{ req.Target() } },
-            { "body", body },
-            { "port", req.RemoteEndpoint().port() },
-            { "host", std::string{ req[Field::host] } },
-            { "type", std::string{ req[Field::content_type] } },
+            { "method",         std::string{ req.MethodString() } },
+            { "target",               std::string{ req.Target() } },
+            {   "body",                                      body },
+            {   "port",               req.RemoteEndpoint().port() },
+            {   "host",           std::string{ req[Field::host] } },
+            {   "type",   std::string{ req[Field::content_type] } },
             { "length", std::string{ req[Field::content_length] } },
-            { "agent", std::string{ req[Field::user_agent] } },
-            { "auth", std::string{ req[Field::authorization] } },
-            { "cookie", std::string{ req[Field::cookie] } },
-            { "keep", std::string{ req["X-Keep"] } },
+            {  "agent",     std::string{ req[Field::user_agent] } },
+            {   "auth",  std::string{ req[Field::authorization] } },
+            { "cookie",         std::string{ req[Field::cookie] } },
+            {   "keep",              std::string{ req["X-Keep"] } },
         });
     }
 
@@ -117,7 +116,10 @@ namespace {
 
             auto const post{ co_await client.AsyncPost("/echo", "hello", "text/plain") };
             check(echo_of(post).value("body", "") == "hello" && echo_of(post).value("type", "") == "text/plain", "string bodies must be sent with their type");
-            auto const json{ co_await client.AsyncPut("/echo", Json{ { "a", 1 } }) };
+            auto const json{
+                co_await client.AsyncPut("/echo", Json{ { "a", 1 } }
+                  )
+            };
             check(echo_of(json).value("method", "") == "PUT" && echo_of(json).value("body", "") == R"({"a":1})", "JSON bodies must be serialized");
             check(echo_of(json).value("type", "").starts_with("application/json"), "JSON bodies must be typed");
             auto const empty_post{ co_await client.AsyncPost("/echo") };
@@ -282,7 +284,7 @@ namespace {
             check(threw, "a non-HTTP URL must be rejected by the constructor");
             HttpClient tls{ ioc, "https://127.0.0.1:1" };
             auto const secure{ co_await tls.AsyncGet("/") };
-            check(!secure && secure.error() == net::error::operation_not_supported, "HTTPS must fail clearly until TLS is ported");
+            check(!secure && !tls.HasActiveSession(), "an unreachable HTTPS endpoint must fail and release the client");
 
             HttpClient refused{ ioc, "127.0.0.1", 1 };
             auto const unreachable{ co_await refused.AsyncGet("/") };
@@ -357,7 +359,10 @@ namespace {
             router.SetHttpHandler(Verb::get, "/ndjson", [](mhttp::Request&, mhttp::Response& resp) -> net::awaitable<void> {
                 auto writer{ resp.CreateNdjsonWriter() };
                 co_await writer->Begin();
-                co_await writer->Write(Json{ { "n", 1 } }, true);
+                co_await writer->Write(Json{
+                                           { "n", 1 }
+                },
+                                       true);
                 co_await writer->Write(Json{}, false);
             });
             router.SetHttpHandler(Verb::get, "/ndjson-raw", [](mhttp::Request& req, mhttp::Response& resp) -> net::awaitable<void> {
@@ -485,8 +490,7 @@ namespace {
             std::optional<int> waiter_port;
             net::co_spawn(ioc, [&]() -> net::awaitable<void> {
                 auto handle{ co_await pool.AsyncAcquire(std::format("http://127.0.0.1:{}/ignored", port), std::chrono::seconds{ 5 }) };
-                waiter_port = handle ? port_of(co_await handle->AsyncGet("/echo")) : -2;
-            }, net::detached);
+                waiter_port = handle ? port_of(co_await handle->AsyncGet("/echo")) : -2; }, net::detached);
             co_await sleep_for(std::chrono::milliseconds{ 50 });
             check(!waiter_port.has_value(), "a waiter must block while the only connection is lent");
             first.Release();

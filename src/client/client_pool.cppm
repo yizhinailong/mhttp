@@ -29,6 +29,7 @@ import :strings;
 import :logging;
 import :async_event;
 import :url;
+import :tls;
 import :client_impl;
 import :client;
 
@@ -49,6 +50,7 @@ export namespace mhttp::client {
         TimeoutPolicy timeout_policy{ TimeoutPolicy::Overall };                                ///< Client timeout policy.
         std::chrono::steady_clock::duration timeout{ std::chrono::seconds{ 30 } };             ///< Client timeout.
         int max_redirects{ 0 };                                                                ///< Client redirect limit.
+        std::shared_ptr<TlsClientContext> tls_context;                                         ///< Shared HTTPS trust; null uses system roots.
     };
 
     /**
@@ -626,6 +628,7 @@ namespace mhttp::client {
             client.SetTimeoutPolicy(m_params.timeout_policy);
             client.SetTimeout(m_params.timeout);
             client.SetMaxRedirects(m_params.max_redirects);
+            client.SetTlsContext(m_params.tls_context);
             client.SetDownloadRateLimit(0);
             client.SetUploadRateLimit(0);
             client.SetLogger(m_logger.GetLogger());

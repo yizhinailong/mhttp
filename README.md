@@ -9,6 +9,21 @@ mcpp test
 
 消费者使用 `import mhttp;`。使用 Boost 的协程、缓冲区等 API 时，在模块导入前包含相应 Boost 头文件；标准库使用 `import std;`。
 
+## HTTPS 客户端
+
+`HttpClient` 和 `HttpClientPool` 支持 `https://`，最低 TLS 1.2，默认校验证书链和主机名，并对 DNS 主机发送 SNI。Windows 使用系统 ROOT 证书库，其他平台使用 OpenSSL 默认 CA 路径。OpenSSL 由 `compat.openssl` 提供；Windows 从源码安装该依赖时需要 Visual Studio C++ 工具集和 Strawberry Perl。
+
+自定义 CA 在配置阶段创建共享上下文，失败通过 `Result` 返回：
+
+```cpp
+auto trust = mhttp::TlsClientContext::Create({ .ca_file = "private-ca.pem" });
+if (!trust) { /* 处理配置错误 */ }
+client.SetTlsContext(*trust);
+// 连接池：PoolParams{ .tls_context = *trust }
+```
+
+`TlsClientConfig::ca_pem` 接受内存中的 PEM 证书，`use_system_ca = false` 仅使用自定义信任源。`verify_peer = false` 显式关闭证书及主机名校验，供开发测试使用。上下文在创建后共享使用；修改 `SetTlsContext` 后，下一次请求会重新建立连接，正在执行的请求继续完成。跨源重定向继承同一信任配置，下载器通过其连接池使用 HTTPS。TLS 握手受请求超时约束，关闭客户端会取消在途握手。
+
 ## 下载器与缓存
 
 `mhttp::client::Downloader` 从共享 `HttpClientPool` 借用连接。`AsyncDownload(url, path, headers)` 返回错误码，`Download(...)` 返回同一结果的 future；运行 future API 时，需要让传入的 executor 持续运行。

@@ -39,6 +39,7 @@ export import :proxy_common;
 export import :upstream_group;
 export import :ws_forward;
 export import :http_stream;
+export import :tls;
 export import :session;
 export import :server;
 export import :client_impl;
