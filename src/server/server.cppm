@@ -195,9 +195,8 @@ export namespace mhttp {
         auto SetHeaderLimit(std::uint32_t limit) -> void;
 
         /**
-         * @brief Set the maximum request body size.
-         * @param limit Limit in bytes; applies to subsequent requests.
-         * @note Bodies are buffered in memory until streaming bodies are ported.
+         * @brief Set the maximum request body and WebSocket message size.
+         * @param limit Limit in bytes; applies to subsequent requests and new WebSocket sessions.
          */
         auto SetBodyLimit(std::uint64_t limit) -> void;
 
@@ -236,7 +235,7 @@ namespace mhttp {
      */
     class ServerImpl : public std::enable_shared_from_this<ServerImpl> {
     private:
-        static constexpr int ACCEPTOR_COUNT{ 32 }; ///< Concurrent async_accept operations.
+        static constexpr int ACCEPTOR_COUNT{ 32 };               ///< Concurrent async_accept operations.
 
         net::strand<net::any_io_executor> m_strand;              ///< Serializes server-level state.
         std::shared_ptr<ServerContext> m_context;                ///< State shared with sessions.

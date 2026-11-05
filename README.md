@@ -23,6 +23,33 @@ mcpp test
 
 `Cache` 是与 HTTP 无关的 body + 不透明 metadata 接口，允许自定义存储。`DiskCache` 支持持久化、大小上限、最近使用顺序淘汰、默认有效期、单项截止时间、清空和清理。已经取出的 `Entry` 在替换或淘汰后仍可读取原内容，包括 Windows。目录由独占锁保护，同一目录无法被第二个缓存实例同时打开；创建或锁定失败抛出 `std::runtime_error`。
 
+## WebSocket 服务端
+
+`Router::SetWsHandler(path, open, message, close)` 注册升级路由，三个回调均支持同步函数或 Asio 协程。回调收到 `WebSocketConn::WeakPtr`，锁定后可读取握手请求、发送消息或关闭连接。例如：
+
+```cpp
+server.GetRouter().SetWsHandler(
+    "/ws/:room",
+    [](mhttp::WebSocketConn::WeakPtr) {},
+    [](mhttp::WebSocketConn::WeakPtr weak,
+       mhttp::WebSocketMessage message) -> boost::asio::awaitable<void> {
+        if (auto connection{ weak.lock() }) {
+            boost::system::error_code ec;
+            co_await connection->AsyncSend(message, ec);
+        }
+    },
+    [](mhttp::WebSocketConn::WeakPtr) {}
+);
+```
+
+路由沿用 HTTP 的静态、正则、参数、通配路径及匹配优先级。同一路径可以同时注册 HTTP 和 WebSocket 处理器；没有匹配的升级路由时继续使用 HTTP 路由。匹配成功的升级不经过 HTTP 中间件。非法握手或带请求体的升级会被拒绝，握手失败不调用连接回调。HTTP 阶段预读到的首帧字节会保留。
+
+`HttpRequest()` 保留路径参数、查询、请求头及 `Data()`，只能在连接的 `Executor()` 上访问。所有回调在该 strand 上运行，消息按接收顺序逐个回调；成功建立的会话结束后调用一次 `close`，此时 `IsOpen()` 为 false。
+
+`WebSocketConn` 提供 `AsyncSend`、`AsyncPing`、`AsyncPong`、`AsyncClose`、`AsyncAbort`，以及对应的 future API `Send`、`Ping`、`Pong`、`Close`、`Abort`。这些操作可从其他 executor 发起，发送与控制帧排队执行；不要在 I/O 线程上阻塞等待 future。Ping / Pong 载荷最多 125 字节，关闭原因最多 123 字节，超限返回 `message_size`。正常关闭最多等待对端 5 秒；`Abort` 立即取消 I/O。
+
+`SetBodyLimit` 为新升级连接设置单条接收消息的大小上限，零只允许空消息；`WriteTimeout` 的快照用于升级握手。已建立连接不设置空闲超时。`HttpServer::Stop` 取消连接并等待在途写操作及关闭回调完成，回调本身应及时结束。
+
 ## WebSocket 客户端与 CONNECT 隧道
 
 `mhttp::client::WsClient` 提供 `AsyncConnect`、`AsyncSend`、`AsyncRead`、`AsyncPing`、`AsyncPong`、`AsyncClose` 和 `AsyncAbort`，另有发送、控制帧、关闭的 future API。`WebSocketMessage` 持有消息字节及 text / binary 标志。
@@ -40,4 +67,5 @@ mcpp test
 - `mcpp test downloader`：下载、续传、重试、缓存、暂停取消。
 - `mcpp test disk_cache`：持久化、元数据、活动句柄、过期与淘汰。
 - `mcpp test proxy_ws`：CONNECT、WebSocket 消息、排队写入、握手取消与超时、重连。
+- `mcpp test websocket`：服务端升级路由、预读首帧、文本与二进制、控制帧、消息限制及停机排空。
 - `mcpp test`：全部回归测试。

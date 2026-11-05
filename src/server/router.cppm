@@ -16,6 +16,7 @@ import :handler_traits;
 import :request;
 import :response;
 import :mount_point;
+import :websocket_conn;
 
 export namespace mhttp {
 
@@ -67,33 +68,33 @@ namespace mhttp::detail {
                 continue;
             }
             switch (c) {
-            case '[':
-                in_class = true;
-                break;
-            case '(':
-                groups.push_back(false);
-                break;
-            case ')': {
-                if (groups.empty()) {
-                    return false; // Unbalanced; std::regex reports it.
+                case '[':
+                    in_class = true;
+                    break;
+                case '(':
+                    groups.push_back(false);
+                    break;
+                case ')': {
+                    if (groups.empty()) {
+                        return false; // Unbalanced; std::regex reports it.
+                    }
+                    bool const risky{ groups.back() };
+                    groups.pop_back();
+                    if (risky && i + 1 < pattern.size() && (pattern[i + 1] == '*' || pattern[i + 1] == '+' || pattern[i + 1] == '{')) {
+                        return true;
+                    }
+                    break;
                 }
-                bool const risky{ groups.back() };
-                groups.pop_back();
-                if (risky && i + 1 < pattern.size() && (pattern[i + 1] == '*' || pattern[i + 1] == '+' || pattern[i + 1] == '{')) {
-                    return true;
-                }
-                break;
-            }
-            case '|':
-            case '*':
-            case '+':
-            case '{':
-                if (!groups.empty()) {
-                    groups.back() = true;
-                }
-                break;
-            default:
-                break;
+                case '|':
+                case '*':
+                case '+':
+                case '{':
+                    if (!groups.empty()) {
+                        groups.back() = true;
+                    }
+                    break;
+                default:
+                    break;
             }
         }
         return false;
@@ -117,6 +118,7 @@ namespace mhttp::detail {
             std::string param_name;                            ///< Parameter name for ":p" and "{p:re}".
             std::regex regex;                                  ///< Pattern of "{p:re}" nodes.
             std::map<Verb, HandlerEntry> handlers;             ///< Handlers by method.
+            std::optional<WsHandlerEntry> ws_handler;          ///< WebSocket callbacks at this path.
             StringMap<std::unique_ptr<Node>> static_children;  ///< Literal segments.
             std::vector<std::unique_ptr<Node>> param_children; ///< ":name" segments, in order.
             std::vector<std::unique_ptr<Node>> regex_children; ///< "{name:re}" segments, in order.
@@ -155,6 +157,27 @@ namespace mhttp::detail {
         ) -> void {
             auto* const node{ insert(m_root.get(), split_path_segments(key), 0) };
             node->handlers[verb] = HandlerEntry{ wrapGlobal(std::move(handler)), lazy };
+        }
+
+        /**
+         * @brief Register WebSocket callbacks independently of the HTTP methods at this path.
+         */
+        auto AddWsHandler(std::string_view key, WsHandlerEntry handlers) -> void {
+            insert(m_root.get(), split_path_segments(key), 0)->ws_handler = std::move(handlers);
+        }
+
+        /**
+         * @brief Match an upgrade request and preserve its decoded path parameters.
+         * @return Callback set, or no value so ordinary HTTP routing can handle the request.
+         */
+        [[nodiscard]] auto QueryWsHandler(Request& req) const -> std::optional<WsHandlerEntry> {
+            StringMap<std::string> params;
+            auto const* node{ matchNodes(m_root.get(), req.DecodedSegments(), 0, params, [](Node const* candidate) { return candidate->ws_handler.has_value(); }) };
+            if (!node) {
+                return std::nullopt;
+            }
+            get_impl(req).SetPathParams(std::move(params));
+            return node->ws_handler;
         }
 
         auto SetNotFoundHandler(HttpHandler handler) -> void {
@@ -569,6 +592,24 @@ export namespace mhttp {
         auto operator=(Router const&) -> Router& = delete;
 
         /**
+         * @brief Register a WebSocket route with synchronous or coroutine callbacks.
+         * @param key Same path patterns and precedence as HTTP routes.
+         * @param open Callable `(WebSocketConn::WeakPtr)` after a successful upgrade.
+         * @param message Callable `(WebSocketConn::WeakPtr, WebSocketMessage)` per message.
+         * @param close Callable `(WebSocketConn::WeakPtr)` once an established session ends.
+         * @note Callbacks run on the connection strand; successful upgrades bypass HTTP middleware.
+         */
+        template <typename Open, typename Message, typename Close>
+        auto SetWsHandler(
+            std::string_view key,
+            Open&& open,
+            Message&& message,
+            Close&& close
+        ) -> void {
+            m_table->AddWsHandler(key, detail::WsHandlerEntry{ detail::make_coro_handler<WebSocketConn::WeakPtr>(std::forward<Open>(open)), detail::make_coro_handler<WebSocketConn::WeakPtr, WebSocketMessage>(std::forward<Message>(message)), detail::make_coro_handler<WebSocketConn::WeakPtr>(std::forward<Close>(close)) });
+        }
+
+        /**
          * @brief Add global middleware that wraps every route and the not-found handler.
          * @param aspects Aspects to add, outermost first.
          */
@@ -756,7 +797,9 @@ export namespace mhttp {
          */
         template <typename Func, typename Owner>
         static auto bindMember(Func handler, Owner& owner) {
-            return [handler, &owner](Request& req, Response& resp) { return std::invoke(handler, owner, req, resp); };
+            return [handler, &owner](Request& req, Response& resp) {
+                return std::invoke(handler, owner, req, resp);
+            };
         }
     };
 

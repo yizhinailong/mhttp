@@ -87,6 +87,14 @@ namespace mhttp {
         }
 
         /**
+         * @brief Transfer the plain stream to the next protocol phase.
+         * @return Stream retaining its executor and socket; this wrapper is left moved from.
+         */
+        auto Release() && -> PlainStream {
+            return std::move(m_stream);
+        }
+
+        /**
          * @brief Report whether the socket is open.
          * @return Snapshot of the socket's open state.
          */

@@ -12,7 +12,6 @@ module;
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/error.hpp>
-#include <boost/asio/experimental/channel.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/address.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -41,63 +40,7 @@ import :handler_traits;
 import :url;
 import :headers;
 import :websocket_message;
-
-namespace mhttp::detail {
-
-    /**
-     * @brief FIFO coroutine mutex for one strand: a capacity-1 channel used as a semaphore.
-     *
-     * Lock() sends a token and waits while the slot is taken; Unlock() receives the token,
-     * which admits the next waiter in order. Every call must run on the channel's strand.
-     */
-    class StrandMutex {
-    private:
-        net::experimental::channel<void(boost::system::error_code)> m_channel; ///< Holds the token of the owner.
-
-    public:
-        /**
-         * @brief Create an unlocked mutex.
-         * @param executor Strand all users run on.
-         */
-        explicit StrandMutex(net::any_io_executor executor) : m_channel{ std::move(executor), 1 } {}
-
-        /**
-         * @brief Wait for ownership.
-         * @return Error when the mutex was closed while waiting.
-         */
-        auto Lock() -> net::awaitable<boost::system::error_code> {
-            boost::system::error_code ec;
-            co_await m_channel.async_send(boost::system::error_code{}, net::redirect_error(net::use_awaitable, ec));
-            co_return ec;
-        }
-
-        /**
-         * @brief Release ownership and admit the next waiter.
-         */
-        auto Unlock() -> void {
-            m_channel.try_receive([](boost::system::error_code) {});
-        }
-    };
-
-    /**
-     * @brief Unlock a StrandMutex at scope exit.
-     */
-    class StrandLock {
-    private:
-        StrandMutex* m_mutex; ///< Owned mutex.
-
-    public:
-        explicit StrandLock(StrandMutex& mutex) : m_mutex{ &mutex } {}
-
-        StrandLock(StrandLock const&) = delete;
-        auto operator=(StrandLock const&) -> StrandLock& = delete;
-
-        ~StrandLock() {
-            m_mutex->Unlock();
-        }
-    };
-
-} // namespace mhttp::detail
+import :strand_mutex;
 
 namespace mhttp::client {
 

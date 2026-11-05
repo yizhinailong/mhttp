@@ -24,6 +24,7 @@ module;
 #include <boost/beast/http/string_body.hpp>
 #include <boost/beast/http/write.hpp>
 #include <boost/beast/version.hpp>
+#include <boost/beast/websocket/rfc6455.hpp>
 #include <boost/system/error_code.hpp>
 
 export module mhttp:session;
@@ -41,6 +42,7 @@ import :request;
 import :response;
 import :router;
 import :http_stream;
+import :websocket_conn_impl;
 
 namespace mhttp {
 
@@ -74,8 +76,7 @@ namespace mhttp {
      * @brief One accepted connection, running its protocol tasks on a dedicated strand.
      *
      * Each Task handles one protocol phase and returns the task for the next phase, or nullptr
-     * to end the connection. Only HttpTask exists so far; httplib also chains TLS detection,
-     * TLS handshake, WebSocket, and CONNECT-tunnel tasks here.
+     * to end the connection. HttpTask can hand an upgraded connection to WebSocketTask.
      */
     class Session : public std::enable_shared_from_this<Session> {
     public:
@@ -101,6 +102,7 @@ namespace mhttp {
         };
 
         class HttpTask;
+        class WebSocketTask;
 
     private:
         net::any_io_executor m_executor;    ///< Connection strand; all task I/O runs here.
@@ -139,6 +141,35 @@ namespace mhttp {
          */
         [[nodiscard]] auto Executor() const noexcept -> net::any_io_executor {
             return m_executor;
+        }
+    };
+
+    /**
+     * @brief WebSocket phase retained in the server's session registry until callbacks drain.
+     */
+    class Session::WebSocketTask : public Session::Task {
+    private:
+        std::shared_ptr<detail::WebSocketConnImpl> m_connection; ///< Upgrade and message loop.
+
+    public:
+        /**
+         * @brief Take ownership of the HTTP stream, unread bytes, and matched callback set.
+         */
+        WebSocketTask(
+            HttpStream&& stream,
+            beast::flat_buffer&& buffer,
+            Request&& request,
+            detail::WsHandlerEntry handlers,
+            std::shared_ptr<ServerContext> const& context
+        ) : m_connection{ std::make_shared<detail::WebSocketConnImpl>(std::move(stream), std::move(buffer), std::move(request), std::move(handlers), std::shared_ptr<detail::LoggerHolder>{ context, &context->logger }, context->write_timeout.load(), context->body_limit.load()) } {}
+
+        auto Then() -> net::awaitable<Ptr> override {
+            co_await m_connection->Run();
+            co_return nullptr;
+        }
+
+        auto Abort() -> void override {
+            m_connection->AbortNow();
         }
     };
 
@@ -190,6 +221,17 @@ namespace mhttp {
                 auto const start{ std::chrono::steady_clock::now() };
 
                 auto req{ RequestImpl::Make(shared_from_this(), std::move(parser), local, remote, m_context->trusted_proxies.load(), *m_context->form_data_params.load()) };
+                if (beast::websocket::is_upgrade(get_impl(req).Message())) {
+                    if (auto handlers{ table.QueryWsHandler(req) }; handlers && req.IsBodyDone()) {
+                        co_return std::make_shared<WebSocketTask>(std::move(m_stream), std::move(m_buffer), std::move(req), std::move(*handlers), m_context);
+                    } else if (handlers) {
+                        // A body must never be mistaken for prefetched WebSocket frames.
+                        auto rejected{ ResponseImpl::Create(req.Version(), false, shared_from_this()) };
+                        rejected.SetErrorContent(Status::bad_request);
+                        static_cast<void>(co_await writeResponse(req, rejected, peer));
+                        co_return nullptr;
+                    }
+                }
                 auto resp{ ResponseImpl::Create(req.Version(), get_impl(req).Message().keep_alive(), shared_from_this()) };
                 auto& writer{ get_impl(resp) };
 
@@ -349,9 +391,8 @@ namespace mhttp {
             if (!isHttpError(ec) || ec == http::error::partial_message) {
                 co_return;
             }
-            auto const status{ ec == http::error::header_limit ? Status::request_header_fields_too_large
-                               : ec == http::error::body_limit ? Status::payload_too_large
-                                                               : Status::bad_request };
+            auto const status{ ec == http::error::header_limit ? Status::request_header_fields_too_large : ec == http::error::body_limit ? Status::payload_too_large :
+                                                                                                                                           Status::bad_request };
             http::response<http::string_body> response{ status, 11 };
             response.set(Field::server, BOOST_BEAST_VERSION_STRING);
             response.set(Field::content_type, "text/plain; charset=utf-8");
