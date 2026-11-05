@@ -167,7 +167,7 @@ export namespace mhttp {
         ) -> void;
 
         /**
-         * @brief Forward WebSocket upgrades at a literal prefix to one ws:// upstream.
+         * @brief Forward WebSocket upgrades at a literal prefix to one ws:// or wss:// upstream.
          * @param prefix Prefix such as "/socket"; also registers the bare path.
          * @param upstream WebSocket origin with an optional base path; no query or fragment.
          * @param config Path, Host, handshake deadline, and complete-message limits.
@@ -183,7 +183,7 @@ export namespace mhttp {
 
         /**
          * @brief Forward WebSocket upgrades to a balanced backend list.
-         * @param upstreams Nonempty ws:// URL list with positive weights and no duplicates.
+         * @param upstreams Nonempty ws:// or wss:// URL list with positive weights and no duplicates.
          * @param config Includes balancing policy and failure cooldown.
          * @note A backend remains active through handshake, session, and shutdown drain.
          */

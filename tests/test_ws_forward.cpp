@@ -543,7 +543,7 @@ namespace {
         mhttp::HttpServer server{ ioc };
         for (auto const& [prefix, upstream] : std::array<std::pair<std::string_view, std::string_view>, 5>{
                  std::pair{ "/ws/:id",          "ws://localhost" },
-                 std::pair{     "/ws",         "wss://localhost" },
+                 std::pair{     "/ws",       "https://localhost" },
                  std::pair{     "/ws",        "http://localhost" },
                  std::pair{     "/ws",      "ws://localhost?q=1" },
                  std::pair{     "/ws", "ws://localhost#fragment" }

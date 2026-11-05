@@ -71,7 +71,9 @@ server.SetReverseProxy("/api", "http://127.0.0.1:8080/v1");
 
 每条代理配置持有独立的上游连接池。`max_connections` 限制每个上游 origin 的连接数，`acquire_timeout` 限制容量等待，`timeout` 限制每步上游 I/O；持续有数据的流可以长时间保持。`header_limit` / `body_limit` 限制上游响应，客户端请求仍受服务器自身限制。代理保留上游状态和重定向响应，不自动重放请求或跟随重定向。
 
-连接失败在响应头发出前返回 502，容量等待或上游 I/O 超时返回 504；响应已开始后发生错误则中断连接，避免把截断内容当作成功响应。下游关闭或服务器停机会取消上游操作，停机会等待代理会话排空。当前上游 URL 仅支持 HTTP，不能带查询或片段；WebSocket 升级通过 `SetWsForward` 单独注册。
+连接失败在响应头发出前返回 502，容量等待或上游 I/O 超时返回 504；响应已开始后发生错误则中断连接，避免把截断内容当作成功响应。下游关闭或服务器停机会取消上游操作，停机会等待代理会话排空。上游 URL 支持 `http://` 和 `https://`，不能带查询或片段；WebSocket 升级通过 `SetWsForward` 单独注册。
+
+HTTPS 默认使用系统 CA 并校验上游主机名。私有 CA 可通过 `ReverseProxyConfig::tls_context` 传入共享 `TlsClientContext`；校验失败返回 502，并按传输失败参与后端冷却。下游可以使用 HTTP 或 HTTPS。
 
 ## WebSocket 反向代理
 
@@ -88,7 +90,7 @@ server.SetWsForward("/socket", "ws://127.0.0.1:8080/chat");
 
 每个方向一次读取一条完整消息，并等待目标发送完成后继续读取，保留 text / binary 类型；控制帧由每一跳各自处理 Ping / Pong，关闭帧的状态码和原因会传递。`message_limit` 默认 16 MiB，必须为正，限制两个方向；下游接收还受服务器 `SetBodyLimit` 限制。会话没有空闲超时；下游断开或服务器停机时取消上游，并等待转发协程排空。
 
-当前仅支持 `ws://` 上游，不支持 URL 查询、片段、WSS、扩展协商或 WebSocket 压缩。
+支持 `ws://` 和 `wss://` 上游，下游也可使用 WS 或 WSS。`WsForwardConfig::tls_context` 配置 WSS 上游信任，默认验证系统 CA 和主机名；TLS 失败在下游升级前返回 502。URL 查询、片段、扩展协商或 WebSocket 压缩不受支持。
 
 ## 多上游负载均衡
 
@@ -117,7 +119,7 @@ server.SetWsForward("/socket", std::vector<mhttp::UpstreamBackend>{
 
 全部节点正在冷却或探测时返回 503。选中节点发生故障时，当前请求按原有规则返回 502/504 或中断已开始的响应，后续请求跳过该节点。不会自动向其他节点重放请求。取消探测会释放其名额，允许下一次请求立即探测；较早请求的成功结果不会覆盖后来的故障。
 
-列表必须非空，权重必须为正，归一化后重复的 origin + 基础路径会在注册时报错。HTTP 列表仅接受 `http://`，WebSocket 列表仅接受 `ws://`；URL 不能带查询或片段。原有单 URL 重载保留直接尝试上游的行为，冷却仅作用于后端列表重载。
+列表必须非空，权重必须为正，归一化后重复的 origin + 基础路径会在注册时报错，origin 包含传输协议。HTTP 列表接受 `http://` / `https://`，WebSocket 列表接受 `ws://` / `wss://`，同一组可混用明文和加密后端；URL 不能带查询或片段。原有单 URL 重载保留直接尝试上游的行为，冷却仅作用于后端列表重载。
 
 ## WebSocket 服务端
 
@@ -160,7 +162,9 @@ server.GetRouter().SetWsHandler(
 
 这两个客户端的操作在各自 strand 上执行，可以从其他 executor 发起；`IsOpen()` 提供线程安全的握手完成状态快照。WebSocket 压缩尚未移植。
 
-`WsClient` 的 `url::Scheme::Tls` 启用 WSS，并通过 `SetTlsContext` 复用 `TlsClientContext` 的系统或自定义 CA 信任；默认校验证书及主机名。连接超时也涵盖 TLS 握手。服务端启用 `TlsServerContext` 后，同一 WebSocket 路由通过 WSS 访问，关闭握手会完成 TLS 关闭。CONNECT 代理的 TLS 传输将在后续阶段接入。
+`WsClient` 的 `url::Scheme::Tls` 启用 WSS，并通过 `SetTlsContext` 复用 `TlsClientContext` 的系统或自定义 CA 信任；默认校验证书及主机名。连接超时也涵盖 TLS 握手。服务端启用 `TlsServerContext` 后，同一 WebSocket 路由通过 WSS 访问，关闭握手会完成 TLS 关闭。
+
+`ProxyClient` 的 `url::Scheme::Tls` 加密到代理的连接，在发送 CONNECT 前校验代理证书与主机名；同样用 `SetTlsContext` 配置自定义 CA。`SetTimeout` 也覆盖代理的 TLS 握手。建立隧道后的原始字节通过该 TLS 连接传输，隧道目标的应用协议由调用者处理。
 
 ## 测试
 
@@ -175,4 +179,5 @@ server.GetRouter().SetWsHandler(
 - `mcpp test load_balance`：HTTP / WebSocket 分配比例、最少活动请求、握手计数、故障冷却与单次探测、取消和并发分配。
 - `mcpp test tls`：HTTPS 客户端和服务端、证书与主机名校验、连接池与重定向、握手超时和停机。
 - `mcpp test wss`：加密 WebSocket 消息与控制帧、关闭状态、证书校验、超时取消和停机。
+- `mcpp test tls_proxy`：HTTPS/WSS 双向转发、混合后端、证书拒绝、HTTPS CONNECT 和加密下游断连取消。
 - `mcpp test`：全部回归测试。

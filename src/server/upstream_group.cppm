@@ -165,14 +165,15 @@ namespace mhttp::detail {
             std::int64_t total_weight{ 0 };
             for (auto const& backend : backends) {
                 auto parsed{ url::parse_url(backend.url) };
-                if (!parsed || !iequals(parsed->scheme, scheme) || parsed->has_query || backend.url.find('#') != std::string::npos || backend.weight == 0 || backend.weight > std::numeric_limits<std::int64_t>::max() / 2 - total_weight) {
-                    throw std::invalid_argument{ "mhttp: upstream group requires matching plain URLs and positive bounded weights" };
+                auto const secure_scheme{ scheme == "http" ? "https" : "wss" };
+                if (!parsed || (!iequals(parsed->scheme, scheme) && !iequals(parsed->scheme, secure_scheme)) || parsed->has_query || backend.url.find('#') != std::string::npos || backend.weight == 0 || backend.weight > std::numeric_limits<std::int64_t>::max() / 2 - total_weight) {
+                    throw std::invalid_argument{ "mhttp: upstream group requires matching HTTP or WebSocket URLs and positive bounded weights" };
                 }
                 while (!parsed->path.empty() && parsed->path.back() == '/') {
                     parsed->path.pop_back();
                 }
                 for (auto const& previous : m_backends) {
-                    if (iequals(previous.url.host, parsed->host) && previous.url.EffectivePort() == parsed->EffectivePort() && previous.url.path == parsed->path) {
+                    if (previous.url.Transport() == parsed->Transport() && iequals(previous.url.host, parsed->host) && previous.url.EffectivePort() == parsed->EffectivePort() && previous.url.path == parsed->path) {
                         throw std::invalid_argument{ "mhttp: duplicate upstream backend" };
                     }
                 }

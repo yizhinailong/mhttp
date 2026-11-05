@@ -94,6 +94,8 @@ namespace test_support {
         };                                        ///< Loopback listener.
         std::atomic<unsigned> m_connections{ 0 }; ///< Completed handshakes.
         std::atomic<bool> m_sni{ false };         ///< Observed localhost SNI.
+        std::atomic<bool> m_hold_seen{ false };   ///< Stalled request arrived.
+        std::atomic<bool> m_peer_closed{ false }; ///< Stalled connection was cancelled.
         std::jthread m_worker;                    ///< Runs peer coroutines.
 
     public:
@@ -123,6 +125,16 @@ namespace test_support {
 
         [[nodiscard]] auto SawSni() const -> bool { return m_sni.load(); }
 
+        /**
+         * @brief Report that a held request is ready for cancellation.
+         */
+        [[nodiscard]] auto SawHold() const -> bool { return m_hold_seen.load(); }
+
+        /**
+         * @brief Report closure of the connection serving the held request.
+         */
+        [[nodiscard]] auto SawDisconnect() const -> bool { return m_peer_closed.load(); }
+
     private:
         /**
          * @brief Serve one connection until EOF or a caller asks for a close.
@@ -143,6 +155,30 @@ namespace test_support {
                 HttpRequest request;
                 co_await http::async_read(stream, buffer, request, net::redirect_error(net::use_awaitable, ec));
                 if (ec) {
+                    co_return;
+                }
+                if (request.target() == "/hold") {
+                    m_hold_seen.store(true);
+                    std::array<char, 1> byte{};
+                    co_await stream.async_read_some(net::buffer(byte), net::redirect_error(net::use_awaitable, ec));
+                    m_peer_closed.store(static_cast<bool>(ec));
+                    co_return;
+                }
+                if (request.method() == http::verb::connect) {
+                    http::response<http::empty_body> established{ http::status::ok, 11 };
+                    co_await http::async_write(stream, established, net::redirect_error(net::use_awaitable, ec));
+                    if (ec) {
+                        co_return;
+                    }
+                    co_await net::async_write(stream, net::buffer("ready", 5), net::redirect_error(net::use_awaitable, ec));
+                    std::array<char, 4096> bytes{};
+                    while (!ec) {
+                        auto const size{ co_await stream.async_read_some(net::buffer(bytes), net::redirect_error(net::use_awaitable, ec)) };
+                        if (ec) {
+                            co_return;
+                        }
+                        co_await net::async_write(stream, net::buffer(bytes.data(), size), net::redirect_error(net::use_awaitable, ec));
+                    }
                     co_return;
                 }
                 HttpResponse response{ http::status::ok, 11 };

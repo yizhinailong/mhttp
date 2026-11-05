@@ -38,6 +38,7 @@ import :logging;
 import :url;
 import :headers;
 import :http_stream;
+import :tls;
 
 namespace mhttp::client {
 
@@ -52,8 +53,8 @@ export namespace mhttp::client {
      *
      * AsyncConnect() connects to the proxy, sends "CONNECT target", and on a 2xx answer turns the
      * connection into a raw tunnel to the target. Operations run on the client's own strand
-     * and may be started from any executor; do not overlap two reads or two writes. TLS to the
-     * proxy is not ported: an HTTPS proxy fails with net::error::operation_not_supported.
+     * and may be started from any executor; do not overlap two reads or two writes. HTTPS
+     * proxies verify the proxy certificate and host name before sending CONNECT.
      */
     class ProxyClient {
     private:
@@ -147,6 +148,11 @@ export namespace mhttp::client {
 
         [[nodiscard]] auto Logger() const -> std::shared_ptr<spdlog::logger>;
         auto SetLogger(std::shared_ptr<spdlog::logger> logger) -> void;
+
+        /**
+         * @brief Select trust for future HTTPS proxy connections; null uses system roots.
+         */
+        auto SetTlsContext(std::shared_ptr<TlsClientContext> context) -> void;
     };
 
 } // namespace mhttp::client
@@ -166,6 +172,7 @@ namespace mhttp::client {
         detail::LoggerHolder m_logger{ "mhttp.proxy_client" };                                    ///< Replaceable logger.
         std::atomic<std::chrono::steady_clock::duration> m_timeout{ std::chrono::seconds{ 30 } }; ///< Handshake limit.
         std::atomic<std::shared_ptr<HttpStream>> m_stream;                                        ///< Open tunnel; null when closed.
+        std::atomic<std::shared_ptr<TlsClientContext>> m_tls_context;                             ///< Trust for future HTTPS proxy connections.
         std::atomic<bool> m_open{ false };                                                        ///< Completed CONNECT snapshot.
         std::atomic<Status> m_status{ Status::unknown };                                          ///< Last CONNECT answer.
         beast::flat_buffer m_buffer;                                                              ///< Tunnel bytes read with the answer.
@@ -306,6 +313,13 @@ namespace mhttp::client {
             m_logger.SetLogger(std::move(logger));
         }
 
+        /**
+         * @brief Replace trust for the next CONNECT session.
+         */
+        auto SetTlsContext(std::shared_ptr<TlsClientContext> context) -> void {
+            m_tls_context.store(std::move(context));
+        }
+
     private:
         /**
          * @brief Connect to the proxy and exchange CONNECT; strand only.
@@ -329,11 +343,17 @@ namespace mhttp::client {
             }
             m_status.store(Status::unknown);
             m_buffer.clear();
+            std::shared_ptr<HttpStream> stream;
             if (m_scheme == url::Scheme::Tls) {
-                ec = net::error::operation_not_supported;
-                co_return;
+                auto prepared{ HttpStream::MakeTlsClient(m_strand, m_host, m_tls_context.load()) };
+                if (!prepared) {
+                    ec = prepared.error();
+                    co_return;
+                }
+                stream = std::move(*prepared);
+            } else {
+                stream = std::make_shared<HttpStream>(HttpStream::PlainStream{ m_strand });
             }
-            auto const stream{ std::make_shared<HttpStream>(HttpStream::PlainStream{ m_strand }) };
             m_stream.store(stream);
             BusyGuard const busy{ m_connecting };
             auto const timed_out{ std::make_shared<bool>(false) };
@@ -378,6 +398,10 @@ namespace mhttp::client {
                 }
             }
             check_cancelled();
+            if (!ec) {
+                co_await stream->AsyncClientHandshake(ec);
+                check_cancelled();
+            }
             if (ec) {
                 m_logger.GetLogger()->error("proxy connect {}:{} failed: {}", m_host, m_port, ec.message());
                 co_return;
@@ -508,6 +532,10 @@ namespace mhttp::client {
 
     auto ProxyClient::SetLogger(std::shared_ptr<spdlog::logger> logger) -> void {
         m_impl->SetLogger(std::move(logger));
+    }
+
+    auto ProxyClient::SetTlsContext(std::shared_ptr<TlsClientContext> context) -> void {
+        m_impl->SetTlsContext(std::move(context));
     }
 
 } // namespace mhttp::client

@@ -17,6 +17,7 @@ export module mhttp:ws_forward;
 
 import std;
 import :config;
+import :tls;
 import :error;
 import :strings;
 import :url;
@@ -41,6 +42,7 @@ export namespace mhttp {
         std::chrono::steady_clock::duration connect_timeout{ std::chrono::seconds{ 30 } }; ///< DNS, TCP, and handshake deadline.
         std::uint64_t message_limit{ 16 * 1024 * 1024 };                                   ///< Maximum complete message bytes in either direction; must be positive.
         UpstreamGroupConfig balancing;                                                     ///< Backend-list selection and passive recovery.
+        std::shared_ptr<TlsClientContext> tls_context;                                     ///< WSS upstream trust; null uses system roots.
     };
 
 } // namespace mhttp
@@ -73,9 +75,11 @@ namespace mhttp::detail {
         WsForwardState(
             std::shared_ptr<Connection> connection,
             UpstreamLease backend,
-            std::uint64_t message_limit
-        ) : m_executor{ connection->Executor() }, m_http{ std::move(connection) }, m_backend{ std::move(backend) }, m_upstream{ m_executor, m_backend.Url().host, m_backend.Url().EffectivePort() }, m_watch_done{ m_executor }, m_reader_done{ m_executor } {
+            std::uint64_t message_limit,
+            std::shared_ptr<TlsClientContext> tls_context
+        ) : m_executor{ connection->Executor() }, m_http{ std::move(connection) }, m_backend{ std::move(backend) }, m_upstream{ m_executor, m_backend.Url().host, m_backend.Url().EffectivePort(), m_backend.Url().Transport() }, m_watch_done{ m_executor }, m_reader_done{ m_executor } {
             m_upstream.SetMessageLimit(message_limit);
+            m_upstream.SetTlsContext(std::move(tls_context));
         }
 
         /**
@@ -283,13 +287,13 @@ namespace mhttp::detail {
                 co_return std::unexpected{ Status::service_unavailable };
             }
             auto const& upstream{ backend->Url() };
-            auto state{ std::make_shared<WsForwardState>(get_impl(request).GetConnection(), std::move(*backend), m_config.message_limit) };
+            auto state{ std::make_shared<WsForwardState>(get_impl(request).GetConnection(), std::move(*backend), m_config.message_limit, m_config.tls_context) };
             auto headers{ proxy_headers(request.Base()) };
             for (auto const field : { Field::sec_websocket_key, Field::sec_websocket_accept, Field::sec_websocket_version, Field::sec_websocket_extensions, Field::content_length, Field::expect }) {
                 headers.Erase(field);
             }
             headers.Erase("Forwarded");
-            headers.Set(Field::host, m_config.preserve_host ? std::string{ request[Field::host] } : url::make_host_value(upstream.host, upstream.EffectivePort(), url::Scheme::Plain));
+            headers.Set(Field::host, m_config.preserve_host ? std::string{ request[Field::host] } : url::make_host_value(upstream.host, upstream.EffectivePort(), upstream.Transport()));
             headers.Set("X-Forwarded-For", request.GetClientIp().to_string());
             headers.Set("X-Forwarded-Host", request[Field::host]);
             headers.Set("X-Forwarded-Proto", request.IsTls() ? "https" : "http");

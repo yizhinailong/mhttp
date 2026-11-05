@@ -25,6 +25,7 @@ export module mhttp:reverse_proxy;
 
 import std;
 import :config;
+import :tls;
 import :error;
 import :strings;
 import :url;
@@ -54,6 +55,7 @@ export namespace mhttp {
         std::uint32_t header_limit{ 64 * 1024 };                                          ///< Maximum upstream response header bytes.
         std::uint64_t body_limit{ 1024ULL * 1024 * 1024 };                                ///< Maximum upstream response body bytes.
         UpstreamGroupConfig balancing;                                                    ///< Backend-list selection and passive recovery.
+        std::shared_ptr<TlsClientContext> tls_context;                                    ///< HTTPS upstream trust; null uses system roots.
     };
 
 } // namespace mhttp
@@ -168,7 +170,7 @@ namespace mhttp::detail {
                 if (m_cancelled) {
                     co_return client::HttpClientPool::ClientHandle{ net::error::operation_aborted };
                 }
-                co_return co_await m_pool->AsyncAcquire(upstream.host, upstream.EffectivePort(), url::Scheme::Plain, config.acquire_timeout); }, net::bind_cancellation_slot(m_acquire_cancel.slot(), net::redirect_error(net::use_awaitable, ec)));
+                co_return co_await m_pool->AsyncAcquire(upstream.host, upstream.EffectivePort(), upstream.Transport(), config.acquire_timeout); }, net::bind_cancellation_slot(m_acquire_cancel.slot(), net::redirect_error(net::use_awaitable, ec)));
             if (m_cancelled) {
                 co_return;
             }
@@ -183,7 +185,7 @@ namespace mhttp::detail {
             headers.Erase(Field::content_length);
             headers.Erase(Field::expect);
             headers.Erase("Forwarded");
-            headers.Set(Field::host, config.preserve_host && !request[Field::host].empty() ? std::string{ request[Field::host] } : url::make_host_value(upstream.host, upstream.EffectivePort(), url::Scheme::Plain));
+            headers.Set(Field::host, config.preserve_host && !request[Field::host].empty() ? std::string{ request[Field::host] } : url::make_host_value(upstream.host, upstream.EffectivePort(), upstream.Transport()));
             headers.Set("X-Forwarded-For", request.GetClientIp().to_string());
             headers.Set("X-Forwarded-Host", request[Field::host]);
             headers.Set("X-Forwarded-Proto", request.IsTls() ? "https" : "http");
@@ -329,6 +331,7 @@ namespace mhttp::detail {
             params.max_size = config.max_connections;
             params.timeout_policy = client::TimeoutPolicy::Step;
             params.timeout = config.timeout;
+            params.tls_context = config.tls_context;
             m_pool = std::make_shared<client::HttpClientPool>(executor, params);
         }
 

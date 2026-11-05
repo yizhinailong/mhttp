@@ -673,7 +673,7 @@ namespace {
         for (auto const& backends : std::vector<std::vector<UpstreamBackend>>{
                  {},
                  { { "http://localhost", 0 } },
-                 { { "https://localhost" } },
+                 { { "wss://localhost" } },
                  { { "http://localhost?q=1" } },
                  { { "http://localhost", 1 }, { "HTTP://LOCALHOST:80/", 2 } }
         }) {
@@ -691,7 +691,7 @@ namespace {
         } catch (std::invalid_argument const&) {
             rejected = true;
         }
-        check(rejected, "WebSocket backend lists must require ws:// URLs");
+        check(rejected, "WebSocket backend lists must require ws:// or wss:// URLs");
         mhttp::ReverseProxyConfig config;
         config.balancing.failure_cooldown = -std::chrono::seconds{ 1 };
         rejected = false;

@@ -277,9 +277,9 @@ namespace {
             check(ec == mhttp::Error::HttpStatus && tunnel.HttpStatus() == Status::proxy_authentication_required, "a refused CONNECT must report the proxy's status");
             check(!tunnel.IsOpen(), "a refused CONNECT must leave the tunnel closed");
 
-            ProxyClient tls{ ioc, "127.0.0.1", proxy.Port(), mhttp::url::Scheme::Tls };
+            ProxyClient tls{ ioc, "127.0.0.1", 1, mhttp::url::Scheme::Tls };
             co_await tls.AsyncConnect("example.com:443", mhttp::Headers{}, ec);
-            check(ec == net::error::operation_not_supported, "a TLS proxy must fail clearly until TLS is ported");
+            check(ec && !tls.IsOpen(), "an unreachable HTTPS proxy must fail without opening a tunnel");
         });
     }
 
